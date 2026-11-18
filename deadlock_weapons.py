@@ -1008,7 +1008,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
     return dst
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description="Edit a decrypted Deadlock ship bundle: clone / resize turrets, squadron and munition slots, ship systems and abilities.\nNothing is changed unless you pass its option. DLL patches live in deadlock_dll.py.")
     g_weap = ap.add_argument_group("Weapons - cloning and resizing turrets")
     g_slot = ap.add_argument_group("Squadron / munition slots")
@@ -1065,6 +1065,11 @@ LIMITS
     g_abil.add_argument("--stealth-start", choices=["on", "off"], default="on", help="--stealth: start battles stealthed (Orion: on)")
     g_slot.add_argument("--slot-parts", default="buttons,bays,icons", help="(for testing) which parts --fighter-slots adds: any of buttons, bays, icons")
     g_out.add_argument("--encrypt", action="store_true", help="XOR-encrypt the output so the game can load it")
+    return ap
+
+
+def main():
+    ap = build_parser()
     a = ap.parse_args()
     off = tuple(float(x) for x in a.offset.split(","))
     tmp = a.dst + ".tmp" if a.encrypt else a.dst
