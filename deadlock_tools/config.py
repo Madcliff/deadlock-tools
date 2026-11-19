@@ -82,8 +82,8 @@ def setting(key, override=None, required=True):
         return os.path.abspath(os.path.expanduser(override))
     value = resolve(load().get(key, ""))
     if not value and required:
-        raise SystemExit("no %s set: pass --%s PATH, or save it once with:  python -m deadlock_tools config --%s PATH"
-                         % (HELP[key], key, key))
+        raise SystemExit("no '%s' path set (%s): pass --%s PATH, or save it once with:  python -m deadlock_tools config --%s PATH"
+                         % (key, HELP[key], key, key))
     return value
 
 

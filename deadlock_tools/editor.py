@@ -249,15 +249,27 @@ class Project:
                             "default": None if a.default in (None, False) else str(a.default), "metavar": a.metavar or ""})
         return out
 
-    def run_bundle(self, bundle, opts):
+    def bundle_src(self, bundle):
+        """(path, file name) of the bundle chosen in the Bundles tab"""
         if os.path.isabs(bundle):                                      # a path picked with the Browse button
             if not os.path.isfile(bundle): raise ValueError("bundle file not found: %s" % bundle)
-            src = bundle; bundle = os.path.basename(bundle)
-        elif bundle in self.bundle_files(): src = os.path.join(self.bundles, bundle)
-        else: raise ValueError("choose a bundle file")
+            return bundle, os.path.basename(bundle)
+        if bundle in self.bundle_files(): return os.path.join(self.bundles, bundle), bundle
+        raise ValueError("choose a bundle file")
+
+    def run_xor(self, bundle, mode):
+        """the 'xor' tool on one bundle: decrypt -> work/decrypted/, encrypt -> out/bundles/, check = report only"""
+        if mode not in ("decrypt", "encrypt", "check"): raise ValueError("bad mode")
+        src, _name = self.bundle_src(bundle)
+        cmd = tool_cmd("xor") + [mode, src, "-o", self.out]
+        with self.lock: r = run_cmd(cmd, 300)
+        return {"ok": r.returncode == 0, "output": r.stdout + r.stderr, "cmd": " ".join(cmd[3:])}
+
+    def run_bundle(self, bundle, opts):
+        src, bundle = self.bundle_src(bundle)
         ap = wmod.build_parser()
         stem = bundle[:-4] if bundle.endswith(".dec") else bundle
-        dst = os.path.join(self.bundle_out, stem + (".dec" if opts.get("no_encrypt") else ""))
+        dst = None if opts.get("list_mounts") else os.path.join(self.bundle_out, stem + (".dec" if opts.get("no_encrypt") else ""))
         cmd = tool_cmd("weapons") + [src, "-o", self.out] + (["--bundles", self.bundles] if self.bundles else [])
         for a in ap._actions:
             v = opts.get(a.dest)
@@ -285,12 +297,22 @@ class Project:
                           ("command_step", "--command-step"), ("command_first_rank", "--command-first-rank")):
             if str(o.get(key, "")).strip(): cmd += [flag, str(o[key]).strip()]
         if o.get("munition_load") in (True, "true", 1, "1"): cmd.append("--munition-load")
+        if o.get("fresh") in (True, "true", 1, "1"): cmd.append("--fresh")
         if not any(c.startswith("--") and c not in ("--command-step", "--command-first-rank") for c in cmd[base:]): raise ValueError("fill in at least one patch value")
         with self.lock: r = run_cmd(cmd, 300)
         return {"ok": r.returncode == 0, "output": r.stdout + r.stderr, "dst": dst}
 
-PATH_KEYS = ("levels", "dll", "bundles", "out")
-STATE = {"cfg": {"levels": "", "dll": "", "bundles": "", "out": config.resolve(config.DEFAULTS["out"])}, "P": None, "error": ""}
+    def dll_revert(self, o):
+        """undo patches in out/dll/ (the ticked ones, or all of them when none is ticked)"""
+        dst = os.path.join(self.dll_out, os.path.basename(self.dll))
+        cmd = tool_cmd("dll") + ["revert", self.dll, "-o", self.out]
+        for key, flag in (("armour", "--armour"), ("revive", "--revive"), ("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"), ("munition_load", "--munition-load")):
+            if o.get(key) in (True, "true", 1, "1"): cmd.append(flag)
+        with self.lock: r = run_cmd(cmd, 300)
+        return {"ok": r.returncode == 0, "output": r.stdout + r.stderr, "dst": dst}
+
+PATH_KEYS = ("levels", "dll", "bundles", "out", "work")
+STATE = {"cfg": {"levels": "", "dll": "", "bundles": "", "out": config.resolve(config.DEFAULTS["out"]), "work": config.resolve(config.DEFAULTS["work"])}, "P": None, "error": ""}
 
 
 def _need(v, k, what):
@@ -378,7 +400,7 @@ def load_cfg():
 def configure(cfg, save=True):
     """validate the four paths and (re)load the level data; the GUI calls this from the Settings tab"""
     cfg = {k: os.path.abspath(os.path.expanduser(v)) if v else "" for k, v in ((k, (cfg.get(k) or "").strip()) for k in PATH_KEYS)}
-    cfg["out"] = cfg["out"] or config.resolve(config.DEFAULTS["out"])
+    cfg["out"] = cfg["out"] or config.resolve(config.DEFAULTS["out"]); cfg["work"] = cfg["work"] or config.resolve(config.DEFAULTS["work"])
     if not cfg["levels"] or not os.path.exists(cfg["levels"]): raise ValueError("level data folder not found: %r" % cfg["levels"])
     if not os.path.isfile(cfg["dll"]): raise ValueError("Assembly-CSharp.dll not found: %r" % cfg["dll"])
     if cfg["bundles"] and not os.path.isdir(cfg["bundles"]): raise ValueError("ship asset folder not found: %r" % cfg["bundles"])
@@ -451,6 +473,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/apply": return self.send({"log": P.apply(body["edits"], body.get("fresh", False))})
             if self.path == "/api/bundle/run": return self.send(P.run_bundle(body["bundle"], body["options"]))
             if self.path == "/api/dll/patch": return self.send(P.dll_patch(body))
+            if self.path == "/api/dll/revert": return self.send(P.dll_revert(body))
+            if self.path == "/api/xor": return self.send(P.run_xor(body["bundle"], body["mode"]))
             if self.path == "/api/tools/run": return self.send(P.run_tool(body["id"], body.get("values", {}), body.get("fresh", False)))
             self.send({"error": "not found"}, 404)
         except BaseException as e: self.send({"error": str(e)}, 400)
@@ -601,7 +625,9 @@ async function loadBundles(){const box=$('#tab-bundles');if(box.dataset.ok)retur
  const norm=x=>x.toLowerCase().replace(/[^a-z0-9]/g,'');
  if(state.cur){const m=state.info.bundles.find(b=>norm(b.replace(/[.]dec$/,''))===norm(state.cur));if(m){sel.value=m;path.value=joinPath(state.info.bundle_dir,m)}}
  const groups={};bundleForm.forEach(o=>(groups[o.group]=groups[o.group]||[]).push(o));
- box.replaceChildren(el('div',{class:'card'},el('h3',{},'Ship asset (bundle)'),el('div',{class:'row'},path,pick),el('div',{class:'row',style:'margin-top:8px'},sel,el('span',{class:'hint'},'Each run starts from the original bundle and writes to '+state.info.out+'/bundles/. The file matching the open ship is preselected when its name matches.'))));
+ box.replaceChildren(el('div',{class:'card'},el('h3',{},'Ship asset (bundle)'),el('div',{class:'row'},path,pick),el('div',{class:'row',style:'margin-top:8px'},sel,el('span',{class:'hint'},'Each run starts from the original bundle and writes to '+state.info.out+'/bundles/. The file matching the open ship is preselected when its name matches.'))),
+  el('div',{class:'card'},el('h3',{},'Decrypt / encrypt'),el('div',{class:'row'},...[['decrypt','Decrypt (to '+state.info.work+'/decrypted/)'],['encrypt','Encrypt (to '+state.info.out+'/bundles/)'],['check','Check']].map(([m,l])=>el('button',{class:'sec',onclick:()=>runXor(m)},l)),el('span',{id:'xmsg',class:'hint'})),
+   el('p',{class:'hint',style:'margin:6px 0 0'},'Works on the bundle chosen above. Not needed before Run (encrypted bundles are decrypted automatically); use Encrypt for a result made with --no-encrypt.'),el('pre',{id:'xout',hidden:true})));
  for(const [g,os] of Object.entries(groups)){box.append(el('div',{class:'card'},el('h3',{},g),el('div',{class:'grid'},os.map(o=>{let i;
   if(o.kind==='bool'){i=el('input',{type:'checkbox','data-d':o.dest});return el('label',{class:'f chk',title:o.help},i,o.flag)}
   if(o.kind==='choice'){i=el('select',{'data-d':o.dest},[el('option',{value:''},'(default)'),...o.choices.map(c=>el('option',{value:c},c))])}
@@ -609,14 +635,18 @@ async function loadBundles(){const box=$('#tab-bundles');if(box.dataset.ok)retur
   else i=el('input',{type:'text','data-d':o.dest,placeholder:o.default||o.metavar||''});
   return el('label',{class:'f',title:o.help},o.flag,i,el('span',{class:'orig'},o.help.slice(0,110)+(o.help.length>110?'...':'')))}))))}
  box.append(el('div',{class:'row'},el('button',{class:'pri',id:'brun',onclick:runBundle},'Run'),el('span',{id:'bmsg',class:'hint'})),el('pre',{id:'bout',hidden:true}))}
+async function runXor(mode){const m=$('#xmsg');m.className='hint';m.textContent='running...';
+ try{const r=await api('/api/xor',{bundle:$('#bpath').value,mode});$('#xout').hidden=false;$('#xout').textContent=r.cmd+'\n\n'+r.output;m.textContent=r.ok?'done':'failed';m.className=r.ok?'msg-ok':'msg-bad'}catch(e){m.textContent=e.message;m.className='msg-bad'}}
 async function runBundle(){const opts={};document.querySelectorAll('#tab-bundles [data-d]').forEach(i=>{opts[i.dataset.d]=i.type==='checkbox'?i.checked:i.value});
- $('#brun').disabled=true;$('#bmsg').textContent='running...';try{const r=await api('/api/bundle/run',{bundle:$('#bpath').value,options:opts});$('#bout').hidden=false;$('#bout').textContent=r.cmd+'\n\n'+r.output;$('#bmsg').textContent=r.ok?'done -> '+r.dst:'failed';$('#bmsg').className=r.ok?'msg-ok':'msg-bad'}catch(e){$('#bmsg').textContent=e.message;$('#bmsg').className='msg-bad'}$('#brun').disabled=false}
+ $('#brun').disabled=true;$('#bmsg').textContent='running...';try{const r=await api('/api/bundle/run',{bundle:$('#bpath').value,options:opts});$('#bout').hidden=false;$('#bout').textContent=r.cmd+'\n\n'+r.output;$('#bmsg').textContent=r.ok?(r.dst?'done -> '+r.dst:'done'):'failed';$('#bmsg').className=r.ok?'msg-ok':'msg-bad'}catch(e){$('#bmsg').textContent=e.message;$('#bmsg').className='msg-bad'}$('#brun').disabled=false}
 async function loadDll(){const box=$('#tab-dll');if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}const fld=(id,l,h)=>el('label',{class:'f'},l,el('input',{type:'number',id,step:'any'}),el('span',{class:'orig'},h));
  if(!box.dataset.ok){box.dataset.ok=1;box.replaceChildren(el('div',{class:'card'},el('h3',{},'Current DLL'),el('pre',{id:'dchk'},'checking...')),
-  el('div',{class:'card'},el('h3',{},'Patch'),el('div',{class:'grid'},fld('d_armour','Armour regen factor','Ships built with --armour-regen (armour per tick = hull rate x factor)'),fld('d_revive','Squadron revive (turns)','0 = rebuild at once'),fld('d_rank','Commander max rank','Game default 10'),fld('d_nodes','Command-tree nodes','Game default 4; 10 = one per rank 1-10'),fld('d_step','Ranks between nodes','default 1'),fld('d_first','First node at rank','default 1'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix')),
-   el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'pri',id:'dgo',onclick:patchDll},'Patch DLL'),el('span',{id:'dmsg',class:'hint'}))),el('pre',{id:'dout',hidden:true}))}
+  el('div',{class:'card'},el('h3',{},'Patch'),el('div',{class:'grid'},fld('d_armour','Armour regen factor','Ships built with --armour-regen (armour per tick = hull rate x factor)'),fld('d_revive','Squadron revive (turns)','0 = rebuild at once'),fld('d_rank','Commander max rank','Game default 10'),fld('d_nodes','Command-tree nodes','Game default 4; 10 = one per rank 1-10'),fld('d_step','Ranks between nodes','default 1'),fld('d_first','First node at rank','default 1'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches normally add to the DLL already in the output folder'},el('input',{type:'checkbox',id:'d_fresh'}),'Start from the original DLL (drops earlier patches)')),
+   el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'pri',id:'dgo',onclick:patchDll},'Patch DLL'),el('span',{id:'dmsg',class:'hint'}))),
+  el('div',{class:'card'},el('h3',{},'Revert'),el('div',{class:'grid'},...[['r_armour','Armour regen'],['r_revive','Squadron revive'],['r_rank','Max rank (back to 10)'],['r_nodes','Command-tree nodes'],['r_mun','Munition load fix']].map(([id,l])=>el('label',{class:'f chk'},el('input',{type:'checkbox',id}),l))),
+   el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'sec',id:'rgo',onclick:revertDll},'Revert ticked (none ticked = all)'),el('span',{id:'rmsg',class:'hint'}))),el('pre',{id:'dout',hidden:true}))}
  try{const r=await api('/api/dll/check');$('#dchk').textContent=r.output+'\n(source: '+r.source+')'}catch(e){$('#dchk').textContent=e.message}}
-async function patchDll(){$('#dgo').disabled=true;try{const r=await api('/api/dll/patch',{armour_factor:$('#d_armour').value,revive_turns:$('#d_revive').value,max_rank:$('#d_rank').value,command_nodes:$('#d_nodes').value,command_step:$('#d_step').value,command_first_rank:$('#d_first').value,munition_load:$('#d_mun').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;$('#dmsg').textContent=r.ok?'written to '+r.dst+' - copy it over BSG_Data/Managed/Assembly-CSharp.dll':'failed';$('#dmsg').className=r.ok?'msg-ok':'msg-bad';loadDll()}catch(e){$('#dmsg').textContent=e.message;$('#dmsg').className='msg-bad'}$('#dgo').disabled=false}
+async function patchDll(){$('#dgo').disabled=true;try{const r=await api('/api/dll/patch',{armour_factor:$('#d_armour').value,revive_turns:$('#d_revive').value,max_rank:$('#d_rank').value,command_nodes:$('#d_nodes').value,command_step:$('#d_step').value,command_first_rank:$('#d_first').value,munition_load:$('#d_mun').checked,fresh:$('#d_fresh').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;$('#dmsg').textContent=r.ok?'written to '+r.dst+' - copy it over BSG_Data/Managed/Assembly-CSharp.dll':'failed';$('#dmsg').className=r.ok?'msg-ok':'msg-bad';loadDll()}catch(e){$('#dmsg').textContent=e.message;$('#dmsg').className='msg-bad'}$('#dgo').disabled=false}
 
 const joinPath=(a,b)=>a.endsWith('/')?a+b:a+'/'+b;
 function showTab(t){document.querySelector('nav button[data-t='+t+']').click()}
@@ -633,7 +663,8 @@ function pickPath({files=false,start='',title='Choose'}){return new Promise(res=
  pth.addEventListener('keydown',e=>{if(e.key==='Enter')go(pth.value)});
  dlg.append(el('h3',{},title),el('div',{class:'row'},pth,el('button',{class:'sec',onclick:()=>go(pth.value)},'Go')),list,
   el('div',{class:'row'},files?'':el('button',{class:'pri',onclick:()=>done(cur)},'Use this folder'),el('button',{class:'sec',onclick:()=>done(null)},'Cancel'),files?el('span',{class:'hint'},'Click a file to choose it.'):''));
- back.append(dlg);back.addEventListener('mousedown',e=>{if(e.target===back)done(null)});document.body.append(back);go(start||state.info.home)})}
+ back.append(dlg);back.addEventListener('mousedown',e=>{if(e.target===back)done(null)});document.body.append(back);go(start||state.info.home)})}async function revertDll(){const m=$('#rmsg');$('#rgo').disabled=true;try{const r=await api('/api/dll/revert',{armour:$('#r_armour').checked,revive:$('#r_revive').checked,max_rank:$('#r_rank').checked,command_nodes:$('#r_nodes').checked,munition_load:$('#r_mun').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;m.textContent=r.ok?'written to '+r.dst:'failed';m.className=r.ok?'msg-ok':'msg-bad';loadDll()}catch(e){m.textContent=e.message;m.className='msg-bad'}$('#rgo').disabled=false}
+
 function loadSettings(){const box=$('#tab-settings'),I=state.info;
  const row=(id,label,hint,val,files)=>{const inp=el('input',{type:'text',id,value:val||'',style:'flex:1;min-width:260px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'});
   return el('div',{class:'card'},el('h3',{},label),el('div',{class:'row'},inp,el('button',{class:'sec',onclick:async()=>{const r=await pickPath({files,start:inp.value||I.home,title:label});if(r)inp.value=r}},'Browse...')),el('p',{class:'hint',style:'margin:6px 0 0'},hint))};
@@ -641,10 +672,11 @@ function loadSettings(){const box=$('#tab-settings'),I=state.info;
   row('s_levels','Level data folder','The folder with the level files (level0, level5 ...). Every file that holds the ship table is edited. Results go to the output folder and the originals are never touched.',I.levels,false),
   row('s_dll','Game DLL (Assembly-CSharp.dll)','Gives the field layouts. Use the DLL from the same game version as the level files.',I.dll,true),
   row('s_bundles','Ship asset folder (optional)','Folder with ship bundles for the Bundles tab. Encrypted game bundles are decrypted automatically. Any single bundle file can also be picked there.',I.bundles,false),
+  row('s_work','Work folder','Scratch space: decrypted copies of bundles go to its decrypted/ sub-folder.',I.work,false),
   row('s_out','Output folder','Where edited files go: its levels/, dll/ and bundles/ sub-folders, the same places the command-line tools use, so all edits stack.',I.out,false),
   el('div',{class:'row'},el('button',{class:'pri',id:'s_save',onclick:saveSettings},'Save and load'),el('span',{id:'s_msg',class:I.error?'msg-bad':'hint'},I.error||'')))}
 async function saveSettings(){const m=$('#s_msg');$('#s_save').disabled=true;m.className='hint';m.textContent='loading the level data (about 15 seconds)...';
- try{state.info=await api('/api/config',{levels:$('#s_levels').value,dll:$('#s_dll').value,bundles:$('#s_bundles').value,out:$('#s_out').value});
+ try{state.info=await api('/api/config',{levels:$('#s_levels').value,dll:$('#s_dll').value,bundles:$('#s_bundles').value,out:$('#s_out').value,work:$('#s_work').value});
   state.pending={};state.cur=null;state.data=null;$('#view').replaceChildren(el('p',{class:'hint'},'Pick a ship on the left.'));
   for(const t of ['bundles','dll','tools'])delete $('#tab-'+t).dataset.ok;await loadShips();updPend();m.className='msg-ok';m.textContent='loaded '+state.info.tables+' level file(s) with the ship table.';showTab('ships')}
  catch(e){m.className='msg-bad';m.textContent=e.message}$('#s_save').disabled=false}
