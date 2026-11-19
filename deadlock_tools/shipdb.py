@@ -1101,6 +1101,9 @@ def main():
         run(a, chain_source(a, a.level0, a.out), os.path.join(a.out, os.path.basename(a.level0)))
     else:
         level0 = a.level0 if a.cmd in ("fleeticons", "fleeticon") else ship_table_file(a)
+        if a.cmd in ("list", "show", "vet") and not a.fresh:          # show the current state: your edits in out/levels/ if there are any (like the GUI)
+            cand = os.path.join(a.out, os.path.basename(level0))
+            if os.path.isfile(cand) and not config.same_file(cand, level0): print("(showing your edited copy %s; --fresh shows the original)" % cand); level0 = cand
         run(a, level0, os.path.join(a.out, os.path.basename(level0 or "")))
 
 
