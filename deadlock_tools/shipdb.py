@@ -4,68 +4,74 @@ BSG Deadlock ship database tool.
 
 Reads the ship / munition / blueprint tables out of the game's level files using the field layout from
 Assembly-CSharp.dll (names come from the DLL, nothing is guessed) and edits them. Originals are never touched:
-results go to a NEW folder (-o <dir>, default patched_out/).
+results go to out/levels/ under the game's file names.
 
 ARGUMENTS
-  Most commands take a level file, a comma-separated list, or a FOLDER. With a folder, every level file that holds the
-  table is patched (the game ships ~10 identical copies of the ship database, so use a folder).
-  Argument order: ship commands   <cmd> <levels> <dll> ...      munition / blueprint / fleeticon commands   <cmd> <dll> <levels> ...
+  python -m deadlock_tools shipdb <command> [command arguments] [--levels PATH] [--dll PATH] [-o DIR] [--fresh]
+  --levels and --dll default to the paths saved in deadlock.json ('config'), so they are usually left out.
+  --levels takes the game's level folder (normal), a single level file, or a comma-separated list. With a folder, every
+  level file that holds the table is patched (the game ships ~10 identical copies of the ship database). Read-only
+  ship commands (list / show / vet) use the first level file that has the ship table.
+  (The old form '<command> <levels> <dll> ...', in either order, is still accepted.)
 
 COMMANDERS (ranks / fleet-size traits; DataTables in the level files)
-  python deadlock_shipdb.py commanders    folder Assembly-CSharp.dll                      (show ranks, XP, leadership interval, trait counts)
-  python deadlock_shipdb.py fixspecs      folder Assembly-CSharp.dll [--revert-specs]     (repair the base-game Tactician (subsystem 0) captain-skill list, see below)
-  python deadlock_shipdb.py setcommanders folder Assembly-CSharp.dll --add 10 --every-level   (ranks 11-20, a fleet-size trait at every rank; continues from your earlier edits in patched_out like the other commands, --fresh starts over;
-        then patch the DLL: python deadlock_dll.py patch Assembly-CSharp.dll --max-rank 20 --command-nodes 10
+  python -m deadlock_tools shipdb commanders                         (show ranks, XP, leadership interval, trait counts)
+  python -m deadlock_tools shipdb fixspecs      [--revert-specs]     (repair the base-game Tactician (subsystem 0) captain-skill list, see below)
+  python -m deadlock_tools shipdb setcommanders --add 10 --every-level   (ranks 11-20, a fleet-size trait at every rank; continues from your earlier edits in out/levels like the other commands, --fresh starts over;
+        then patch the DLL: python -m deadlock_tools dll patch --max-rank 20 --command-nodes 10
         (the skill tree's node count is hard-coded in the DLL: without --command-nodes the Command column stays at 4 nodes; 10 = one per rank 1-10). -o sets the output folder)
 
 SHIPS
-  python deadlock_shipdb.py list     level0 Assembly-CSharp.dll
-  python deadlock_shipdb.py show     level0 Assembly-CSharp.dll "viper mk1"
-  python deadlock_shipdb.py vet      level0 Assembly-CSharp.dll ["viper mk1"]                 (veterancy ranks)
-  python deadlock_shipdb.py set      folder Assembly-CSharp.dll "Colonial Mercury" MunitionSlots 4
-  python deadlock_shipdb.py set      folder Assembly-CSharp.dll "Colonial Mercury" FighterSlots 5       (carrier slots; Mercury default 3 fighter + 1 support)
-  python deadlock_shipdb.py set      folder Assembly-CSharp.dll "Colonial Mercury" UtilityFighterSlots 1
-        Carrier/munition slot counts also need the ship model changed: run deadlock_weapons.py with the same numbers
-        (--fighter-slots 5 --utility-slots 1 --munition-slots 4). The Fighters radial menu holds at most 8 launch buttons in total (--split-squadrons in deadlock_weapons.py lifts that per submenu).
-  python deadlock_shipdb.py setvet   folder Assembly-CSharp.dll "viper mk1" 4 SquadronRepair 1.5
-  python deadlock_shipdb.py addvet   folder Assembly-CSharp.dll "Colonial Mercury" 2 FlakDamage 0.1   (ADD an effect to a rank; creates the rank if missing; existing effect = overwritten)
-  python deadlock_shipdb.py removevet folder Assembly-CSharp.dll "Colonial Mercury" 2 FlakDamage     (REMOVE an effect from a rank; use "all" instead of the name to clear the rank)
-  python deadlock_shipdb.py copyvet  folder Assembly-CSharp.dll "Colonial Mercury" "Jupiter Mk2"   (copy ALL ranks, even empty)
-  python deadlock_shipdb.py setxp    folder Assembly-CSharp.dll 2 10                          (XP needed for rank 2)
+  python -m deadlock_tools shipdb list     
+  python -m deadlock_tools shipdb show     "viper mk1"
+  python -m deadlock_tools shipdb vet      ["viper mk1"]                 (veterancy ranks)
+  python -m deadlock_tools shipdb set      "Colonial Mercury" MunitionSlots 4
+  python -m deadlock_tools shipdb set      "Colonial Mercury" FighterSlots 5       (carrier slots; Mercury default 3 fighter + 1 support)
+  python -m deadlock_tools shipdb set      "Colonial Mercury" UtilityFighterSlots 1
+        Carrier/munition slot counts also need the ship model changed: run weapons with the same numbers
+        (--fighter-slots 5 --utility-slots 1 --munition-slots 4). The Fighters radial menu holds at most 8 launch buttons in total (--split-squadrons in weapons lifts that per submenu).
+  python -m deadlock_tools shipdb setvet   "viper mk1" 4 SquadronRepair 1.5
+  python -m deadlock_tools shipdb addvet   "Colonial Mercury" 2 FlakDamage 0.1   (ADD an effect to a rank; creates the rank if missing; existing effect = overwritten)
+  python -m deadlock_tools shipdb removevet "Colonial Mercury" 2 FlakDamage     (REMOVE an effect from a rank; use "all" instead of the name to clear the rank)
+  python -m deadlock_tools shipdb copyvet  "Colonial Mercury" "Jupiter Mk2"   (copy ALL ranks, even empty)
+  python -m deadlock_tools shipdb setxp    2 10                          (XP needed for rank 2)
 
 MUNITIONS
-  python deadlock_shipdb.py munitions   Assembly-CSharp.dll folder                            (list types: capacity, salvo size, supply cost ...)
-  python deadlock_shipdb.py setmunition Assembly-CSharp.dll folder "colonial guided" MaxMissiles 80 [StandardSalvoSize 6 ...]
+  python -m deadlock_tools shipdb munitions                              (list types: capacity, salvo size, supply cost ...)
+  python -m deadlock_tools shipdb setmunition "colonial guided" MaxMissiles 80 [StandardSalvoSize 6 ...]
         Editable: StandardSalvoSize MaxMissiles HasUnlimitedMunitions SupplyCostPerMunition SurvivalCostPerMunition PointValue
 
 BLUEPRINTS / RESEARCH
-  python deadlock_shipdb.py blueprints   Assembly-CSharp.dll folder                           (list research unlocks per campaign)
-  python deadlock_shipdb.py addblueprint Assembly-CSharp.dll folder "Colonial Mercury" [--cost 4000] [--like "Jupiter Mk2"]
+  python -m deadlock_tools shipdb blueprints                             (list research unlocks per campaign)
+  python -m deadlock_tools shipdb addblueprint "Colonial Mercury" [--cost 4000] [--like "Jupiter Mk2"]
                                          [--campaigns 2,3,4,5] [--mission N] [--label Mc] [--list capital] [--unlocked] [--keep-build-stats]
         Adds the ship to the research lists AND makes it buildable (Buildable/BuildTime/BuildCost/RushCost copied from --like).
         Needs a NEW campaign: an existing save keeps its own research state.
 
 SQUADRONS (fighter hull strength, in the game's sharedassets9.assets - not in the level files)
-  python deadlock_shipdb.py squadrons    Assembly-CSharp.dll sharedassets9.assets             (list: fighters, hull pool, hull per fighter, loss thresholds)
-  python deadlock_shipdb.py setsquadron  Assembly-CSharp.dll sharedassets9.assets "Viper Mk VII" HullFactor 2
+  python -m deadlock_tools shipdb squadrons                (list: fighters, hull pool, hull per fighter, loss thresholds)
+  python -m deadlock_tools shipdb setsquadron  "Viper Mk VII" HullFactor 2
         HullFactor F = pool and every fighter-loss threshold x F;  MaxHullPoints N = set the pool;  FighterHull N = hull per fighter.
         Name is part of the squadron name ("assault", "raptor", or "all"). A folder works too (files without squadrons are skipped).
 
 FLEET LIMITS (campaign)
-  python deadlock_shipdb.py fleetinfo    Assembly-CSharp.dll folder                           (show MaxShips = ships per fleet group, StartingFleetPointCap ...)
-  python deadlock_shipdb.py setfleetinfo Assembly-CSharp.dll folder MaxShips 10 [StartingFleetPointCap 6000]
+  python -m deadlock_tools shipdb fleetinfo                              (show MaxShips = ships per fleet group, StartingFleetPointCap ...)
+  python -m deadlock_tools shipdb setfleetinfo MaxShips 10 [StartingFleetPointCap 6000]
 
 FLEET MAP ICONS
-  python deadlock_shipdb.py fleeticons   Assembly-CSharp.dll folder                           (list the war-room icon tables)
-  python deadlock_shipdb.py fleeticon    Assembly-CSharp.dll folder "Colonial Mercury,Colonial Valkyrie" "Jupiter Mk2"
+  python -m deadlock_tools shipdb fleeticons                             (list the war-room icon tables)
+  python -m deadlock_tools shipdb fleeticon    "Colonial Mercury,Colonial Valkyrie" "Jupiter Mk2"
         Copies a ship's fleet icon to other ships in every scene that has the table. (--factory all is not recommended.)
 
 COMBINING EDITS
-  Just run the commands one after another on the ORIGINAL folder: each continues from the earlier results in patched_out/
+  Just run the commands one after another: each continues from the earlier results in out/levels/
   (use --fresh to start over, -o to pick another output folder). Finally back up the game's level files and copy
-  patched_out/* over them.
+  out/levels/* over them.
 """
 import struct, glob, sys, argparse, os
+
+if __package__ in (None, ""): sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from deadlock_tools import config
 
 TABLES = {  # table id -> (name, columns)  column kinds: 'u2','u4','S'(string),'G'(guid),'B'(blob), ('T',[tables]) coded, ('I',table) index
     0x00: ("Module", ["u2", "S", "G", "G", "G"]),
@@ -601,11 +607,11 @@ def munitions_cmd(a):
     if not files: raise SystemExit("give the level files or the folder that contains them")
     S = Schema(a.dll)
     if a.cmd == "setmunition":
-        if len(rest) < 3 or (len(rest) - 1) % 2: raise SystemExit('usage: setmunition Assembly-CSharp.dll <files or folder> "munition name" Field value [Field value ...]')
+        if len(rest) < 3 or (len(rest) - 1) % 2: raise SystemExit('usage: shipdb setmunition "munition name" Field value [Field value ...]')
         mname_, pairs = rest[0], [(rest[i], rest[i + 1]) for i in range(1, len(rest), 2)]
         for fld, _v in pairs:
             if fld not in MUNITION_EDITABLE: raise SystemExit("cannot edit %r. Editable: %s" % (fld, " ".join(MUNITION_EDITABLE)))
-        outdir = a.out or "patched_out"; os.makedirs(outdir, exist_ok=True)
+        outdir = a.out; os.makedirs(outdir, exist_ok=True)
     shown = False; patched = []; skipped = []
     for f_ in files:
         srcf = chain_source(a, f_, outdir) if a.cmd == "setmunition" else f_
@@ -640,7 +646,7 @@ def munitions_cmd(a):
     if a.cmd == "setmunition":
         print("\npatched %d file(s): %s" % (len(patched), ", ".join(patched) or "none"))
         print("no munition table (left alone): %s" % (", ".join(skipped) or "none"))
-        print("Patched copies are in ./%s/ (same file names). Back up the originals, then copy them over." % outdir)
+        print("Patched copies are in %s/ (same file names). Back up the originals, then copy them over." % outdir)
     elif not shown: print("no munition table found in the given files")
 
 
@@ -723,9 +729,9 @@ def blueprint_cmd(a):
         else: files.append(pth)
     if not files: raise SystemExit("give the level files or the folder that contains them")
     S = Schema(a.dll)
-    outdir = a.out or "patched_out"
+    outdir = a.out
     if a.cmd == "addblueprint":
-        if len(rest) != 1: raise SystemExit('usage: addblueprint Assembly-CSharp.dll <files or folder> "Colonial Mercury" [--cost RP] [--like "Jupiter Mk2"] [--campaigns 0,1,2] [--list battlestar|capital] [--unlocked] [--label Mc]')
+        if len(rest) != 1: raise SystemExit('usage: shipdb addblueprint "Colonial Mercury" [--cost RP] [--like "Jupiter Mk2"] [--campaigns 0,1,2] [--list battlestar|capital] [--unlocked] [--label Mc]')
         os.makedirs(outdir, exist_ok=True); ship_name = rest[0]
     shown = False; done = []; skipped = []
     for f_ in files:
@@ -802,7 +808,7 @@ def blueprint_cmd(a):
             done.append(tag)
     if a.cmd == "addblueprint":
         print("\npatched %d file(s): %s" % (len(done), ", ".join(done) or "none"))
-        print("Patched copies are in ./%s/ (same file names). Back up the originals, then copy them over." % outdir)
+        print("Patched copies are in %s/ (same file names). Back up the originals, then copy them over." % outdir)
         print("NOTE: blueprint unlocks are read when a campaign starts - use a NEW campaign (an existing save keeps its own research state).")
     elif not shown: print("no blueprint table found in the given files")
 
@@ -816,10 +822,10 @@ def fleetinfo_cmd(a):
         if os.path.isdir(pth): files += [os.path.join(r_, f_) for r_, _d, fs in os.walk(pth) for f_ in sorted(fs)]
         else: files.append(pth)
     if not files: raise SystemExit("give the level files or the folder that contains them")
-    S = Schema(a.dll); outdir = a.out or "patched_out"
+    S = Schema(a.dll); outdir = a.out
     edits = []
     if a.cmd == "setfleetinfo":
-        if not rest or len(rest) % 2: raise SystemExit("usage: setfleetinfo Assembly-CSharp.dll <files or folder> MaxShips 10 [StartingFleetPointCap 6000 ...]")
+        if not rest or len(rest) % 2: raise SystemExit("usage: shipdb setfleetinfo MaxShips 10 [StartingFleetPointCap 6000 ...]")
         edits = [(rest[i], int(rest[i + 1])) for i in range(0, len(rest), 2)]
         os.makedirs(outdir, exist_ok=True)
     done = []
@@ -841,7 +847,7 @@ def fleetinfo_cmd(a):
         assert all(chk[f] == v for f, v in edits), "verification failed"
         done.append(tag)
     if edits:
-        print("\npatched %d file(s): %s\nPatched copies are in ./%s/ (same file names). Back up the originals, then copy them over." % (len(done), ", ".join(done) or "none", outdir))
+        print("\npatched %d file(s): %s\nPatched copies are in %s/ (same file names). Back up the originals, then copy them over." % (len(done), ", ".join(done) or "none", outdir))
         print("NOTE: the limit is read from the game data when needed (not stored in saves); the fleet screens may only have a fixed number of ship slots, so test larger values.")
 
 
@@ -897,12 +903,12 @@ def squadron_cmd(a):
         if os.path.isdir(pth): files += [os.path.join(r_, f_) for r_, _d, fs in os.walk(pth) for f_ in sorted(fs)]
         else: files += pth.split(",") if not os.path.exists(pth) else [pth]
     if not files: raise SystemExit("give sharedassets9.assets (or the game's Data folder)")
-    S = Schema(dll); outdir = a.out or "patched_out"
+    S = Schema(dll); outdir = a.out
     key = lambda t: t.lower().replace(" ", "").replace("_", "")
     edits = []
     if a.cmd == "setsquadron":
         if len(rest) < 3 or len(rest) % 2 == 0:
-            raise SystemExit('usage: setsquadron Assembly-CSharp.dll <assets or folder> "Viper Mk VII" HullFactor 2   (or MaxHullPoints 120 / FighterHull 12; name "all" = every squadron)')
+            raise SystemExit('usage: shipdb setsquadron "Viper Mk VII" HullFactor 2   (or MaxHullPoints 120 / FighterHull 12; name "all" = every squadron)')
         sel = rest[0]; edits = [(rest[i], float(rest[i + 1])) for i in range(1, len(rest), 2)]
         for f_, _v in edits:
             if f_ not in ("HullFactor", "MaxHullPoints", "FighterHull"): raise SystemExit("editable: HullFactor (x pool and thresholds), MaxHullPoints (pool), FighterHull (hull per fighter at full strength)")
@@ -940,7 +946,7 @@ def squadron_cmd(a):
         for q in hit: assert abs(chk[q["name"]]["si"][1]["MaxHullPoints"] - q["si"][1]["MaxHullPoints"] * 0 - chk[q["name"]]["si"][1]["MaxHullPoints"]) < 1e-9 and q["name"] in chk, "verification failed"
         open(os.path.join(outdir, tag), "wb").write(bytes(buf)); done.append(tag)
     if edits:
-        print("\npatched %d file(s): %s\nPatched copies are in ./%s/ (same file names). Back up the originals, then copy them over." % (len(done), ", ".join(done) or "none", outdir))
+        print("\npatched %d file(s): %s\nPatched copies are in %s/ (same file names). Back up the originals, then copy them over." % (len(done), ", ".join(done) or "none", outdir))
         print("NOTE: level data shows its own hull number for the UI only; battles use these prefab values.")
     elif not files or True:
         pass
@@ -1016,7 +1022,7 @@ def fix_specialisations(buf, off, res, f, outdir, revert=False):
 
 def commanders_cmd(a):
     S = Schema(a.dll); ti = S.typedef_index("DataTables"); n = 0
-    outdir = a.out or "patched_out"                                     # same folder as the ship edits, so they stack
+    outdir = a.out                                     # same folder as the ship edits, so they stack
     for f in files_of(a.level0):
         buf = open(chain_source(a, f, outdir), "rb").read()
         try: hit = find_tables(S, buf, ti)
@@ -1030,17 +1036,18 @@ def commanders_cmd(a):
         os.makedirs(outdir, exist_ok=True); open(os.path.join(outdir, os.path.basename(f)), "wb").write(out)
         print("  new ranks:", new); show_commanders(find_tables(S, out, ti)[3])
     if not n: print("no commander DataTables object found in %s" % a.level0)
-    if a.cmd == "fixspecs" and n: print("Copy the level files from ./%s/ over the originals (back them up first)." % outdir)
+    if a.cmd == "fixspecs" and n: print("Copy the level files from %s/ over the originals (back them up first)." % outdir)
     if a.cmd == "setcommanders" and n:
         newmax = len(res["RankXPTable"]) + a.add
         cmdn = " --command-nodes 10" if a.every_level else ""   # one Command node per rank 1-10 (up to 19 possible, see deadlock_dll.py)
-        print("Copy the level files from ./%s/ over the originals (back them up first), then patch the DLL (rank cap%s):\n    python deadlock_dll.py patch Assembly-CSharp.dll --max-rank %d%s" % (outdir, " + number of Command-column nodes" if cmdn else "", newmax, cmdn))
+        print("Copy the level files from %s/ over the originals (back them up first), then patch the DLL (rank cap%s):\n    python -m deadlock_tools dll patch --max-rank %d%s" % (outdir, " + number of Command-column nodes" if cmdn else "", newmax, cmdn))
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["list", "vet", "show", "set", "setvet", "setxp", "copyvet", "fleeticons", "fleeticon", "munitions", "setmunition", "blueprints", "addblueprint", "addvet", "removevet", "fleetinfo", "setfleetinfo", "commanders", "setcommanders", "fixspecs", "squadrons", "setsquadron"])
-    ap.add_argument("level0"); ap.add_argument("dll"); ap.add_argument("args", nargs="*")
-    ap.add_argument("-o", "--out")
+    ap.prog = "deadlock shipdb"
+    ap.add_argument("args", nargs="*", help="the command's own arguments (ship name, field, value ...)")
+    config.add_path_args(ap, "levels", "dll", "out")
     ap.add_argument("--cost", type=int, help="addblueprint: research point cost (default: same as --like ship in that campaign, else 3000)")
     ap.add_argument("--like", default="Jupiter Mk2", help="addblueprint: reference ship whose build stats/RP cost are copied (default Jupiter Mk2)")
     ap.add_argument("--list", default="battlestar", choices=["battlestar", "capital"], help="addblueprint: which blueprint list (default battlestar)")
@@ -1056,32 +1063,29 @@ def main():
     ap.add_argument("--fresh", action="store_true", help="ignore earlier edits already in the output folder and start again from the original files")
     ap.add_argument("--factory", default="FleetModelFactory", help="FleetModelFactory (war-room fleet icon, default) or ProjectionFactory")
     a = ap.parse_args()
+    _normalise(a)
     if a.cmd in ("commanders", "setcommanders", "fixspecs"):
         commanders_cmd(a); return
     if a.cmd in ("squadrons", "setsquadron"):
         squadron_cmd(a); return
     if a.cmd in ("fleetinfo", "setfleetinfo"):
-        if a.level0.lower().endswith(".dll"): a.args = [a.dll] + a.args; a.dll = a.level0
-        else: a.args = [a.level0] + a.args
+        a.args = [a.level0] + a.args
         fleetinfo_cmd(a); return
     if a.cmd in ("blueprints", "addblueprint"):
-        if a.level0.lower().endswith(".dll"): a.args = [a.dll] + a.args; a.dll = a.level0
-        else: a.args = [a.level0] + a.args
+        a.args = [a.level0] + a.args
         blueprint_cmd(a); return
     if a.cmd in ("munitions", "setmunition"):
-        if a.level0.lower().endswith(".dll"): a.args = [a.dll] + a.args; a.dll = a.level0
-        else: a.args = [a.level0] + a.args
+        a.args = [a.level0] + a.args
         munitions_cmd(a); return
-    if a.cmd in ("fleeticons", "fleeticon") and a.level0.lower().endswith(".dll"):
-        a.args = [a.dll] + a.args; a.dll = a.level0; a.level0 = None      # new form: no level0 needed
     # Batch mode: edit commands accept a folder (or comma-separated files) and patch EVERY file that holds a ship database
     if a.cmd in ("set", "setvet", "setxp", "copyvet", "addvet", "removevet") and (os.path.isdir(a.level0) or "," in a.level0):
         files = []
         for part in a.level0.split(","):
             if os.path.isdir(part): files += [os.path.join(r_, f_) for r_, _d, fs in os.walk(part) for f_ in sorted(fs)]
             elif part: files.append(part)
-        outdir = a.out or "patched_out"; os.makedirs(outdir, exist_ok=True)
+        outdir = a.out; os.makedirs(outdir, exist_ok=True)
         done, skipped = [], []
+        files = [f_ for f_ in files if os.path.isfile(f_)]
         for f_ in files:
             src = chain_source(a, f_, outdir)
             try: Db(a.dll, src)
@@ -1090,9 +1094,49 @@ def main():
             run(a, src, os.path.join(outdir, os.path.basename(f_))); done.append(os.path.basename(f_))
         print("\nedited %d file(s): %s" % (len(done), ", ".join(done) or "none"))
         print("no ship database (left alone): %s" % (", ".join(skipped) or "none"))
-        print("Patched copies are in ./%s/ (same file names). Back up the originals, then copy them over." % outdir)
+        print("Patched copies are in %s/ (same file names). Back up the originals, then copy them over." % outdir)
         return
-    run(a, a.level0, a.out or ((a.level0 or "") + ".patched"))
+    if a.cmd in EDIT_CMDS:                                   # one level file: edit it, continuing from earlier edits
+        os.makedirs(a.out, exist_ok=True)
+        run(a, chain_source(a, a.level0, a.out), os.path.join(a.out, os.path.basename(a.level0)))
+    else:
+        level0 = a.level0 if a.cmd in ("fleeticons", "fleeticon") else ship_table_file(a)
+        run(a, level0, os.path.join(a.out, os.path.basename(level0 or "")))
+
+
+EDIT_CMDS = ("set", "setvet", "setxp", "copyvet", "addvet", "removevet")
+
+
+def _is_path(p):
+    return os.path.exists(p) or ("," in p and all(os.path.exists(x) for x in p.split(",") if x))
+
+
+def _normalise(a):
+    """Fill a.level0 / a.dll / a.args / a.out the same way for every command.
+    New form:  <cmd> [args] [--levels L] [--dll D]   (defaults from deadlock.json)
+    Old form:  <cmd> <levels> <dll> [args]  or  <cmd> <dll> <levels> [args]  - leading paths are taken as levels / DLL."""
+    pos, lv, dll = list(a.args), [], None
+    while pos and _is_path(pos[0]):
+        p_ = pos.pop(0)
+        if dll is None and p_.lower().endswith(".dll") and os.path.isfile(p_): dll = p_
+        else: lv.append(p_)
+    a.dll = config.setting("dll", a.dll or dll)
+    if a.levels: a.level0, a.args = config.setting("levels", a.levels), lv + pos
+    elif lv: a.level0, a.args = lv[0], lv[1:] + pos
+    else: a.level0, a.args = config.setting("levels"), pos
+    a.out = config.out_dir("levels", a.out, create=False)
+    if config.same_file(a.out, a.level0 if os.path.isdir(a.level0) else os.path.dirname(os.path.abspath(a.level0))):
+        raise SystemExit("the output folder %s is the level folder itself - choose another output folder" % a.out)
+
+
+def ship_table_file(a):
+    """the level file read by list / show / vet: a.level0 itself, or the first file in the folder that has the ship table"""
+    if os.path.isfile(a.level0): return a.level0
+    S = Schema(a.dll)
+    for f_ in files_of(a.level0):
+        try: Db(a.dll, f_, S); return f_
+        except (SystemExit, Exception): pass
+    raise SystemExit("no level file with the ship table in %s" % a.level0)
 
 
 def run(a, level0, out):
@@ -1136,7 +1180,7 @@ def run(a, level0, out):
         raise SystemExit("%s has no rank %d entry" % (s["name"], rank))
     elif a.cmd == "addvet":
         # addvet <ship> <rank> <Effect> <value>  - add an effect to a rank (creates the rank entry if the ship lacks it); an existing effect is overwritten
-        if len(a.args) != 4: raise SystemExit('usage: addvet <levels> Assembly-CSharp.dll "Colonial Mercury" 2 FlakDamage 0.1')
+        if len(a.args) != 4: raise SystemExit('usage: shipdb addvet "Colonial Mercury" 2 FlakDamage 0.1')
         s = db.find(a.args[0]); rank = int(a.args[1]); name = a.args[2].lower(); val = float(a.args[3])
         if name not in db.effect_by_name: raise SystemExit("unknown effect %r. Effects: %s" % (a.args[2], ", ".join(db.effect.values())))
         eid = db.effect_by_name[name]
@@ -1162,7 +1206,7 @@ def run(a, level0, out):
         print("verified:", have)
     elif a.cmd == "removevet":
         # removevet <ship> <rank> <Effect|all>  - remove one effect from a rank (a rank left with no effects is removed too)
-        if len(a.args) != 3: raise SystemExit('usage: removevet <levels> Assembly-CSharp.dll "Colonial Mercury" 2 FlakDamage   (or "all" to clear the rank)')
+        if len(a.args) != 3: raise SystemExit('usage: shipdb removevet "Colonial Mercury" 2 FlakDamage   (or "all" to clear the rank)')
         s = db.find(a.args[0]); rank = int(a.args[1]); name = a.args[2].lower()
         ranks = [(r["Rank"], [[e["Effect"], e["BonusAmount"]] for e in r["Effects"]]) for r in s["CrewVeterancyRankEffects"]]
         r_ = next((x for x in ranks if x[0] == rank), None)
@@ -1203,9 +1247,9 @@ def run(a, level0, out):
         factories = ["FleetModelFactory", "ProjectionFactory"] if a.factory.lower() == "all" else [a.factory]
         schema = Schema(a.dll)
         if a.cmd == "fleeticon":
-            if len(rest) != 2: raise SystemExit('usage: fleeticon Assembly-CSharp.dll <level files or folder...> "Target ship[,Other target]" "Source ship"')
+            if len(rest) != 2: raise SystemExit('usage: shipdb fleeticon "Target ship[,Other target]" "Source ship"')
             names_t = [x.strip() for x in rest[0].split(",")]; name_s = rest[1]
-            outdir = a.out or "patched_out"; os.makedirs(outdir, exist_ok=True)
+            outdir = a.out; os.makedirs(outdir, exist_ok=True)
         patched = []; skipped = []
         for f_orig in files:
             f_ = chain_source(a, f_orig, outdir) if a.cmd == "fleeticon" else f_orig
@@ -1235,7 +1279,7 @@ def run(a, level0, out):
         if a.cmd == "fleeticon":
             print("\npatched %d file(s): %s" % (len(patched), ", ".join(patched) or "none"))
             print("not a war-room scene (left alone): %s" % (", ".join(skipped + [x for x in map(os.path.basename, files) if x not in patched and x not in skipped]) or "none"))
-            print("Patched copies are in ./%s/ (same file names). Back up the originals, then copy them over." % outdir)
+            print("Patched copies are in %s/ (same file names). Back up the originals, then copy them over." % outdir)
     elif a.cmd == "setxp":
         rank, xp = int(a.args[0]), int(a.args[1])
         for r in db.res["CrewVeterancyRankInfo"]:
