@@ -84,7 +84,7 @@ class Regression(unittest.TestCase):
 
     def test_shipdb_reads(self):
         self.need("dll", "level0")
-        p = ["--levels", INPUTS["levels"], "--dll", INPUTS["dll"]]
+        p = ["--levels", INPUTS["levels"], "--dll", INPUTS["dll"], "-o", self.out]       # empty output folder: read the originals
         for args, expected in ((["list"], "96eaa83fb1b78608e75a5fd009649b9bbf98dfe8"), (["show", "viper mk1"], "66c8c43e07174ed6fd0d42c8268ba83cf445a826"),
                                (["munitions"], "175c3b34dcae132e11aeea4430445906854475fd"), (["fleetinfo"], "493b541542187bb41a437f84a72a46026cd51502")):
             self.assertEqual(hashlib.sha1(self.run_tool("shipdb", *args, *p).encode()).hexdigest(), expected, args)
