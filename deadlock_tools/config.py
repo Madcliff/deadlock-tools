@@ -28,6 +28,9 @@ import sys
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(PACKAGE_DIR)
+ZIPAPP = None                                                         # set when running from the single-file deadlock.pyz
+if os.path.isfile(PROJECT_DIR):
+    ZIPAPP, PROJECT_DIR = PROJECT_DIR, os.path.dirname(PROJECT_DIR)   # settings, out/ and work/ then live next to the .pyz
 SETTINGS_FILE = os.path.join(PROJECT_DIR, "deadlock.json")
 OLD_SETTINGS_FILE = os.path.expanduser("~/.deadlock_ships.json")      # the GUI's settings before the reorganisation
 
@@ -55,7 +58,8 @@ def load():
                 data = json.load(fh)
         except (OSError, ValueError) as e:
             raise SystemExit("cannot read %s: %s" % (path, e))
-        cfg.update({k: str(v).strip() for k, v in data.items() if k in KEYS and v})
+        keys = KEYS if path == SETTINGS_FILE else ("levels", "dll", "bundles")   # the old file's 'out' meant something else
+        cfg.update({k: str(v).strip() for k, v in data.items() if k in keys and v})
     return cfg
 
 

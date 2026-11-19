@@ -1,0 +1,7 @@
+{
+  "dll": "/path/to/unpatched/Assembly-CSharp.dll",
+  "levels": "/path/to/BSG_Data",
+  "mercury_dec": "/path/to/decrypted/colonialmercury.dec",
+  "orion_dec": "/path/to/decrypted/colonialorion.dec",
+  "mercury_enc": "/path/to/encrypted/colonialmercury"
+}

@@ -3,3 +3,7 @@ __pycache__/
 out/
 work/
 deadlock.json
+dist/
+tests/regression_inputs.json
+*.egg-info/
+build/

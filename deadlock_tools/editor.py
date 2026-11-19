@@ -42,7 +42,7 @@ HIDDEN = {"AttachmentInfo", "CrewVeterancyRankEffects", "ArmamentInfoList"}
 
 def tool_cmd(tool):
     """argv prefix that runs one of the command-line tools (python -m deadlock_tools <tool>) as its own process"""
-    return [sys.executable, "-m", "deadlock_tools", tool]
+    return [sys.executable, config.ZIPAPP, tool] if config.ZIPAPP else [sys.executable, "-m", "deadlock_tools", tool]
 
 
 def run_cmd(cmd, timeout):
