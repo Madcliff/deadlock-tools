@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-deadlock_weapons.py - edit a Deadlock ship bundle (built around the Colonial Mercury).
+weapons - edit a Deadlock ship bundle (built around the Colonial Mercury).
 
 What it does (all optional, combine as needed; run with -h for every option and examples):
     turrets      clone / resize weapon mounts, placed on free hull space with left-right symmetry (--clone, --layout free, --scale, --clone-scale)
@@ -8,13 +8,15 @@ What it does (all optional, combine as needed; run with -h for every option and 
     systems      hull-resin regen, armour regen, Munition Factory, squadron revive
     abilities    micro-FTL jump, predictive augury, stealth (donors: Argos, guardian basestar, Orion), optionally grouped in an Abilities submenu
 
-Workflow
-    1. python deadlock_bundle_xor.py decrypt <bundle>                      (writes decrypted/<bundle>.dec; this tool needs the decrypted file)
-    2. python deadlock_weapons.py <input.dec> <output> [options] --encrypt   (always starts from the .dec, so give every option in ONE command)
-    3. rename the output to the original bundle name, back up and replace the game's file.
-With no options the output is an unmodified copy. DLL patches (armour regen, squadron revive, commander ranks) are in deadlock_dll.py;
-slot counts and other ship data in the level files are edited with deadlock_shipdb.py and must match the numbers used here
-(the battle UI shows min(prefab buttons, level-data slots)).
+Usage
+    python -m deadlock_tools weapons BUNDLE [options]
+BUNDLE is a game bundle (encrypted) or a decrypted .dec, given as a path or as a bare name looked up in the 'bundles'
+folder of deadlock.json. Encrypted bundles are decrypted into work/decrypted/ automatically. The result is written,
+encrypted and under the game's file name, to out/bundles/<name> (--no-encrypt: out/bundles/<name>.dec).
+
+Every run starts again from the original bundle (turret cloning is not repeatable), so give all options in ONE command.
+DLL patches (armour regen, squadron revive, commander ranks) are in 'dll'; slot counts and other ship data in the level
+files are edited with 'shipdb' and must match the numbers used here (the battle UI shows min(prefab buttons, level-data slots)).
 """
 """Unity serialized file (v17, with type tree) reader/writer + UnityFS bundle container. Dependency free."""
 import struct
@@ -268,9 +270,33 @@ def write_bundle(path, b, node_blobs):
 # ======================================================================================
 import argparse, os, copy, sys, re
 
-def xor_bytes(data, key=bytes.fromhex("0f0f070d0507")):
-    n = len(data); ks = (key * (n // len(key) + 1))[:n]
-    return (int.from_bytes(data, "big") ^ int.from_bytes(ks, "big")).to_bytes(n, "big")
+if __package__ in (None, ""): sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from deadlock_tools import config
+from deadlock_tools.bundle_xor import DEFAULT_KEY, xor
+
+
+def xor_bytes(data, key=DEFAULT_KEY):
+    return xor(data, key)
+
+
+def find_bundle(src, bundles=None):
+    """path of a bundle given as a path or a bare name (looked up in the 'bundles' folder, then work/decrypted/)"""
+    if os.path.exists(src): return src
+    for folder in (config.setting("bundles", bundles, required=False), config.work_dir(create=False)):
+        for name in (src, src + ".dec"):
+            if folder and os.path.isfile(os.path.join(folder, name)): return os.path.join(folder, name)
+    raise SystemExit("no such bundle: %s (looked in the current folder, the 'bundles' folder and work/decrypted/)" % src)
+
+
+def decrypted(path):
+    """a decrypted copy of a bundle: the file itself if it is already a plain UnityFS bundle, else work/decrypted/<name>.dec"""
+    data = open(path, "rb").read()
+    if data[:7] == b"UnityFS": return path
+    plain = xor_bytes(data)
+    if plain[:7] != b"UnityFS": raise SystemExit("%s is neither a Unity bundle nor an XOR-encrypted one" % path)
+    name = os.path.basename(path); dst = os.path.join(config.work_dir(), name if name.endswith(".dec") else name + ".dec")
+    if not (os.path.isfile(dst) and open(dst, "rb").read() == plain): config.write(dst, plain, path)
+    print("decrypted %s -> %s" % (path, dst)); return dst
 
 
 def _noop(): pass
@@ -785,13 +811,13 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
     if hull_regen is not None:
         assert not any(o.classid == 114 and "hullPerTick" in val(o.pid) for o in F.objs), "this ship already has a Regenerative Hull Resin module"
         add_script_component("RegenerativeHullResinModule", RESIN_TYPE_RAW, RESIN_MS_RAW, RESIN_MB_RAW, root.pid, lambda b: struct.pack_into("<f", b, 32, -hull_regen if armour_regen else hull_regen))
-        print(f"added Regenerative Hull Resin module to {val(root.pid)['m_Name']} (hullPerTick {-hull_regen if armour_regen else hull_regen}{', armour regeneration ON - needs deadlock_dll.py patch --armour-factor' if armour_regen else ''})")
+        print(f"added Regenerative Hull Resin module to {val(root.pid)['m_Name']} (hullPerTick {-hull_regen if armour_regen else hull_regen}{', armour regeneration ON - needs dll patch --armour-factor' if armour_regen else ''})")
     elif armour_regen:
         mods = [o for o in F.objs if o.classid == 114 and "hullPerTick" in val(o.pid)]
         assert mods, "this ship has no Regenerative Hull Resin module: add one with --hull-regen X --armour-regen"
         for o in mods:
             v = copy.deepcopy(val(o.pid)); assert v["hullPerTick"] != 0, "hullPerTick is 0"; v["hullPerTick"] = -abs(v["hullPerTick"]); replaced[o.pid] = F.write(o, v)
-        print(f"flagged the existing Regenerative Hull Resin module for armour regeneration (hullPerTick {v['hullPerTick']}) - needs deadlock_dll.py patch --armour-factor")
+        print(f"flagged the existing Regenerative Hull Resin module for armour regeneration (hullPerTick {v['hullPerTick']}) - needs dll patch --armour-factor")
     if munition_factory:
         assert not any(o.classid == 115 and val(o.pid)["m_ClassName"] == "MunitionFactoryModule" for o in F.objs), "this ship already has a Munition Factory module"
         add_script_component("MunitionFactoryModule", MFM_TYPE_RAW, MFM_MS_RAW, MFM_MB_RAW, root.pid, lambda b: None)
@@ -969,7 +995,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
         ships_ = [o for o in F.objs if o.classid == 114 and "ShowExclusionInEditor" in val(o.pid) and val(o.pid)["m_GameObject"]["m_PathID"] == root.pid]
         assert len(ships_) == 1, "could not find the ship's ShipInfo component"
         v = copy.deepcopy(val(ships_[0].pid)); v["ShowExclusionInEditor"] = 1; replaced[ships_[0].pid] = F.write(ships_[0], v)
-        print("flagged the ship to rebuild destroyed squadrons (needs deadlock_dll.py patch --revive-turns in the DLL)")
+        print("flagged the ship to rebuild destroyed squadrons (needs dll patch --revive-turns in the DLL)")
     for gp, pids in comp_add.items():
         if gp == sub_state.get("go"):
             gv = sub_state["gov"]
@@ -1009,26 +1035,27 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
 
 
 def build_parser():
-    ap = argparse.ArgumentParser(description="Edit a decrypted Deadlock ship bundle: clone / resize turrets, squadron and munition slots, ship systems and abilities.\nNothing is changed unless you pass its option. DLL patches live in deadlock_dll.py.")
+    ap = argparse.ArgumentParser(description="Edit a decrypted Deadlock ship bundle: clone / resize turrets, squadron and munition slots, ship systems and abilities.\nNothing is changed unless you pass its option. DLL patches live in dll.")
     g_weap = ap.add_argument_group("Weapons - cloning and resizing turrets")
     g_slot = ap.add_argument_group("Squadron / munition slots")
     g_sys = ap.add_argument_group("Ship systems")
     g_abil = ap.add_argument_group("Abilities")
     g_out = ap.add_argument_group("Output")
     ap.epilog = """EXAMPLES
-  Mercury, everything (decrypt first with deadlock_bundle_xor.py, encrypt at the end with --encrypt):
-    python deadlock_weapons.py colonialmercury.dec colonialmercury --clone fore=3 --layout free --scale fore=0.7 --clone-scale 0.7 \\
+  Mercury, everything (writes out/bundles/colonialmercury, encrypted and ready for the game):
+    python -m deadlock_tools weapons colonialmercury --clone fore=3 --layout free --scale fore=0.7 --clone-scale 0.7 \\
         --fighter-slots 4 --utility-slots 2 --split-squadrons --munition-slots 4 --hull-regen 0.1 --armour-regen --munition-factory --squadron-revive \\
-        --mini-jump --augury --stealth orion.dec --ability-submenu --encrypt
-  List the turrets:        python deadlock_weapons.py colonialmercury.dec x --list-mounts
-  Slot counts here must match the level files:  python deadlock_shipdb.py set <levels> <dll> "Colonial Mercury" FighterSlots 4
-  Needed in the DLL (deadlock_dll.py):  --armour-regen -> patch --armour-factor, --squadron-revive -> patch --revive-turns
+        --mini-jump --augury --stealth colonialorion --ability-submenu
+  List the turrets:        python -m deadlock_tools weapons colonialmercury --list-mounts
+  Slot counts here must match the level files:  python -m deadlock_tools shipdb set "Colonial Mercury" FighterSlots 4
+  Needed in the DLL ('dll'):  --armour-regen -> patch --armour-factor, --squadron-revive -> patch --revive-turns
 LIMITS
   Radial menus hold 8 buttons (positions 0-7): Fighters launch buttons <= 8 in total, munition slots <= 7 (plus Back), Actions menu 8 (use --ability-submenu)."""
     ap.formatter_class = argparse.RawDescriptionHelpFormatter
-    ap.usage = "deadlock_weapons.py SRC DST [options]      (SRC = decrypted .dec bundle, DST = output; options are grouped below)"
-    ap.add_argument("src", help="decrypted bundle, e.g. colonialmercury.dec")
-    ap.add_argument("dst", help="output file")
+    ap.prog = "deadlock weapons"
+    ap.usage = "deadlock weapons BUNDLE [DST] [options]      (BUNDLE = game bundle or .dec, path or name; options are grouped below)"
+    ap.add_argument("src", metavar="BUNDLE", help="ship bundle (encrypted game file or decrypted .dec), a path or a name in the 'bundles' folder, e.g. colonialmercury")
+    ap.add_argument("dst", nargs="?", help="output file (default: out/bundles/<name>)")
     g_weap.add_argument("--offset", default="1.5,0,0", help="local-space x,y,z offset of each clone (default 1.5,0,0)")
     g_weap.add_argument("--copies", type=int, default=0, help="clone every weapon mount N extra times (1 = double). Default 0: weapons are NOT touched unless you ask")
     g_weap.add_argument("--clone", action="append", default=[], metavar="SELECTOR=N", help="clone only the mounts matching SELECTOR N times; repeatable, later ones win, and it overrides --copies for those mounts. SELECTOR: all, sides (= port + starboard), port, starboard, fore, rear, dorsal, ventral, type:N (weapon type id), name:TEXT (part of the mount name). N=0 excludes. e.g. --clone fore=1 --clone dorsal=2")
@@ -1044,9 +1071,9 @@ LIMITS
     g_slot.add_argument("--utility-slots", type=int, help="final UtilityFighterSlots value (support squadrons). Mercury default is 1")
     g_slot.add_argument("--bay-offset", default="0,3,4", help="x,y,z shift applied to each new launch bay (default 0,3,4)")
     g_sys.add_argument("--hull-regen", type=float, help="add a Regenerative Hull Resin module (passive hull repair, scaled by Engineering) with this hullPerTick; the Cylon modern basestar uses 0.2")
-    g_sys.add_argument("--munition-factory", action="store_true", help="add the Munition Factory module (passive munition resupply, as on the Cylon Argos). Its speed comes from the ship's Armory MunitionResupplyRange; add --squadron-revive (and deadlock_dll.py patch --revive-turns) to also rebuild destroyed squadrons")
-    g_sys.add_argument("--squadron-revive", action="store_true", help="flag the ship so its Munition Factory module rebuilds DESTROYED squadrons (needs deadlock_dll.py patch --revive-turns in the DLL; the ship needs the module: add it with --munition-factory)")
-    g_sys.add_argument("--armour-regen", action="store_true", help="flag the ship's Regenerative Hull Resin module so it also regenerates ARMOUR (needs deadlock_dll.py patch --armour-factor in the DLL). With --hull-regen X it adds the module; alone it flags the module the ship already has")
+    g_sys.add_argument("--munition-factory", action="store_true", help="add the Munition Factory module (passive munition resupply, as on the Cylon Argos). Its speed comes from the ship's Armory MunitionResupplyRange; add --squadron-revive (and dll patch --revive-turns) to also rebuild destroyed squadrons")
+    g_sys.add_argument("--squadron-revive", action="store_true", help="flag the ship so its Munition Factory module rebuilds DESTROYED squadrons (needs dll patch --revive-turns in the DLL; the ship needs the module: add it with --munition-factory)")
+    g_sys.add_argument("--armour-regen", action="store_true", help="flag the ship's Regenerative Hull Resin module so it also regenerates ARMOUR (needs dll patch --armour-factor in the DLL). With --hull-regen X it adds the module; alone it flags the module the ship already has")
     g_weap.add_argument("--no-hull-follow", action="store_true", help="skip the hull check. By default every clone is raised out of the hull if it would sit lower than the mount it was copied from (reads the hull mesh from the bundle)")
     g_abil.add_argument("--mini-jump", action="store_true", help="give the ship the micro-FTL jump (Cylon Argos style): adds the MiniJumpAgent and the jump button in the Actions radial menu. The ship needs an FTLEffect component (Mercury, Jupiter, Argos have one)")
     g_abil.add_argument("--jump-range", default="200,10", help="--mini-jump: horizontal,vertical jump range in game units (default 200,10 = Argos)")
@@ -1064,7 +1091,9 @@ LIMITS
     g_abil.add_argument("--stealth-battery", type=float, default=100.0, help="--stealth: stealth battery capacity (Orion: 100)")
     g_abil.add_argument("--stealth-start", choices=["on", "off"], default="on", help="--stealth: start battles stealthed (Orion: on)")
     g_slot.add_argument("--slot-parts", default="buttons,bays,icons", help="(for testing) which parts --fighter-slots adds: any of buttons, bays, icons")
-    g_out.add_argument("--encrypt", action="store_true", help="XOR-encrypt the output so the game can load it")
+    g_out.add_argument("--no-encrypt", action="store_true", help="write the decrypted bundle (out/bundles/<name>.dec) instead of a game-ready encrypted one")
+    g_out.add_argument("--encrypt", action="store_true", help=argparse.SUPPRESS)      # the default now; kept so old commands still work
+    config.add_path_args(g_out, "out", "bundles")
     return ap
 
 
@@ -1072,11 +1101,22 @@ def main():
     ap = build_parser()
     a = ap.parse_args()
     off = tuple(float(x) for x in a.offset.split(","))
-    tmp = a.dst + ".tmp" if a.encrypt else a.dst
+    original = find_bundle(a.src, a.bundles); a.src = decrypted(original)
+    if a.stealth: a.stealth = find_bundle(a.stealth, a.bundles)
+    stem = os.path.basename(a.src)[:-4] if a.src.endswith(".dec") else os.path.basename(a.src)
+    a.encrypt = not a.no_encrypt
+    if a.list_mounts: a.dst = os.devnull
+    elif not a.dst: a.dst = os.path.join(config.out_dir("bundles", a.out), stem if a.encrypt else stem + ".dec")
+    for f in (original, a.src):
+        if os.path.exists(a.dst) and config.same_file(a.dst, f): raise SystemExit("refusing to overwrite the input %s" % f)
+    os.makedirs(os.path.dirname(os.path.abspath(a.dst)), exist_ok=True)
+    tmp = a.dst + ".tmp" if a.encrypt and not a.list_mounts else a.dst
     double_weapons(a.src, tmp, off, a.copies, a.munition_slots, a.fighter_slots, a.utility_slots, tuple(float(x) for x in a.bay_offset.split(',')), a.hull_regen, a.armour_regen, [(c.rsplit('=', 1)[0], int(c.rsplit('=', 1)[1])) for c in a.clone], a.list_mounts, a.clone_scale, [(c.rsplit('=', 1)[0], float(c.rsplit('=', 1)[1])) for c in a.scale], a.layout, a.gap, not a.no_mirror, a.munition_factory, a.squadron_revive, not a.no_hull_follow, a.min_gap, ({"delay": a.jump_delay, "duration": a.jump_duration, "range": tuple(float(x) for x in a.jump_range.split(',')), "cooldown": a.jump_cooldown} if a.mini_jump else None), ({"uses": 999 if a.augury_uses.lower() in ("unlimited", "inf", "infinite") else int(a.augury_uses)} if a.augury else None), ({"donor": a.stealth, "battery": a.stealth_battery, "start_on": a.stealth_start == "on"} if a.stealth else None), a.slot_parts, a.ability_submenu, a.stealth_mesh, ([int(x) for x in a.squadron_groups.split(",")] if a.squadron_groups else ([a.fighter_slots, a.utility_slots] if a.split_squadrons else None)), tuple(float(x) for x in a.icon_offset.split(",")))
+    if a.list_mounts: return
     if a.encrypt:
         open(a.dst, "wb").write(xor_bytes(open(tmp, "rb").read())); os.remove(tmp)
         print("encrypted ->", a.dst)
+    print("Back up the game's %s, then replace it with %s." % (stem, a.dst) if a.encrypt else "Decrypted result: %s (encrypt it with 'xor encrypt' before use)." % a.dst)
 
 if __name__ == "__main__":
     main()

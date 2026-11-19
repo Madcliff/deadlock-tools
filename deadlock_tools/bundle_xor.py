@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
-Decrypt / re-encrypt BSG Deadlock ship bundles (repeating-key XOR over the whole file).
+xor - decrypt / re-encrypt BSG Deadlock ship bundles (repeating-key XOR over the whole file).
 
-The bundles are normal UnityFS bundles (Unity 2018.4.3f1, LZMA) that have been XORed
-byte-by-byte with a short repeating key. XOR is symmetric, so the same operation
-decrypts and re-encrypts.
+The bundles are normal UnityFS bundles (Unity 2018.4.3f1, LZMA) that have been XORed byte-by-byte with a short
+repeating key. XOR is symmetric, so the same operation decrypts and re-encrypts.
 
-Results always go into two dedicated folders next to this script (created on first use,
-nothing else is created):
-    decrypted/   <- decrypt writes here   (colonialmercury -> decrypted/colonialmercury.dec)
-    encrypted/   <- encrypt writes here   (colonialmercury.dec -> encrypted/colonialmercury, the ".dec" is dropped
-                                           so the file is ready to rename/copy into the game folder)
-A source folder is processed recursively and its sub-folder layout is kept inside the dedicated folder.
+Where results go (the same places every tool uses, see deadlock.json):
+    decrypt  -> work/decrypted/<name>.dec
+    encrypt  -> out/bundles/<name>      (the ".dec" is dropped, so the file can be copied straight into the game folder)
+A folder is processed recursively and its sub-folder layout is kept.
 
 Usage:
-    python deadlock_bundle_xor.py decrypt  colonialmercury            -> decrypted/colonialmercury.dec
-    python deadlock_bundle_xor.py decrypt  <folder>                   -> every file, into decrypted/
-    python deadlock_bundle_xor.py encrypt  colonialmercury.dec        -> encrypted/colonialmercury
-    python deadlock_bundle_xor.py encrypt  <folder>                   -> every file, into encrypted/
-    python deadlock_bundle_xor.py check    colonialmercury            (just report, write nothing)
+    python -m deadlock_tools xor decrypt  colonialmercury        a file, or a name looked up in the 'bundles' folder
+    python -m deadlock_tools xor decrypt  [FOLDER]               every file (default: the 'bundles' folder)
+    python -m deadlock_tools xor encrypt  colonialmercury.dec    (a bare name is looked up in work/decrypted/)
+    python -m deadlock_tools xor encrypt  FOLDER
+    python -m deadlock_tools xor check    colonialmercury        just report, write nothing
 
 Options:
-    --out DIR             use DIR instead of decrypted/ or encrypted/ (the only way to write elsewhere)
+    -o, --out DIR         output folder for encrypt (writes DIR/bundles/)
+    --work DIR            scratch folder for decrypt (writes DIR/decrypted/)
+    --bundles DIR         where bare bundle names are looked up
     --key 0f0f070d0507    override the key (hex). By default the key is recovered
                           automatically from the "UnityFS" header of each file.
 """
@@ -30,10 +29,10 @@ import os
 import struct
 import sys
 
+if __package__ in (None, ""): sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from deadlock_tools import config
+
 DEFAULT_KEY = bytes.fromhex("0f0f070d0507")  # recovered from colonialmercury
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEC_DIR = os.path.join(BASE_DIR, "decrypted")
-ENC_DIR = os.path.join(BASE_DIR, "encrypted")
 MAGIC = b"UnityFS\x00"
 
 
@@ -112,33 +111,57 @@ def out_name(name: str, mode: str) -> str:
     return name[:-4] if name.endswith(".dec") else name
 
 
+def find_source(src, mode, bundles=None):
+    """src as given if it exists; otherwise a bare name is looked up in the bundle folder (decrypt/check) or work/decrypted (encrypt)."""
+    if src and os.path.exists(src):
+        return src
+    if not src:
+        return config.setting("bundles", bundles)
+    folder = config.work_dir(create=False) if mode == "encrypt" else config.setting("bundles", bundles, required=False)
+    for name in (src, src + ".dec") if mode == "encrypt" else (src,):
+        cand = os.path.join(folder, name) if folder else ""
+        if cand and os.path.exists(cand):
+            return cand
+    raise SystemExit("no such file: %s%s" % (src, " (also looked in %s)" % folder if folder else ""))
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog="deadlock xor", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["decrypt", "encrypt", "check"])
-    ap.add_argument("src")
-    ap.add_argument("--out", help="output folder instead of decrypted/ or encrypted/")
+    ap.add_argument("src", nargs="?", help="bundle file, folder, or bundle name (default: the 'bundles' folder)")
+    config.add_path_args(ap, "out", "bundles")
+    ap.add_argument("--work", metavar="DIR", help="scratch folder for decrypt (default: 'work' in deadlock.json)")
     ap.add_argument("--key", help="hex key override")
     a = ap.parse_args()
     key = bytes.fromhex(a.key) if a.key else None
-    outdir = a.out or (DEC_DIR if a.mode == "decrypt" else ENC_DIR)
+    src = find_source(a.src, a.mode, a.bundles)
+    if a.mode == "decrypt":
+        outdir = os.path.join(os.path.abspath(a.work), "decrypted") if a.work else config.work_dir()
+    elif a.mode == "encrypt":
+        outdir = config.out_dir("bundles", a.out)
+    else:
+        outdir = None
 
-    if os.path.isdir(a.src):
+    if os.path.isdir(src):
         good = bad = 0
-        for root, _d, files in os.walk(a.src):
+        for root, _d, files in os.walk(src):
             for name in sorted(files):
                 s = os.path.join(root, name)
-                rel = os.path.relpath(s, a.src)
-                d = os.path.join(outdir, os.path.dirname(rel), out_name(os.path.basename(rel), a.mode))
-                if a.mode != "check":
+                rel = os.path.relpath(s, src)
+                d = None
+                if outdir:
+                    d = os.path.join(outdir, os.path.dirname(rel), out_name(os.path.basename(rel), a.mode))
                     os.makedirs(os.path.dirname(d), exist_ok=True)
-                good, bad = (good + 1, bad) if process(s, None if a.mode == "check" else d, key, a.mode) else (good, bad + 1)
-        print(f"\nDone: {good} processed, {bad} skipped/failed" + ("" if a.mode == "check" else f"  (output in {outdir})"))
+                good, bad = (good + 1, bad) if process(s, d, key, a.mode) else (good, bad + 1)
+        print(f"\nDone: {good} processed, {bad} skipped/failed" + (f"  (output in {outdir})" if outdir else ""))
     else:
         dst = None
-        if a.mode != "check":
+        if outdir:
             os.makedirs(outdir, exist_ok=True)
-            dst = os.path.join(outdir, out_name(os.path.basename(a.src), a.mode))
-        sys.exit(0 if process(a.src, dst, key, a.mode) else 1)
+            dst = os.path.join(outdir, out_name(os.path.basename(src), a.mode))
+            if os.path.exists(dst) and config.same_file(dst, src):
+                raise SystemExit("refusing to overwrite the input %s" % src)
+        sys.exit(0 if process(src, dst, key, a.mode) else 1)
 
 
 if __name__ == "__main__":
