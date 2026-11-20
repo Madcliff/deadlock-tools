@@ -94,3 +94,7 @@ tool). Its `deadlock.json`, `out/` and `work/` are kept next to the `.pyz`.
 | `deadlock_weapons.py SRC.dec DST --encrypt` | `weapons BUNDLE` (encrypted or not; output encrypted by default, `--no-encrypt` to keep it plain) |
 | `patch_munition_load.py` | `dll patch --munition-load` |
 | GUI settings in `~/.deadlock_ships.json`, tools embedded in `deadlock_editor.py` | one `deadlock.json`; the GUI uses the package directly |
+
+## License
+
+Deadlock Tools is licensed under the [GNU General Public License, version 2 only](LICENSE).

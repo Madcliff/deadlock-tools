@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "deadlock-tools"
 dynamic = ["version"]
 description = "Modding tools for Battlestar Galactica: Deadlock - ship bundles, ship database, DLL patches and a browser GUI"
 readme = "README.md"
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = []
 
