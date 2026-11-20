@@ -4,7 +4,7 @@
     python scripts/build_pyz.py
     python deadlock.pyz gui          (or any other tool: python deadlock.pyz shipdb list ...)
 
-Settings (deadlock.json), out/ and work/ are then kept next to the .pyz file.
+Settings (deadlock.json) and the editable work tree are kept next to the .pyz file.
 """
 import os, shutil, sys, tempfile, zipapp
 

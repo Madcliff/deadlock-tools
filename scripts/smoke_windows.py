@@ -18,10 +18,10 @@ def main():
         app = directory / executable.name
         shutil.copy2(executable, app)
         subprocess.run([str(app), "weapons", "-h"], cwd=directory, check=True, timeout=60)
-        subprocess.run([str(app), "config", "--out", str(directory / "mod output")],
+        subprocess.run([str(app), "config", "--work", str(directory / "mod work")],
                        cwd=directory, check=True, timeout=60)
         settings = json.loads((directory / "deadlock.json").read_text())
-        assert Path(settings["out"]) == directory / "mod output"
+        assert Path(settings["work"]) == directory / "mod work"
 
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
@@ -37,7 +37,7 @@ def main():
                         with opener.open(url + "/", timeout=2) as page:
                             assert b"Deadlock Ship Editor" in page.read()
                         with opener.open(url + "/api/config", timeout=2) as response:
-                            assert Path(json.load(response)["out"]) == directory / "mod output"
+                            assert Path(json.load(response)["work"]) == directory / "mod work"
                         break
                     except URLError:
                         if gui.poll() is not None:
