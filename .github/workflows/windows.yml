@@ -2,6 +2,8 @@ name: Windows standalone
 
 on:
   workflow_dispatch:
+  release:
+    types: [published]
   push:
     branches: [main]
     paths:
@@ -36,3 +38,21 @@ jobs:
           name: DeadlockTools-Windows-x64
           path: dist/DeadlockTools-Windows-x64.zip
           if-no-files-found: error
+
+
+  publish:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: DeadlockTools-Windows-x64
+          path: dist
+      - name: Attach the tested Windows archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/DeadlockTools-Windows-x64.zip --repo "$GITHUB_REPOSITORY"
