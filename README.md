@@ -6,6 +6,10 @@ Everything is also available as a browser GUI. Uses Python and the standard libr
 
 Select a ship to edit its stats, bundle slots, weapons, systems, and abilities on the same page. Use **Bundle file** to inspect or convert the prefab. The editor selects a matching bundle from the configured folder when it finds one.
 
+## Standalone Windows build
+
+Download `DeadlockTools-Windows-x64.zip` from the [GitHub releases](https://github.com/Madcliff/deadlock-tools/releases). Extract it to a writable folder and double-click `DeadlockTools.exe`. It opens the editor in your default browser and keeps its console open while the editor is running. Settings and staged outputs live beside the executable. For CLI use, run `DeadlockTools.exe --help` from PowerShell.
+
 ## Quick start
 
 ```bash

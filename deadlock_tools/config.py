@@ -29,7 +29,9 @@ import sys
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(PACKAGE_DIR)
 ZIPAPP = None                                                         # set when running from the single-file deadlock.pyz
-if os.path.isfile(PROJECT_DIR):
+if getattr(sys, "frozen", False):
+    PROJECT_DIR = os.path.dirname(os.path.abspath(sys.executable))
+elif os.path.isfile(PROJECT_DIR):
     ZIPAPP, PROJECT_DIR = PROJECT_DIR, os.path.dirname(PROJECT_DIR)   # settings, out/ and work/ then live next to the .pyz
 SETTINGS_FILE = os.path.join(PROJECT_DIR, "deadlock.json")
 OLD_SETTINGS_FILE = os.path.expanduser("~/.deadlock_ships.json")      # the GUI's settings before the reorganisation
