@@ -2,28 +2,27 @@
 """
 gui - graphical editor for BSG Deadlock (runs a small web page on your own computer).
 
-  python -m deadlock_tools gui [LEVELS DLL] [--bundles DIR] [--out DIR] [--port 8765] [--no-browser]
+  python -m deadlock_tools gui [LEVELS DLL] [--bundles DIR] [--work DIR] [--port 8765] [--no-browser]
 
 The paths come from deadlock.json (the same settings file the command-line tools use) and can be changed in the page
 (Settings tab, with a Browse button); changes are saved back to deadlock.json. On the command line:
     LEVELS         the folder with the game's level files
     DLL            Assembly-CSharp.dll
     --bundles DIR  folder with ship bundles (encrypted or .dec; encrypted ones are decrypted automatically) for the Ships page (optional)
-    --out DIR      output folder (default out/): results go to its levels/, dll/ and bundles/ sub-folders, the same places the
-                   command-line tools use, so edits made in either stack
+  --work DIR     editable work folder (the work tree mirrors BSG_Data)
 
 It opens http://127.0.0.1:8765 by itself. Nothing leaves your computer and the originals are never touched.
 
 TABS
-  Settings the four paths (level data folder, DLL, ship asset folder, output folder), each with a Browse button.
+  Settings default folders for level data and ship bundles, the DLL file, and the work folder.
   Ships    pick a ship, edit its stats (hull, armour per side, speed, turn rate, DRADIS range, build cost/time/rush, fleet
-           points, carrier slots, flags ...), press Apply: every level file with the ship table is rewritten into out/levels/.
+           points, carrier slots, flags ...), press Apply: changed level files are written into the work tree.
            Bundle controls appear alongside the ship's stats, with a file picker and inspection controls above.
   DLL      the 'dll' patches (armour regen, squadron revive, max rank, command nodes, munition load).
   Database related 'shipdb' command as a form: commanders (ranks, fixspecs), ship list, XP per rank, copy veterancy,
            munitions, research lists, fleet limits, fleet map icons, squadron hull. Research for ONE ship is on its Ships page.
 
-Copy out/levels/*, out/dll/* and out/bundles/* over the game's originals (back them up first).
+The work folder mirrors BSG_Data so its contents can be merged into the game installation.
 """
 import argparse, json, os, subprocess, sys, struct, threading, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -56,10 +55,12 @@ def num(x):
 
 
 class Project:
-    def __init__(self, levels, dll, out, bundles):
+    def __init__(self, levels, dll, work, bundles):
         ab = lambda x: os.path.abspath(x) if x else x                  # the helper tools run from the script's folder, so no relative paths
-        self.levels, self.dll, self.out, self.bundles = ab(levels), ab(dll), ab(out), ab(bundles)
-        self.lev_out, self.dll_out, self.bundle_out = (os.path.join(self.out, k) for k in config.KINDS)
+        self.levels, self.dll, self.work, self.bundles = ab(levels), ab(dll), ab(work), ab(bundles)
+        self.stage_root = os.path.join(self.work, ".deadlock-tools", "stage")
+        self.game_data = os.path.join(self.work, "BSG_Data")
+        self.work_paths = {kind: os.path.join(self.game_data, *parts) for kind, parts in config.WORK_PATHS.items()}
         levels, dll = self.levels, self.dll
         self.S = sd.Schema(dll)
         self.lock = threading.Lock()
@@ -71,9 +72,51 @@ class Project:
         self._view = None
 
     def src_for(self, f, fresh=False):
-        """the copy in --out if an earlier edit made one (so edits stack), else the original"""
-        cand = os.path.join(self.lev_out, os.path.basename(f))
+        """Prefer the same-named file in the merge-ready work tree, else the configured default."""
+        cand = os.path.join(self.work_paths["levels"], os.path.basename(f))
         return cand if (not fresh and os.path.exists(cand) and os.path.abspath(cand) != os.path.abspath(f)) else f
+
+    def stage_dir(self, kind):
+        if kind not in config.WORK_PATHS:
+            raise ValueError("unknown work-tree file type: %s" % kind)
+        return os.path.join(self.stage_root, kind)
+
+    def prepare_stage(self, kind):
+        import shutil
+        staged = self.stage_dir(kind)
+        if os.path.isdir(staged): shutil.rmtree(staged)
+        os.makedirs(staged, exist_ok=True)
+        source = self.work_paths[kind]
+        if os.path.isdir(source):
+            for filename in os.listdir(source):
+                src = os.path.join(source, filename)
+                if os.path.isfile(src): shutil.copy2(src, os.path.join(staged, filename))
+        return {filename: (os.path.getsize(os.path.join(staged, filename)), os.stat(os.path.join(staged, filename)).st_mtime_ns)
+                for filename in os.listdir(staged) if os.path.isfile(os.path.join(staged, filename))}
+
+    def promote_stage(self, kind, before=None):
+        import shutil
+        staged = self.stage_dir(kind)
+        target_dir = self.work_paths[kind]
+        os.makedirs(target_dir, exist_ok=True)
+        copied = []
+        for filename in os.listdir(staged) if os.path.isdir(staged) else []:
+            src = os.path.join(staged, filename)
+            if not os.path.isfile(src): continue
+            stat = os.stat(src); prior = (before or {}).get(filename)
+            if prior == (stat.st_size, stat.st_mtime_ns): continue
+            target = os.path.join(target_dir, filename)
+            shutil.copy2(src, target); copied.append(target)
+        return copied
+
+    def run_staged(self, kind, cmd, timeout):
+        """Run a CLI edit in its expected output folder, then promote changed files to the work tree."""
+        with self.lock:
+            before = self.prepare_stage(kind)
+            result = run_cmd(cmd, timeout)
+            if result.returncode == 0:
+                self.promote_stage(kind, before)
+        return result
 
     def view(self, fresh=False):
         path = self.src_for(self.table_files[0], fresh); key = (path, os.path.getmtime(path))
@@ -182,7 +225,7 @@ class Project:
         return sd.Db(self.dll, dst, self.S), clean
 
     def apply(self, edits, fresh=False):
-        log = []; os.makedirs(self.lev_out, exist_ok=True)
+        log = []; os.makedirs(self.work_paths["levels"], exist_ok=True)
         scalar = [e for e in edits if "field" in e]; vets = [e for e in edits if "vet" in e]; resea = [e for e in edits if "research" in e]
         with self.lock:
             for f in self.table_files:
@@ -198,7 +241,7 @@ class Project:
                         db.write_int(off, int(fv))
                     elif kind == "bool": struct.pack_into("<B", db.buf, db.base + off, 1 if v in (True, 1, "1", "true", "True") else 0)
                     else: raise ValueError("%s is not a simple number/flag" % fld)
-                dst = os.path.join(self.lev_out, os.path.basename(f)); config.write(dst, db.buf, f)
+                dst = os.path.join(self.work_paths["levels"], os.path.basename(f)); config.write(dst, db.buf, f)
                 wanted = {}
                 for e in vets:
                     db, clean = self._set_vet(db, dst, e["ship"], e["vet"]); wanted[e["ship"]] = clean
@@ -235,15 +278,31 @@ class Project:
         argv = t["build"](self, v or {})
         if "--levels" not in argv: argv += ["--levels", self.levels]
         argv += ["--dll", self.dll]
-        argv += ["-o", self.out] + (["--fresh"] if fresh else [])
-        with self.lock: r = run_cmd(tool_cmd("shipdb") + argv, 900)
+        argv += ["-o", self.stage_root] + (["--fresh"] if fresh else [])
+        command = tool_cmd("shipdb") + argv
+        r = self.run_staged("levels", command, 900) if t.get("writes") else run_cmd(command, 900)
         if t.get("writes"): self._view = None
-        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-30000:] if t.get("writes") else r.stdout + r.stderr, "cmd": "shipdb " + " ".join(argv)}
+        output = (r.stdout + r.stderr).replace(self.stage_root, self.work)
+        return {"ok": r.returncode == 0, "output": output[-30000:] if t.get("writes") else output, "cmd": "shipdb " + " ".join(argv)}
 
     # ---- bundles (weapons) ----
     def bundle_files(self):
-        if not self.bundles or not os.path.isdir(self.bundles): return []
-        return sorted(f for f in os.listdir(self.bundles) if os.path.isfile(os.path.join(self.bundles, f)))
+        def files(folder):
+            if not folder or not os.path.isdir(folder): return set()
+            return {name for name in os.listdir(folder)
+                    if not name.startswith(".") and not name.endswith(".bak") and not name.endswith(".manifest")
+                    and os.path.isfile(os.path.join(folder, name))}
+        work_files, source_files = files(self.work_paths["bundles"]), files(self.bundles)
+        normalise = lambda value: "".join(char for char in value.lower() if char.isalnum())
+        ship_names = {normalise(ship["name"]) for ship in self.view().ships}
+        def is_known_ship(name):
+            stem = name[:-4] if name.lower().endswith(".dec") else os.path.splitext(name)[0]
+            key = normalise(stem)
+            return any(key == ship or key.endswith(ship) for ship in ship_names)
+        # The configured game folder can contain hundreds of non-ship bundles.
+        # Match its files against the live ship database; keep all work copies so
+        # directly imported mod bundles remain available even before DB records exist.
+        return sorted(work_files | {name for name in source_files if is_known_ship(name)})
 
     def bundle_form(self):
         ap = wmod.build_parser(); out = []
@@ -262,8 +321,10 @@ class Project:
             if g.title in ("positional arguments", "options"): continue
             for a in g._group_actions:
                 if not a.option_strings or a.dest in ("help", "out", "bundles", "inspect") or a.help == argparse.SUPPRESS: continue
-                kind = "bool" if isinstance(a, argparse._StoreTrueAction) else "choice" if a.choices else "list" if isinstance(a, argparse._AppendAction) else "text"
-                out.append({"group": g.title, "ability": ability_group.get(a.dest), "dest": a.dest, "flag": a.option_strings[-1], "kind": kind, "help": (a.help or "").replace("%%", "%"), "choices": list(a.choices) if a.choices else None,
+                donor_choice = a.dest in ("defender_donor", "celestra_donor", "stealth")
+                choices = self.bundle_files() if donor_choice else (list(a.choices) if a.choices else None)
+                kind = "choice" if donor_choice else "bool" if isinstance(a, argparse._StoreTrueAction) else "choice" if a.choices else "list" if isinstance(a, argparse._AppendAction) else "text"
+                out.append({"group": g.title, "ability": ability_group.get(a.dest), "dest": a.dest, "flag": a.option_strings[-1], "kind": kind, "help": (a.help or "").replace("%%", "%"), "choices": choices,
                             "default": None if a.default in (None, False) else str(a.default), "metavar": a.metavar or ""})
         return out
 
@@ -272,11 +333,38 @@ class Project:
         if os.path.isabs(bundle):                                      # a path picked with the Browse button
             if not os.path.isfile(bundle): raise ValueError("bundle file not found: %s" % bundle)
             return bundle, os.path.basename(bundle)
-        if bundle in self.bundle_files(): return os.path.join(self.bundles, bundle), bundle
+        staged = os.path.join(self.work_paths["bundles"], bundle)
+        if os.path.isfile(staged): return staged, bundle
+        if bundle in self.bundle_files():
+            source = os.path.join(self.bundles, bundle)
+            return source, bundle
         raise ValueError("choose a bundle file")
 
+    def import_bundle(self, bundle):
+        """Copy a selected default bundle into the editable work overlay."""
+        import shutil, tempfile, time
+        source, filename = self.bundle_src(bundle)
+        bundle_dir = self.work_paths["bundles"]
+        os.makedirs(bundle_dir, exist_ok=True)
+        target = os.path.join(bundle_dir, filename)
+        if config.same_file(source, target): return {"path": target, "backup": None, "imported": False}
+        backup = None
+        with self.lock:
+            if os.path.isfile(target):
+                backup = target + ".bak"
+                if os.path.exists(backup): backup = target + "." + time.strftime("%Y%m%d-%H%M%S") + ".bak"
+                shutil.copy2(target, backup)
+            fd, temporary = tempfile.mkstemp(prefix=".bundle-import-", dir=bundle_dir)
+            os.close(fd)
+            try:
+                shutil.copy2(source, temporary)
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary): os.unlink(temporary)
+        return {"path": target, "backup": backup, "imported": True}
+
     def run_xor(self, bundle, mode, key=""):
-        """the 'xor' tool on one bundle: decrypt -> work/decrypted/, encrypt -> out/bundles/, check = report only"""
+        """Run bundle conversion; encrypted output is promoted into the work tree."""
         if mode not in ("decrypt", "encrypt", "check"): raise ValueError("bad mode")
         bundle = bundle.strip()
         if bundle and not os.path.isdir(bundle):
@@ -284,22 +372,28 @@ class Project:
         cmd = tool_cmd("xor") + [mode]
         if bundle:
             cmd.append(bundle)
-        cmd += ["-o", self.out]
+        cmd += ["-o", self.stage_root]
         if self.bundles:
             cmd += ["--bundles", self.bundles]
         if key.strip():
             key = key.strip()
             bytes.fromhex(key)
             cmd += ["--key", key]
-        with self.lock: r = run_cmd(cmd, 300)
-        return {"ok": r.returncode == 0, "output": r.stdout + r.stderr, "cmd": " ".join(cmd[3:])}
+        if mode == "encrypt":
+            r = self.run_staged("bundles", cmd, 300)
+        else:
+            with self.lock: r = run_cmd(cmd, 300)
+        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr).replace(self.stage_root, self.work), "cmd": " ".join(cmd[3:])}
 
-    def run_bundle(self, bundle, opts):
+    def run_bundle(self, bundle, opts, prefab_fields=None, overwrite=False):
         src, bundle = self.bundle_src(bundle)
         ap = wmod.build_parser()
         stem = bundle[:-4] if bundle.endswith(".dec") else bundle
-        dst = None if (opts.get("list_mounts") or opts.get("inspect")) else os.path.join(self.bundle_out, stem + (".dec" if opts.get("no_encrypt") else ""))
-        cmd = tool_cmd("weapons") + [src, "-o", self.out] + (["--bundles", self.bundles] if self.bundles else [])
+        inspect = bool(opts.get("list_mounts") or opts.get("inspect"))
+        plain = src.lower().endswith(".dec") if overwrite else bool(opts.get("no_encrypt"))
+        outname = stem + (".dec" if plain else "")
+        dst = None if inspect else (src if overwrite else os.path.join(self.work_paths["bundles"], outname))
+        cmd = tool_cmd("weapons") + [src, "-o", self.stage_root] + (["--bundles", self.bundles] if self.bundles else [])
         for a in ap._actions:
             v = opts.get(a.dest)
             if not a.option_strings or a.dest in ("help", "out", "bundles", "encrypt") or v in (None, "", False): continue
@@ -308,12 +402,41 @@ class Project:
                 for line in str(v).splitlines():
                     if line.strip(): cmd += [a.option_strings[-1], line.strip()]
             else: cmd += [a.option_strings[-1], str(v)]
-        with self.lock: r = run_cmd(cmd, 900)
-        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-20000:], "dst": dst, "cmd": " ".join(cmd[3:])}
+        if prefab_fields:
+            cmd += ["--prefab-fields", json.dumps(prefab_fields)]
+        backup = None
+        if overwrite and inspect: raise ValueError("inspection cannot overwrite a bundle")
+        if overwrite:
+            if plain and "--no-encrypt" not in cmd: cmd.append("--no-encrypt")
+            if not plain: cmd = [arg for arg in cmd if arg != "--no-encrypt"]
+        with self.lock:
+            if not inspect: self.prepare_stage("bundles")
+            produced = os.path.join(self.stage_dir("bundles"), outname) if not inspect else None
+            if produced and os.path.exists(produced): os.unlink(produced)
+            r = run_cmd(cmd, 900)
+            if r.returncode == 0 and not inspect:
+                if not os.path.isfile(produced):
+                    r = subprocess.CompletedProcess(cmd, 1, r.stdout, r.stderr + "\nExpected bundle output was not created: " + str(produced))
+                else:
+                    import shutil, tempfile, time
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    if overwrite:
+                        backup = src + ".bak"
+                        if os.path.exists(backup): backup = src + "." + time.strftime("%Y%m%d-%H%M%S") + ".bak"
+                        shutil.copy2(src, backup)
+                    fd, temporary = tempfile.mkstemp(prefix=".bundle-save-", dir=os.path.dirname(dst)); os.close(fd)
+                    try:
+                        shutil.copy2(produced, temporary); os.replace(temporary, dst)
+                    finally:
+                        if os.path.exists(temporary): os.unlink(temporary)
+        output = (r.stdout + r.stderr).replace(self.stage_root, self.work)
+        return {"ok": r.returncode == 0, "output": output[-20000:], "dst": dst if r.returncode == 0 and not inspect else None,
+                "backup": backup, "cmd": " ".join(cmd[3:])}
 
-    # ---- DLL patches (the 'dll' tool; it continues from out/dll/ itself, so patches stack) ----
+    # ---- DLL patches (the work-tree copy is the continuing source) ----
     def dll_src(self, fresh=False):
-        return config.latest(self.dll, "dll", self.out, fresh=fresh, quiet=True)
+        staged = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
+        return self.dll if fresh or not os.path.isfile(staged) else staged
 
     def dll_check(self, fresh=False):
         with self.lock:
@@ -322,28 +445,28 @@ class Project:
         return {"source": source, "output": r.stdout + r.stderr}
 
     def dll_patch(self, o):
-        dst = os.path.join(self.dll_out, os.path.basename(self.dll))
-        cmd = tool_cmd("dll") + ["patch", self.dll, "-o", self.out]; base = len(cmd)
+        dst = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
+        cmd = tool_cmd("dll") + ["patch", self.dll, "-o", self.stage_root]; base = len(cmd)
         for key, flag in (("armour_factor", "--armour-factor"), ("revive_turns", "--revive-turns"), ("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"),
                           ("command_step", "--command-step"), ("command_first_rank", "--command-first-rank")):
             if str(o.get(key, "")).strip(): cmd += [flag, str(o[key]).strip()]
         if o.get("munition_load") in (True, "true", 1, "1"): cmd.append("--munition-load")
         if not any(c.startswith("--") and c not in ("--command-step", "--command-first-rank") for c in cmd[base:]): raise ValueError("fill in at least one patch value")
         if o.get("fresh") in (True, "true", 1, "1"): cmd.append("--fresh")
-        with self.lock: r = run_cmd(cmd, 300)
-        return {"ok": r.returncode == 0, "output": r.stdout + r.stderr, "dst": dst}
+        r = self.run_staged("dll", cmd, 300)
+        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr).replace(self.stage_root, self.work), "dst": dst}
 
     def dll_revert(self, o):
-        """undo patches in out/dll/ (the ticked ones, or all of them when none is ticked)"""
-        dst = os.path.join(self.dll_out, os.path.basename(self.dll))
-        cmd = tool_cmd("dll") + ["revert", self.dll, "-o", self.out]
+        """Undo selected DLL patches in the work-tree copy."""
+        dst = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
+        cmd = tool_cmd("dll") + ["revert", self.dll, "-o", self.stage_root]
         for key, flag in (("armour", "--armour"), ("revive", "--revive"), ("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"), ("munition_load", "--munition-load")):
             if o.get(key) in (True, "true", 1, "1"): cmd.append(flag)
-        with self.lock: r = run_cmd(cmd, 300)
-        return {"ok": r.returncode == 0, "output": r.stdout + r.stderr, "dst": dst}
+        r = self.run_staged("dll", cmd, 300)
+        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr).replace(self.stage_root, self.work), "dst": dst}
 
-PATH_KEYS = ("levels", "dll", "bundles", "out", "work")
-STATE = {"cfg": {"levels": "", "dll": "", "bundles": "", "out": config.resolve(config.DEFAULTS["out"]), "work": config.resolve(config.DEFAULTS["work"])}, "P": None, "error": ""}
+PATH_KEYS = ("levels", "dll", "bundles", "work")
+STATE = {"cfg": {"levels": "", "dll": "", "bundles": "", "work": config.resolve(config.DEFAULTS["work"])}, "P": None, "error": ""}
 
 
 def _need(v, k, what):
@@ -435,26 +558,28 @@ def load_cfg():
 
 
 def configure(cfg, save=True):
-    """validate the four paths and (re)load the level data; the GUI calls this from the Settings tab"""
+    """Validate source paths and reload the editor with its single work-tree destination."""
     cfg = {k: os.path.abspath(os.path.expanduser(v)) if v else "" for k, v in ((k, (cfg.get(k) or "").strip()) for k in PATH_KEYS)}
-    cfg["out"] = cfg["out"] or config.resolve(config.DEFAULTS["out"]); cfg["work"] = cfg["work"] or config.resolve(config.DEFAULTS["work"])
+    cfg["work"] = cfg["work"] or config.resolve(config.DEFAULTS["work"])
+    migrated = config.migrate_legacy_out(cfg["work"])
     if not cfg["levels"] or not os.path.exists(cfg["levels"]): raise ValueError("level data folder not found: %r" % cfg["levels"])
     if not os.path.isfile(cfg["dll"]): raise ValueError("Assembly-CSharp.dll not found: %r" % cfg["dll"])
     if cfg["bundles"] and not os.path.isdir(cfg["bundles"]): raise ValueError("ship asset folder not found: %r" % cfg["bundles"])
-    if config.same_file(os.path.join(cfg["out"], "levels"), cfg["levels"]):
-        raise ValueError("the level data folder is the output folder's levels/ - point it at the game's original level files")
-    try: P = Project(cfg["levels"], cfg["dll"], cfg["out"], cfg["bundles"] or None)
+    if config.same_file(os.path.join(cfg["work"], "BSG_Data"), cfg["levels"]):
+        raise ValueError("the level data folder cannot be the work folder's BSG_Data tree; choose the game's default level-data folder")
+    try: P = Project(cfg["levels"], cfg["dll"], cfg["work"], cfg["bundles"] or None)
     except BaseException as e: raise ValueError(str(e) or "could not read the level data")
     STATE.update(cfg=cfg, P=P, error="")
-    if save:
+    if save or migrated:
         try: config.save({**config.load(), **cfg})
         except OSError: pass
 
 
 def config_info():
     P = STATE["P"]; c = STATE["cfg"]
-    return {**c, "ready": P is not None, "error": STATE["error"], "tables": len(P.table_files) if P else 0, "bundles": P.bundle_files() if P else [],
-            "bundle_dir": P.bundles if P else "", "out": P.out if P else c["out"], "home": os.path.expanduser("~")}
+    return {**c, "ready": P is not None, "error": STATE["error"], "tables": len(P.table_files) if P else 0,
+            "bundle_files": P.bundle_files() if P else [], "bundle_dir": P.bundles if P else c["bundles"],
+            "home": os.path.expanduser("~")}
 
 
 def browse(path, files):
@@ -512,7 +637,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/config": configure(body); return self.send(config_info())
             P = self.need()
             if self.path == "/api/apply": return self.send({"log": P.apply(body["edits"], body.get("fresh", False))})
-            if self.path == "/api/bundle/run": return self.send(P.run_bundle(body["bundle"], body["options"]))
+            if self.path == "/api/bundle/import": return self.send(P.import_bundle(body["bundle"]))
+            if self.path == "/api/bundle/stats":
+                path, _ = P.bundle_src(body["bundle"])
+                with P.lock:
+                    return self.send(wmod.bundle_ship_stats(path))
+            if self.path == "/api/bundle/run": return self.send(P.run_bundle(body["bundle"], body["options"], body.get("prefab_fields"), body.get("overwrite", False)))
             if self.path == "/api/dll/patch": return self.send(P.dll_patch(body))
             if self.path == "/api/dll/revert": return self.send(P.dll_revert(body))
             if self.path == "/api/xor": return self.send(P.run_xor(body["bundle"], body["mode"], body.get("key", "")))
@@ -522,7 +652,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(a):
-    given = {k: os.path.abspath(v) for k, v in (("levels", a.levels), ("dll", a.dll), ("bundles", a.bundles), ("out", a.out)) if v}
+    given = {k: os.path.abspath(v) for k, v in (("levels", a.levels), ("dll", a.dll), ("bundles", a.bundles), ("work", a.work)) if v}
     cfg = {**{k: v for k, v in load_cfg().items() if v}, **given}
     STATE["cfg"].update(cfg)
     if cfg.get("levels") and cfg.get("dll"):
@@ -542,7 +672,7 @@ def serve(a):
 def main():
     ap = argparse.ArgumentParser(prog="deadlock gui", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("levels", nargs="?"); ap.add_argument("dll", nargs="?")
-    ap.add_argument("--bundles"); ap.add_argument("-o", "--out"); ap.add_argument("--port", type=int, default=8765); ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--bundles"); ap.add_argument("--work"); ap.add_argument("--port", type=int, default=8765); ap.add_argument("--no-browser", action="store_true")
     argv = sys.argv[1:]
     if argv[:1] == ["gui"]: argv = argv[1:]                       # old form: deadlock_editor.py gui ...
     serve(ap.parse_args(argv))
@@ -583,7 +713,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 <span class="sp"></span><span id="pend" class="hint"></span>
 <label class="hint"><input type="checkbox" id="fresh"> start from the originals</label>
 <button class="sec" id="discard" disabled>Discard</button><button class="pri" id="apply" disabled>Apply</button></header>
-<main id="tab-ships"><aside id="side"><input id="q" placeholder="Search ships" autocomplete="off"><button class="sec" id="ship-tools">Ship database tools</button><div id="list"></div></aside><section id="view"><p class="hint">Pick a ship on the left.</p></section></main>
+<main id="tab-ships"><aside id="side"><input id="q" placeholder="Search ships" autocomplete="off"><button class="sec" id="load-bundle">Load bundle…</button><button class="sec" id="ship-tools">Ship database tools</button><div id="list"></div></aside><section id="view"><p class="hint">Pick a ship or load a bundle.</p></section></main>
 <section id="tab-dll" hidden style="padding:16px 20px;max-width:980px"></section>
 <section id="tab-tools" hidden style="padding:16px 20px;max-width:1100px"></section>
 <section id="tab-settings" hidden style="padding:16px 20px;max-width:980px"></section>
@@ -599,14 +729,28 @@ const GROUPS=[
  ['Carrier & munition slots',['FighterSlots','UtilityFighterSlots','MunitionSlots','SupportSlotPriority']],
  ['Class & flags',['Faction','ShipClass','SizeClass','IsCivilian','AlwaysFlagship','AlwaysAllowInCampaign','IncludedInCodex','IncludedInMultiplayer','DLCRequired','DescriptionHeaderID']]];
 const key=(s,f)=>s+'|'+f;
+let syncingSlotValues=false;
+function shipFieldValue(name){const pending=state.pending[key(state.cur,name)];return pending?pending.value:state.data?.fields.find(field=>field.name===name)?.value}
+function setShipFieldValue(name,value){const input=$('#view [data-db-field="'+name+'"]');if(!input)return;input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}))}
+function syncBundleSlotInputs(name,value){
+ if(syncingSlotValues||!activeBundle?.slots)return;
+ const target={MunitionSlots:'munition_slots',FighterSlots:'fighter_slots',UtilityFighterSlots:'utility_slots'}[name];
+ if(!target)return;
+ const input=activeBundle.slots.querySelector('[data-d="'+target+'"]');if(input)input.value=String(value);
+ if(name==='FighterSlots'||name==='UtilityFighterSlots'){
+   const groups=activeBundle.slots.querySelector('[data-d="squadron_groups"]'),split=activeBundle.slots.querySelector('[data-d="split_squadrons"]');
+   const fighters=Number(shipFieldValue('FighterSlots')),support=Number(shipFieldValue('UtilityFighterSlots'));
+   if(groups&&!groups.dataset.manual){if(split?.checked)groups.value='';else if(Number.isInteger(fighters)&&Number.isInteger(support))groups.value=[fighters,support].filter(count=>count>0).join(',')}
+ }
+}
 function updPend(){const n=Object.keys(state.pending).length;$('#pend').textContent=n?n+' pending change'+(n>1?'s':''):'';$('#apply').disabled=!n;$('#discard').disabled=!n;renderList()}
 function renderList(){const q=$('#q').value.toLowerCase();const dirty=new Set(Object.values(state.pending).map(p=>p.ship));const box=$('#list');box.replaceChildren(...state.ships.filter(s=>(s.name+' '+s.faction+' '+s.class).toLowerCase().includes(q)).map(s=>el('div',{class:'ship'+(s.name===state.cur?' on':''),onclick:()=>openShip(s.name)},el('span',{},dirty.has(s.name)?el('span',{class:'dot'},'● '):'',s.name),el('small',{},s.faction[0]+' · '+s.class))))}
 function fieldInput(f){const k=key(state.cur,f.name),orig=f.value,pend=state.pending[k];const cur=pend?pend.value:orig;let inp;
- const mark=()=>{const v=read();const same=(f.type==='bool'||f.type==='enum')?String(v)===String(orig):Math.abs(Number(v)-Number(orig))<1e-6*Math.max(1,Math.abs(orig));if(same)delete state.pending[k];else state.pending[k]={ship:state.cur,field:f.name,value:(f.type==='bool'||f.type==='enum')?(f.type==='bool'?!!v:Number(v)):Number(v)};inp.classList.toggle('chg',!same);if(f.type!=='bool')note.textContent=same?'':'was '+orig;updPend()};
+ const mark=()=>{const v=read();const same=(f.type==='bool'||f.type==='enum')?String(v)===String(orig):Math.abs(Number(v)-Number(orig))<1e-6*Math.max(1,Math.abs(orig));if(same)delete state.pending[k];else state.pending[k]={ship:state.cur,field:f.name,value:(f.type==='bool'||f.type==='enum')?(f.type==='bool'?!!v:Number(v)):Number(v)};inp.classList.toggle('chg',!same);if(f.type!=='bool')note.textContent=same?'':'was '+orig;if(['MunitionSlots','FighterSlots','UtilityFighterSlots'].includes(f.name))syncBundleSlotInputs(f.name,v);updPend()};
  let read;const note=el('span',{class:'orig'});
- if(f.type==='bool'){inp=el('input',{type:'checkbox',onchange:mark});inp.checked=!!cur;read=()=>inp.checked;return el('label',{class:'f chk'},inp,f.name)}
- if(f.type==='enum'){inp=el('select',{onchange:mark},Object.entries(f.options).map(([i,n])=>el('option',{value:i},n+' ('+i+')')));inp.value=String(cur);read=()=>inp.value}
- else{inp=el('input',{type:'number',step:f.type==='int'?'1':'any',value:cur,oninput:mark});read=()=>inp.value===''?NaN:inp.value}
+ if(f.type==='bool'){inp=el('input',{type:'checkbox','data-db-field':f.name,onchange:mark});inp.checked=!!cur;read=()=>inp.checked;return el('label',{class:'f chk'},inp,f.name)}
+ if(f.type==='enum'){inp=el('select',{'data-db-field':f.name,onchange:mark},Object.entries(f.options).map(([i,n])=>el('option',{value:i},n+' ('+i+')')));inp.value=String(cur);read=()=>inp.value}
+ else{inp=el('input',{type:'number','data-db-field':f.name,step:f.type==='int'?'1':'any',value:cur,oninput:mark});read=()=>inp.value===''?NaN:inp.value}
  if(pend)inp.classList.add('chg');if(pend)note.textContent='was '+orig;return el('label',{class:'f'},f.name,inp,note)}
 
 function resNorm(r){return JSON.stringify(r.map(x=>[x.campaign,!!x.on,x.on?Number(x.cost):0,x.on?Number(x.mission):0,x.on?String(x.label):'',x.on?!!x.unlocked:false]))}
@@ -648,11 +792,11 @@ function vetCard(d){const v=d.vet,k=key(state.cur,'__vet'),card=el('div',{class:
 function renderShip(){const d=state.data;if(!d)return;const by={};d.fields.forEach(f=>by[f.name]=f);const used=new Set();const v=$('#view');
  if(activeBundle?.ship!==d.name)activeBundle=shipBundleFields(d.name);
  const bundle=activeBundle;
- v.replaceChildren(el('h2',{style:'margin:0 0 12px'},d.name),el('p',{class:'hint'},'Values from '+d.source),bundle.source);
+ v.replaceChildren(el('h2',{style:'margin:0 0 12px'},d.name),el('p',{class:'hint'},'Level database values from '+d.source),bundle.source);
  for(const [title,names] of GROUPS){
    const fields=names.map(name=>by[name]).filter(Boolean);
    fields.forEach(field=>used.add(field.name));
-   const prefab=title==='Carrier & munition slots'?bundle.slots:null;
+   const prefab=title==='Carrier & munition slots'?bundle.slots:title==='Hull & armour'?bundle.stats:null;
    if(fields.length||prefab){
      v.append(el('div',{class:'card'},el('h3',{},title),el('div',{class:'grid'},fields.map(fieldInput)),prefab));
    }
@@ -676,68 +820,252 @@ async function openShip(name){
    if(request===shipRequest)$('#view').replaceChildren(el('p',{class:'msg-bad'},e.message));
  }
 }
+async function openBundleFile(file){
+ if(!state.ships.length){try{state.ships=await api('/api/ships')}catch(error){alert('Could not load ship records: '+error.message);return}}
+ const imported=await api('/api/bundle/import',{bundle:file});file=imported.path;
+ const importedName=file.split(/[\\/]/).pop();if(!state.info.bundle_files.includes(importedName))state.info.bundle_files.push(importedName);
+ const normalize=value=>value.toLowerCase().replace(/\.dec$/i,'').replace(/[^a-z0-9]/g,'');
+ const base=file.split(/[\\/]/).pop().replace(/\.[^.]+$/,'');
+ const match=state.ships.find(ship=>normalize(ship.name)===normalize(base));
+ if(match){openedBundles.set(match.name,file);activeBundle=undefined;await openShip(match.name);return}
+ ++shipRequest;state.cur=null;state.data=null;activeBundle=shipBundleFields(null,file);renderList();
+ const choice=el('select',{},[el('option',{value:''},'Choose the ship database record to use'),...state.ships.map(ship=>el('option',{value:ship.name},ship.name+' · '+ship.faction+' · '+ship.class))]);
+ const attach=el('button',{class:'sec',onclick:async()=>{if(!choice.value)return;openedBundles.set(choice.value,file);await openShip(choice.value)}},'Load with selected ship data');
+ $('#view').replaceChildren(el('h2',{style:'margin:0 0 12px'},'Ship bundle editor'),el('p',{class:'hint'},'This bundle name did not match a ship record. Choose the database record whose stats, research, veterancy, and other ship data should be shown with this exact bundle.'),el('div',{class:'card'},el('h3',{},'Link this bundle to a ship record'),el('div',{class:'row'},choice,attach)),activeBundle.source,activeBundle.stats,activeBundle.installedAbilities,activeBundle.slots,activeBundle.sections,activeBundle.actions);
+}
 async function loadShips(){state.ships=await api('/api/ships');renderList()}
 $('#q').addEventListener('input',renderList);
-$('#discard').onclick=()=>{state.pending={};updPend();renderShip()};
-$('#apply').onclick=async()=>{const edits=Object.values(state.pending);const b=$('#apply');b.disabled=true;try{const r=await api('/api/apply',{edits,fresh:$('#fresh').checked});state.pending={};await loadShips();await openShip(state.cur);updPend();alert('Applied. '+r.log.slice(0,6).join('\n')+(r.log.length>6?'\n...':'')+'\n\nCopy the files from '+state.info.out+' over the game files (back them up first).')}catch(e){alert('Failed: '+e.message);b.disabled=false}};
+$('#load-bundle').onclick=async()=>{try{const file=await pickPath({files:true,start:state.info.bundle_dir||state.info.home,title:'Load a ship bundle'});if(file)openBundleFile(file)}catch(e){alert(e.message)}};
+$('#discard').onclick=()=>{state.pending={};updPend();if(state.data)renderShip()};
+$('#apply').onclick=async()=>{const edits=Object.values(state.pending);const b=$('#apply');b.disabled=true;try{const r=await api('/api/apply',{edits,fresh:$('#fresh').checked});state.pending={};await loadShips();if(state.cur)await openShip(state.cur);updPend();alert('Applied. '+r.log.slice(0,6).join('\n')+(r.log.length>6?'\n...':'')+'\n\nSaved under '+state.info.work+'/BSG_Data. Merge this tree into the game folder when ready.')}catch(e){alert('Failed: '+e.message);b.disabled=false}};
 document.querySelectorAll('header nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('on',x===b));for(const t of ['ships','dll','tools','settings'])$('#tab-'+t).hidden=t!==b.dataset.t;if(b.dataset.t==='dll')loadDll();if(b.dataset.t==='tools')loadTools();if(b.dataset.t==='settings')loadSettings()});
 let bundleForm;
 let activeBundle;
 const openedBundles=new Map();
-function shipBundleFields(ship){
+function shipBundleFields(ship,initialFile=''){
  const bundle={
    ship,
    source:el('div',{class:'card ship-bundle'},el('h3',{},'Bundle file'),el('p',{class:'hint'},'Loading bundle tools…')),
    slots:el('div',{class:'bundle-slot-fields'}),
+   slotStatus:el('p',{class:'hint'}),
+   stats:el('div',{class:'bundle-slot-fields','aria-live':'polite'}),
+   installedAbilities:el('div',{class:'bundle-slot-fields'}),
    sections:el('div'),
    actions:el('div',{class:'card'})
  };
  bundleForm??=api('/api/bundle/form');
- bundleForm.then(options=>loadBundleTools(bundle,options)).catch(error=>{
+ bundleForm.then(options=>loadBundleTools(bundle,options,initialFile)).catch(error=>{
    bundleForm=undefined;
    bundle.source.replaceChildren(el('h3',{},'Bundle file'),el('p',{class:'msg-bad'},error.message),
-     el('button',{class:'sec',onclick:()=>{activeBundle=undefined;renderShip()}},'Retry'));
+     el('button',{class:'sec',onclick:()=>{activeBundle=undefined;if(bundle.ship===null)openBundleFile(initialFile);else renderShip()}},'Retry'));
  });
  return bundle;
 }
-function loadBundleTools(bundle,bundleOptions){
+function loadBundleTools(bundle,bundleOptions,initialFile=''){
  const {ship,source,slots,sections,actions}=bundle;
+ for(const option of bundleOptions)if(['defender_donor','celestra_donor','stealth'].includes(option.dest))option.choices=state.info.bundle_files.slice();
  const get=id=>source.querySelector('#'+id)??actions.querySelector('#'+id);
- const path=el('input',{type:'text',id:'bpath',placeholder:'path to a ship bundle (encrypted game file or decrypted .dec)',style:'flex:1;min-width:280px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'});
+ const path=el('input',{type:'text',id:'bpath',value:initialFile,placeholder:'path to a ship bundle (encrypted game file or decrypted .dec)',style:'flex:1;min-width:280px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'});
+ let statsRequest=0,compareRequest=0,compareData=null;
+ async function refreshStats(file){
+   const request=++statsRequest;
+   bundle.stats.replaceChildren();
+   bundle.installedAbilities.replaceChildren();
+   if(bundle.compare)bundle.compare.replaceChildren();
+   delete bundle.stats.dataset.source;
+   for(const area of [bundle.slots,bundle.sections])area.querySelectorAll('[data-d]').forEach(input=>{
+     if(input.type==='checkbox')input.checked=false;
+     else input.value='';
+   });
+   if(!file)return;
+   bundle.stats.textContent='Reading current bundle settings…';
+   try{
+     const result=await api('/api/bundle/stats',{bundle:file});
+     if(request!==statsRequest)return;
+     const stored=Object.fromEntries(result.fields.map(field=>[field.key,field.value]));
+     const setOption=(name,value)=>{const input=bundle.sections.querySelector('[data-d="'+name+'"]');if(input&&value!==undefined)input.type==='checkbox'?input.checked=Boolean(value):input.value=String(value)};
+     const hullRate=stored['RegenerativeHullResinModule.hullPerTick'];
+     if(hullRate!==undefined){setOption('hull_regen',Math.abs(Number(hullRate)));setOption('armour_regen',Number(hullRate)<0)}
+     setOption('munition_factory',Boolean(result.abilities.MunitionFactoryModule));
+     setOption('squadron_revive',Boolean(stored['ShipInfo.ShowExclusionInEditor']));
+     const groupsInput=bundle.slots.querySelector('[data-d="squadron_groups"]');
+     if(groupsInput&&!groupsInput.dataset.manual)groupsInput.value=(result.squadron_groups||[]).join(',');
+     bundle.slotStatus.replaceChildren();bundle.slotStatus.className='hint';
+     if(result.squadron_groups?.length&&state.data?.name===ship){
+       const expected=['FighterSlots','UtilityFighterSlots'].map(name=>Number(shipFieldValue(name)));
+       const actual=result.squadron_groups.reduce((sum,count)=>sum+count,0),wanted=expected.reduce((sum,count)=>sum+count,0);
+       if(actual!==wanted){bundle.slotStatus.className='msg-bad';bundle.slotStatus.textContent='This bundle has '+actual+' launch actions in groups '+result.squadron_groups.join(',')+', but the ship database has '+expected[0]+' fighter and '+expected[1]+' support slots ('+wanted+' total).';}
+     }
+     const labels={MaxHullPoints:'Hull',defaultArmourFront:'Front',defaultArmourRear:'Rear',
+       defaultArmourLeft:'Port',defaultArmourRight:'Starboard',defaultArmourTop:'Top',defaultArmourBottom:'Bottom'};
+     const primary=[],advanced=[];
+     const abilities=new Map(Object.keys(result.abilities).map(script=>[script,[]]));
+     const numberInput=(attrs,value,step)=>el('input',{...attrs,type:'number',required:true,step,value});
+     for(const field of result.fields){
+       const [script,name]=field.key.split('.');
+       const label=labels[name]||name;
+       const original=field.kind==='bool'?Boolean(field.value):field.value;
+       const attrs={'data-prefab-field':field.key,'data-original':JSON.stringify(original)};
+       let control;
+       if(field.kind==='vector'){
+         control=el('fieldset',attrs,el('legend',{},label),
+           ...['x','y','z'].map(axis=>el('label',{class:'f'},axis.toUpperCase(),
+             numberInput({'data-axis':axis},field.value[axis],'any'))));
+       }else{
+         const input=field.kind==='bool'?el('input',{...attrs,type:'checkbox',checked:original})
+           :numberInput(attrs,field.value,field.kind==='int'?'1':'any');
+         control=el('label',{class:'f',title:field.key},label,input);
+       }
+       const group=abilities.get(script)||(labels[name]?primary:advanced);
+       group.push(control);
+     }
+     if(abilities.size){
+       bundle.installedAbilities.replaceChildren(el('h4',{},'Installed abilities'),
+         ...Array.from(abilities,([script,fields])=>el('details',{class:'ability-options',open:fields.length>0},
+           el('summary',{},result.abilities[script]),
+           fields.length?el('div',{class:'grid'},fields):el('p',{class:'hint'},'This module has no editable settings.'))));
+     }else{
+       bundle.installedAbilities.replaceChildren(el('p',{class:'hint'},'No supported ability modules in this bundle.'));
+     }
+     bundle.stats.replaceChildren(el('h4',{},'Bundle hull & armour'),
+       el('p',{class:'hint'},result.prefab?result.prefab+' · '+file:file),
+       el('div',{class:'grid'},primary),
+       advanced.length?el('details',{class:'ability-options'},el('summary',{},'Other prefab ship fields'),
+         el('div',{class:'grid'},advanced)):null,
+       result.fields.length?null:el('p',{class:'hint'},'No editable prefab ship fields found.'));
+     bundle.stats.dataset.source=file;
+     bundle.stats.dataset.result=JSON.stringify(result);
+   }catch(error){
+     if(request===statsRequest)bundle.stats.textContent='Bundle stats unavailable. '+error.message;
+   }
+ }
  function selectBundle(file){
    path.value=file;
    openedBundles.set(ship,file);
+   const groupsInput=bundle.slots.querySelector('[data-d="squadron_groups"]');
+   if(groupsInput){groupsInput.value='';delete groupsInput.dataset.manual}
    get('bcurrent').hidden=true;
+   compareData=null;compareRequest++;
+   refreshStats(file);
+   if(file)inspectBundle(get);
  }
+ bundle.activatePath=file=>selectBundle(file);
  const pick=el('button',{class:'sec',onclick:async()=>{
    const file=await pickPath({files:true,start:path.value||state.info.bundle_dir||state.info.home,title:'Open a ship bundle'});
-   if(file){selectBundle(file);await inspectBundle(get)}
- }},'Open bundle…');
- path.addEventListener('change',()=>selectBundle(path.value.trim()));
+   if(file){const imported=await api('/api/bundle/import',{bundle:file});selectBundle(imported.path)}
+ }},'Load bundle…');
+ path.addEventListener('change',async()=>{
+   const file=path.value.trim();if(!file)return;
+   try{const imported=await api('/api/bundle/import',{bundle:file});path.value=imported.path;selectBundle(imported.path)}
+   catch(error){bundle.stats.replaceChildren(el('p',{class:'msg-bad'},error.message))}
+ });
  const sel=el('select',{onchange:event=>{
-   if(event.target.value)selectBundle(joinPath(state.info.bundle_dir,event.target.value));
- }},[el('option',{value:''},state.info.bundles.length?'Choose a configured bundle':'No bundle folder configured'),
-    ...state.info.bundles.map(name=>el('option',{value:name},name))]);
+   if(event.target.value)selectBundle(event.target.value);
+ }},[el('option',{value:''},state.info.bundle_files.length?'Choose a configured bundle':'No bundle folder configured'),
+    ...state.info.bundle_files.map(name=>el('option',{value:name},name))]);
+ async function chooseShipFolder(){
+   const folder=await pickPath({files:false,start:state.info.bundle_dir||state.info.home,title:'Choose the default ship-bundle folder'});
+   if(!folder)return;
+   try{
+     state.info=await api('/api/config',{levels:state.info.levels,dll:state.info.dll,bundles:folder,work:state.info.work});
+     bundleForm=undefined;
+     sel.replaceChildren(el('option',{value:''},state.info.bundle_files.length?'Choose a bundle from this folder':'No bundles found in this folder'),...state.info.bundle_files.map(name=>el('option',{value:name},name)));
+     for(const dest of ['defender_donor','celestra_donor','stealth']){
+       const donor=sections.querySelector('[data-d="'+dest+'"]');
+       if(donor){const previous=donor.value;donor.replaceChildren(el('option',{value:''},'Choose a bundle from this folder'),...state.info.bundle_files.map(name=>el('option',{value:name},name)));if(state.info.bundle_files.includes(previous))donor.value=previous}
+     }
+     const target=state.info.bundle_files.find(name=>normalize(name.replace(/\.dec$/i,''))===normalize(ship||''));
+     if(target)selectBundle(target);
+     else{path.value='';openedBundles.delete(ship);refreshStats('')}
+   }catch(error){alert(error.message)}
+ }
  const normalize=name=>name.toLowerCase().replace(/[^a-z0-9]/g,'');
- const match=state.info.bundles.find(name=>normalize(name.replace(/\.dec$/i,''))===normalize(ship));
  const remembered=openedBundles.get(ship);
  if(remembered!==undefined){path.value=remembered}
- else if(match){sel.value=match;path.value=joinPath(state.info.bundle_dir,match)}
+ else if(ship){const match=state.info.bundle_files.find(name=>normalize(name.replace(/\.dec$/i,''))===normalize(ship));if(match)path.value=match}
+ const compare=el('div',{class:'card',hidden:true});bundle.compare=compare;
+ async function compareBundle(){
+   const current=JSON.parse(bundle.stats.dataset.result||'null');
+   if(!current){alert('Load a bundle first.');return}
+   const file=await pickPath({files:true,start:path.value||state.info.bundle_dir||state.info.home,title:'Choose a bundle to compare'});
+   if(!file)return;
+   const token=++compareRequest;compare.hidden=false;compare.replaceChildren(el('h3',{},'Bundle comparison'),el('p',{class:'hint'},'Reading '+file+'…'));
+   try{
+     const other=await api('/api/bundle/stats',{bundle:file});if(token!==compareRequest)return;
+     const left=new Map(current.fields.map(f=>[f.key,f.value])),right=new Map(other.fields.map(f=>[f.key,f.value]));
+     for(const input of bundle.stats.querySelectorAll('[data-prefab-field]')){
+       const value=input.matches('fieldset')?Object.fromEntries([...input.querySelectorAll('input')].map(axis=>[axis.dataset.axis,axis.valueAsNumber])):input.type==='checkbox'?input.checked:input.valueAsNumber;
+       left.set(input.dataset.prefabField,value);
+     }
+     for(const input of bundle.installedAbilities.querySelectorAll('[data-prefab-field]')){
+       const value=input.matches('fieldset')?Object.fromEntries([...input.querySelectorAll('input')].map(axis=>[axis.dataset.axis,axis.valueAsNumber])):input.type==='checkbox'?input.checked:input.valueAsNumber;
+       left.set(input.dataset.prefabField,value);
+     }
+     const keys=[...new Set([...left.keys(),...right.keys()])].sort();
+     const norm=v=>v===undefined?'(not present)':typeof v==='object'?JSON.stringify(v):String(v);
+     const rows=keys.map(key=>({key,a:norm(left.get(key)),b:norm(right.get(key))}));
+     const la=new Set(Object.keys(current.abilities||{})),ra=new Set(Object.keys(other.abilities||{}));
+     const abilityRows=[...new Set([...la,...ra])].sort().map(key=>({key:(current.abilities[key]||other.abilities[key]||key)+' ability',a:la.has(key)?'present':'(not present)',b:ra.has(key)?'present':'(not present)'}));
+     const all=[...rows,...abilityRows],diffs=all.filter(row=>row.a!==row.b);
+     const table=(items)=>el('div',{},...items.map(row=>el('div',{class:'row',style:'padding:5px 0;border-top:1px solid var(--line)'},el('strong',{style:'flex:1;min-width:180px'},row.key),el('span',{style:'flex:1'},row.a),el('span',{style:'flex:1'},row.b))));
+     const rowNodes=items=>items.map(row=>el('div',{class:'row',style:'padding:5px 0;border-top:1px solid var(--line)'},el('strong',{style:'flex:1;min-width:180px'},row.key),el('span',{style:'flex:1'},row.a),el('span',{style:'flex:1'},row.b)));
+     const listing=el('div');listing.replaceChildren(...rowNodes(all));
+     const only=el('input',{type:'checkbox',onchange:()=>listing.replaceChildren(...rowNodes(only.checked?diffs:all))});
+     compare.replaceChildren(el('h3',{},'Bundle comparison'),el('p',{class:'hint'},current.prefab+' (editing) compared with '+other.prefab+' · '+diffs.length+' differences'),el('p',{class:'hint'},'Field values show the bundle currently loaded in the editor and the chosen comparison file. Unsaved form edits are not included.'),el('div',{class:'row'},el('label',{class:'f chk'},only,'Show differences only'),el('button',{class:'sec',onclick:()=>{compareData=null;compare.hidden=true;compareRequest++}},'Close comparison')),el('div',{class:'row hint',style:'font-weight:600;padding:6px 0'},el('strong',{style:'flex:1'},'Field'),el('span',{style:'flex:1'},'Editing bundle'),el('span',{style:'flex:1'},'Comparison bundle')),listing);
+   }catch(error){if(token===compareRequest)compare.replaceChildren(el('h3',{},'Bundle comparison'),el('p',{class:'msg-bad'},error.message));}
+ }
  const groups={};bundleOptions.forEach(o=>(groups[o.group]=groups[o.group]||[]).push(o));
- source.replaceChildren(el('h3',{},'Bundle file'),el('div',{class:'row'},path,pick,el('button',{class:'sec',onclick:async()=>{const r=await pickPath({files:false,start:state.info.bundle_dir||state.info.home,title:'Choose a folder for bundle conversion'});if(r)path.value=r}},'Browse folders…')),el('div',{class:'row',style:'margin-top:8px'},sel,el('button',{class:'sec',id:'binspect',onclick:()=>inspectBundle(get)},'Inspect current bundle')),
-   el('pre',{id:'bcurrent',hidden:true,'aria-live':'polite'}),
-  el('div',{class:'card'},el('h3',{},'Decrypt / encrypt'),el('label',{class:'f'},'Hex key override',el('input',{id:'xor-key',placeholder:'Automatic'})),el('div',{class:'row'},...[['decrypt','Decrypt (to '+state.info.work+'/decrypted/)'],['encrypt','Encrypt (to '+state.info.out+'/bundles/)'],['check','Check']].map(([m,l])=>el('button',{class:'sec',onclick:()=>runXor(get,m)},l)),el('span',{id:'xmsg',class:'hint'})),
+ source.replaceChildren(el('h3',{},'Bundle file'),el('div',{class:'row'},path,pick,el('button',{class:'sec',onclick:compareBundle},'Compare with bundle…'),el('button',{class:'sec',onclick:chooseShipFolder},'Choose ship folder…'),el('button',{class:'sec',onclick:async()=>{const r=await pickPath({files:false,start:state.info.bundle_dir||state.info.home,title:'Choose a folder for bundle conversion'});if(r){path.value=r;refreshStats('')}}},'Browse folders…')),el('div',{class:'row',style:'margin-top:8px'},sel,el('button',{class:'sec',id:'binspect',onclick:()=>inspectBundle(get)},'Inspect current bundle')),
+  el('pre',{id:'bcurrent',hidden:true,'aria-live':'polite'}),compare,
+  el('div',{class:'card'},el('h3',{},'Decrypt / encrypt'),el('label',{class:'f'},'Hex key override',el('input',{id:'xor-key',placeholder:'Automatic'})),el('div',{class:'row'},...[['decrypt','Decrypt (to '+state.info.work+'/.deadlock-tools/decrypted/)'],['encrypt','Encrypt (to '+state.info.work+'/BSG_Data/StreamingAssets/)'],['check','Check']].map(([m,l])=>el('button',{class:'sec',onclick:()=>runXor(get,m)},l)),el('span',{id:'xmsg',class:'hint'})),
    el('p',{class:'hint',style:'margin:6px 0 0'},'Choose a bundle file or browse for a folder to convert in bulk.'),el('pre',{id:'xout',hidden:true})));
+ if(path.value){refreshStats(path.value);inspectBundle(get)}
  const optionsByGroup=Object.entries(groups);
  for(const [group,options] of optionsByGroup){
   const buildGrid=fields=>el('div',{class:'grid'},fields.map(o=>{let i;
-  if(o.kind==='bool'){i=el('input',{type:'checkbox','data-d':o.dest});return el('label',{class:'f chk',title:o.help},i,bundleFieldLabel(o))}
-  if(o.kind==='choice'){i=el('select',{'data-d':o.dest},[el('option',{value:''},'(default)'),...o.choices.map(c=>el('option',{value:c},c))])}
+  if(o.kind==='bool'){
+    const attrs={type:'checkbox','data-d':o.dest};
+    if(o.dest==='split_squadrons')attrs.onchange=event=>{
+      if(event.target.checked){const groups=bundle.slots.querySelector('[data-d="squadron_groups"]');if(groups)groups.value=''}
+    };
+    if(o.dest==='turnaround_repair_bay')attrs.onchange=event=>{
+      if(!event.target.checked||!state.data)return;
+      const stored=name=>shipFieldValue(name);
+      const fighters=Number(stored('FighterSlots')),support=Number(stored('UtilityFighterSlots'));
+      if(!Number.isInteger(fighters)||!Number.isInteger(support)||fighters+support<1)return;
+      const input=dest=>bundle.slots.querySelector('[data-d="'+dest+'"]');
+      const fighterInput=input('fighter_slots'),supportInput=input('utility_slots'),groupsInput=input('squadron_groups');
+      if(fighterInput&&supportInput&&groupsInput){
+        fighterInput.value=String(fighters);supportInput.value=String(support);
+      const splitInput=input('split_squadrons');
+      if(!splitInput?.checked&&!groupsInput.dataset.manual)groupsInput.value=[fighters,support].filter(count=>count>0).join(',');
+      }
+    };
+    i=el('input',attrs);return el('label',{class:'f chk',title:o.help},i,bundleFieldLabel(o))
+  }
+  if(o.kind==='choice'){i=el('select',{'data-d':o.dest},[el('option',{value:''},o.choices?'Choose a bundle':'(default)'),...(o.choices||[]).map(c=>el('option',{value:c},c))])}
   else if(o.kind==='list'){i=el('textarea',{'data-d':o.dest,rows:2,placeholder:'one per line, e.g. '+(o.metavar||'fore=1'),style:'padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'})}
   else i=el('input',{type:'text','data-d':o.dest,placeholder:o.default||o.metavar||''});
+  if(o.dest==='squadron_groups')i.addEventListener('input',()=>{
+    i.dataset.manual='1';
+    if(i.value.trim()){
+      const split=bundle.slots.querySelector('[data-d="split_squadrons"]');if(split)split.checked=false;
+      const groups=i.value.split(',').map(value=>value.trim());
+      if(groups.length===2&&groups.every(value=>/^\d+$/.test(value))){
+        const [fighters,support]=groups.map(Number);
+        if(fighters+support>0){
+          syncingSlotValues=true;
+          const fighterInput=bundle.slots.querySelector('[data-d="fighter_slots"]'),supportInput=bundle.slots.querySelector('[data-d="utility_slots"]');
+          if(fighterInput)fighterInput.value=String(fighters);if(supportInput)supportInput.value=String(support);
+          setShipFieldValue('FighterSlots',fighters);setShipFieldValue('UtilityFighterSlots',support);
+          syncingSlotValues=false;
+        }
+      }
+    }
+  });
   return el('label',{class:'f',title:o.help},bundleFieldLabel(o),i,el('span',{class:'orig'},o.help))}));
   if(group==='Abilities'){
-    const card=el('div',{class:'card'},el('h3',{},'Abilities'));
+    const card=el('div',{class:'card'},el('h3',{},'Abilities'),bundle.installedAbilities,el('h4',{},'Add abilities'),el('p',{class:'hint'},'Multiple Actions-menu abilities are grouped under one Abilities submenu. Enabling the turnaround repair bay uses this ship’s database squadron counts and separates fighter and support launch buttons into submenus when needed to make room in the Fighters menu.'));
     const categories=new Map();
     for(const option of options){
       const name=option.ability||'Ability menu and donors';
@@ -752,14 +1080,29 @@ function loadBundleTools(bundle,bundleOptions){
   }
   const grid=buildGrid(options);
   if(group==='Squadron / munition slots'){
-    slots.replaceChildren(el('h4',{},'Bundle slot controls'),grid);
+    slots.replaceChildren(el('h4',{},'Bundle slot controls'),grid,bundle.slotStatus);
   }else{
     sections.append(el('div',{class:'card'},el('h3',{},group==='Output'?'Bundle output':group),grid));
   }
  }
+ const actionsAbilityFlags=new Set(['mini_jump','augury','stealth','targeted_resupply','deploy_plating','technical_support','marine_reinforcement']);
+ bundle.sections.addEventListener('change',event=>{
+   if(!actionsAbilityFlags.has(event.target.dataset.d))return;
+   const enabled=[...bundle.sections.querySelectorAll('input[type=checkbox][data-d]')].filter(input=>actionsAbilityFlags.has(input.dataset.d)&&input.checked).length;
+   const submenu=bundle.sections.querySelector('[data-d="ability_submenu"]');
+   if(enabled>1&&submenu)submenu.checked=true;
+ });
+ if(ship&&state.data?.name===ship){
+   for(const [field,dest] of [['MunitionSlots','munition_slots'],['FighterSlots','fighter_slots'],['UtilityFighterSlots','utility_slots']]){
+     const input=bundle.slots.querySelector('[data-d="'+dest+'"]');
+     const value=shipFieldValue(field);
+     if(input&&input.value===''&&Number.isFinite(Number(value)))input.value=String(value);
+   }
+ }
  actions.replaceChildren(el('div',{class:'row'},
    el('button',{class:'pri',id:'brun',onclick:()=>runBundle(bundle,get)},'Save bundle edits'),
-   el('span',{id:'bmsg',class:'hint'},'Writes to the bundle output folder.')),
+   el('button',{class:'sec',id:'boverwrite',onclick:()=>runBundle(bundle,get,true)},'Overwrite opened bundle'),
+   el('span',{id:'bmsg',class:'hint'},'Saves into the work tree under BSG_Data/StreamingAssets/')),
    el('pre',{id:'bout',hidden:true}));
 }
 function bundleFieldLabel(option){
@@ -801,21 +1144,41 @@ async function bundlePatchOptions(options){
  }
  return patches;
 }
-async function runBundle(bundle,get){
+async function runBundle(bundle,get,overwrite=false){
  const opts={};
  for(const area of [bundle.slots,bundle.sections]){
    area.querySelectorAll('[data-d]').forEach(input=>{
      opts[input.dataset.d]=input.type==='checkbox'?input.checked:input.value;
    });
  }
- const button=get('brun'),message=get('bmsg'),output=get('bout');
+ const button=get(overwrite?'boverwrite':'brun'),message=get('bmsg'),output=get('bout');
  const source=get('bpath').value.trim();
+ const prefabFields={};
  let saved=false;
  button.disabled=true;
  message.className='hint';
  output.hidden=true;
  try{
    if(!source)throw new Error('Choose a bundle file first.');
+   if(overwrite&&!window.confirm('Replace this bundle file? A backup will be created beside it.\n\n'+source))return;
+   if(bundle.stats.dataset.source===source){
+     for(const area of [bundle.stats,bundle.installedAbilities]){
+       for(const input of area.querySelectorAll('[data-prefab-field]')){
+         const inputs=input.matches('fieldset')?[...input.querySelectorAll('input')]:[input];
+         if(inputs.some(field=>!field.reportValidity())){
+           throw new Error('Enter a valid value for the highlighted prefab field.');
+         }
+         const value=input.matches('fieldset')
+           ?Object.fromEntries(inputs.map(field=>[field.dataset.axis,field.valueAsNumber]))
+           :input.type==='checkbox'?input.checked:input.valueAsNumber;
+         const original=JSON.parse(input.dataset.original);
+         const unchanged=input.matches('fieldset')
+           ?Object.keys(value).every(axis=>value[axis]===original[axis])
+           :value===original;
+         if(!unchanged)prefabFields[input.dataset.prefabField]=value;
+       }
+     }
+   }
    message.textContent='Checking bundle requirements…';
    const patches=await bundlePatchOptions(opts);
    if(patches===null){
@@ -823,11 +1186,12 @@ async function runBundle(bundle,get){
      return;
    }
    message.textContent='Saving bundle…';
-   const result=await api('/api/bundle/run',{bundle:source,options:opts});
+   const result=await api('/api/bundle/run',{bundle:source,options:opts,prefab_fields:prefabFields,overwrite});
    output.textContent=result.cmd+'\n\n'+result.output;
    output.hidden=false;
    if(!result.ok)throw new Error('The bundle tool reported an error.');
    saved=Boolean(result.dst);
+   if(saved)bundle.activatePath(result.dst);
    if(Object.keys(patches).length){
      message.textContent='Applying required DLL patches…';
      const dll=await api('/api/dll/patch',patches);
@@ -835,7 +1199,7 @@ async function runBundle(bundle,get){
      if(!dll.ok)throw new Error('The required DLL patch failed. See the output below.');
      message.textContent='Saved bundle and patched DLL. DLL output: '+dll.dst;
    }else{
-     message.textContent=result.dst?'Saved bundle to '+result.dst:'Done';
+     message.textContent=overwrite?'Overwrote bundle. Backup: '+result.backup:result.dst?'Saved bundle to '+result.dst:'Done';
    }
    message.className='msg-ok';
  }catch(error){
@@ -847,7 +1211,7 @@ async function runBundle(bundle,get){
 }
 async function loadDll(){const box=$('#tab-dll');if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}const fld=(id,l,h)=>el('label',{class:'f'},l,el('input',{type:'number',id,step:'any'}),el('span',{class:'orig'},h));
  if(!box.dataset.ok){box.dataset.ok=1;box.replaceChildren(el('div',{class:'card'},el('h3',{},'Current DLL'),el('pre',{id:'dchk'},'checking...')),
-  el('div',{class:'card'},el('h3',{},'Patch'),el('div',{class:'grid'},fld('d_armour','Armour regen factor','Ships built with --armour-regen (armour per tick = hull rate x factor)'),fld('d_revive','Squadron revive (turns)','0 = rebuild at once'),fld('d_rank','Commander max rank','Game default 10'),fld('d_nodes','Command-tree nodes','Game default 4; 10 = one per rank 1-10'),fld('d_step','Ranks between nodes','default 1'),fld('d_first','First node at rank','default 1'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches normally add to the DLL already in the output folder'},el('input',{type:'checkbox',id:'d_fresh',onchange:loadDll}),'Start from the original DLL (drops earlier patches)')),
+  el('div',{class:'card'},el('h3',{},'Patch'),el('div',{class:'grid'},fld('d_armour','Armour regen factor','Ships built with --armour-regen (armour per tick = hull rate x factor)'),fld('d_revive','Squadron revive (turns)','0 = rebuild at once'),fld('d_rank','Commander max rank','Game default 10'),fld('d_nodes','Command-tree nodes','Game default 4; 10 = one per rank 1-10'),fld('d_step','Ranks between nodes','default 1'),fld('d_first','First node at rank','default 1'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches continue from the edited work-tree DLL unless you choose otherwise'},el('input',{type:'checkbox',id:'d_fresh',onchange:loadDll}),'Start from the original DLL (drops earlier patches)')),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'pri',id:'dgo',onclick:patchDll},'Patch DLL'),el('span',{id:'dmsg',class:'hint'}))),
   el('div',{class:'card'},el('h3',{},'Revert'),el('div',{class:'grid'},...[['r_armour','Armour regen'],['r_revive','Squadron revive'],['r_rank','Max rank (back to 10)'],['r_nodes','Command-tree nodes'],['r_mun','Munition load fix']].map(([id,l])=>el('label',{class:'f chk'},el('input',{type:'checkbox',id}),l))),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'sec',id:'rgo',onclick:revertDll},'Revert ticked (none ticked = all)'),el('span',{id:'rmsg',class:'hint'}))),el('pre',{id:'dout',hidden:true}))}
@@ -880,14 +1244,13 @@ function loadSettings(){const box=$('#tab-settings'),I=state.info;
  const row=(id,label,hint,val,files)=>{const inp=el('input',{type:'text',id,value:val||'',style:'flex:1;min-width:260px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'});
   return el('div',{class:'card'},el('h3',{},label),el('div',{class:'row'},inp,el('button',{class:'sec',onclick:async()=>{const r=await pickPath({files,start:inp.value||I.home,title:label});if(r)inp.value=r}},'Browse...')),el('p',{class:'hint',style:'margin:6px 0 0'},hint))};
  box.replaceChildren(
-  row('s_levels','Level data folder','The folder with the level files (level0, level5 ...). Every file that holds the ship table is edited. Results go to the output folder and the originals are never touched.',I.levels,false),
-  row('s_dll','Game DLL (Assembly-CSharp.dll)','Gives the field layouts. Use the DLL from the same game version as the level files.',I.dll,true),
-  row('s_bundles','Ship asset folder (optional)','Folder used to match bundles to ships. You can also browse for a bundle from a ship’s page.',I.bundles,false),
-  row('s_work','Work folder','Scratch space: decrypted copies of bundles go to its decrypted/ sub-folder.',I.work,false),
-  row('s_out','Output folder','Where edited files go: its levels/, dll/ and bundles/ sub-folders, the same places the command-line tools use, so all edits stack.',I.out,false),
+  row('s_levels','Default level-data folder','Choose the game’s BSG_Data folder. The DLL and ship folders can be elsewhere and are set separately.',I.levels,false),
+  row('s_bundles','Default ship-bundle folder','Choose the game’s StreamingAssets folder or another folder of ship bundles. Same-named files in the work copy take priority.',I.bundles,false),
+  row('s_dll','Default game DLL file','Choose Assembly-CSharp.dll wherever it is installed. Edited DLL copies go into the work tree under BSG_Data/Managed/.',I.dll,true),
+  row('s_work','Work folder','Keeps your edits in a merge-ready tree: BSG_Data/ level files, StreamingAssets/ ship bundles, and Managed/Assembly-CSharp.dll. Decrypted scratch files stay in a hidden tool folder.',I.work,false),
   el('div',{class:'row'},el('button',{class:'pri',id:'s_save',onclick:saveSettings},'Save and load'),el('span',{id:'s_msg',class:I.error?'msg-bad':'hint'},I.error||'')))}
 async function saveSettings(){const m=$('#s_msg');$('#s_save').disabled=true;m.className='hint';m.textContent='loading the level data (about 15 seconds)...';
- try{state.info=await api('/api/config',{levels:$('#s_levels').value,dll:$('#s_dll').value,bundles:$('#s_bundles').value,out:$('#s_out').value,work:$('#s_work').value});
+ try{state.info=await api('/api/config',{levels:$('#s_levels').value,dll:$('#s_dll').value,bundles:$('#s_bundles').value,work:$('#s_work').value});bundleForm=undefined;
   shipRequest++;activeBundle=undefined;openedBundles.clear();state.pending={};state.cur=null;state.data=null;$('#view').replaceChildren(el('p',{class:'hint'},'Pick a ship on the left.'));
   for(const t of ['dll','tools'])delete $('#tab-'+t).dataset.ok;await loadShips();updPend();m.className='msg-ok';m.textContent='loaded '+state.info.tables+' level file(s) with the ship table.';showTab('ships')}
  catch(e){m.className='msg-bad';m.textContent=e.message}$('#s_save').disabled=false}

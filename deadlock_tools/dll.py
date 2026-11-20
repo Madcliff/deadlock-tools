@@ -3,14 +3,14 @@
 dll - every Assembly-CSharp.dll patch for the Deadlock tools, in one place.
 
   python -m deadlock_tools dll patch  [DLL] [--armour-factor F] [--revive-turns N] [--max-rank N] [--munition-load]
-                                            [--command-nodes N [--command-step S] [--command-first-rank R]] [--fresh] [-o DIR]
+                                            [--command-nodes N [--command-step S] [--command-first-rank R]] [--fresh]
   python -m deadlock_tools dll check  [DLL]
-  python -m deadlock_tools dll revert [DLL] [--armour] [--revive] [--max-rank] [--command-nodes] [--munition-load] [-o DIR]
+  python -m deadlock_tools dll revert [DLL] [--armour] [--revive] [--max-rank] [--command-nodes] [--munition-load]
                                             (no option = revert all five)
 
-DLL defaults to the 'dll' path in deadlock.json. The result is always written to out/dll/Assembly-CSharp.dll (the original
-is never touched) and later runs continue from that file, so patches given in separate runs add up; --fresh starts again
-from the original. 'check' with no DLL reports on out/dll/Assembly-CSharp.dll if it exists, else on the original.
+DLL defaults to the 'dll' path in deadlock.json. The result is written to the work tree at BSG_Data/Managed/Assembly-CSharp.dll
+(the original is never touched) and later runs continue from that file, so patches given in separate runs add up; --fresh
+starts again from the original. 'check' with no DLL reports on the work-tree copy if it exists, else on the original.
 
 PATCHES (each is only applied when its option is given; re-running on a patched DLL just changes the values)
   --armour-factor F   armour regeneration for ships built with 'weapons --armour-regen' (armour per tick = hull rate x F)
@@ -21,7 +21,7 @@ PATCHES (each is only applied when its option is given; re-running on a patched 
                       --command-step S (default 1 = one node per rank: N=10 gives ranks 1-10). The node count is hard-coded in the
                       DLL, so setcommanders alone cannot change it.
   --munition-load     let existing saves pick up a raised MunitionSlots count in battle (see 'dll munition -h')
-Back up the game's DLL, then replace it with out/dll/Assembly-CSharp.dll.
+Back up the game's DLL, then merge the work-tree copy into BSG_Data/Managed/.
 The single patches can also be run on their own: dll armour ... / dll revive ... / dll munition ... (options --factor/--turns/--check/--revert).
 """
 import argparse, os, re, shutil, struct, sys, tempfile
@@ -50,9 +50,8 @@ THE FLAG (which ships regenerate armour)
                                        --armour-regen                      (on a ship that already has the module)
 
 USAGE
-    python -m deadlock_tools dll armour [Assembly-CSharp.dll]       -> writes out/dll/Assembly-CSharp.dll
+    python -m deadlock_tools dll armour [Assembly-CSharp.dll]       -> writes the work-tree DLL copy
     python -m deadlock_tools dll armour Assembly-CSharp.dll --factor 5      armour per tick = hull rate x 5 (default 1)
-    python -m deadlock_tools dll armour Assembly-CSharp.dll -o other_out     -> writes other_out/dll/Assembly-CSharp.dll
     python -m deadlock_tools dll armour Assembly-CSharp.dll --revert        -> restores the original methods
     (re-running with a different --factor on an already patched DLL just changes the factor)
 
@@ -132,9 +131,8 @@ THE FLAG (which ships do this)
     restriction is removed.  Ships without the flag are unaffected, enemy ships included.
 
 USAGE
-    python -m deadlock_tools dll revive [Assembly-CSharp.dll]       -> writes out/dll/Assembly-CSharp.dll
+    python -m deadlock_tools dll revive [Assembly-CSharp.dll]       -> writes the work-tree DLL copy
     python -m deadlock_tools dll revive Assembly-CSharp.dll --turns 60    delay before the revive (default 0 = at once; 8 = the nuke time)
-    python -m deadlock_tools dll revive Assembly-CSharp.dll -o other_out     -> writes other_out/dll/Assembly-CSharp.dll
     python -m deadlock_tools dll revive Assembly-CSharp.dll --revert      -> restores the original methods
     (re-running with a different --turns on an already patched DLL just changes the time)
     TURNS x 120 is counted in module ticks; at full rate (1.0) a destroyed squadron takes TURNS x 120 ticks.
@@ -198,12 +196,12 @@ def _sub_args(ap):
     """options shared by the single-patch commands (armour / revive / munition)"""
     config.add_path_args(ap, "out")
     ap.add_argument("--revert", action="store_true")
-    ap.add_argument("--fresh", action="store_true", help="start from the original DLL, not from out/dll/")
+    ap.add_argument("--fresh", action="store_true", help="start from the original DLL, not the work-tree copy")
     ap.add_argument("--dst", help=argparse.SUPPRESS)      # internal: exact output file (used by 'patch' to chain steps)
 
 
 def _sub_input(a):
-    """the DLL to work on: the one given (or deadlock.json's), continued from out/dll/ unless --fresh"""
+    """The DLL to work on, continued from the work-tree copy unless --fresh."""
     a.dll = a.original = config.setting("dll", a.dll)
     if not a.dst:
         a.dll = config.latest(a.dll, "dll", a.out, a.fresh, quiet=a.check)
@@ -224,7 +222,7 @@ WHAT IT DOES
     untouched. Affected ships get default munitions again (re-pick them in the war room).
 
 USAGE
-    python -m deadlock_tools dll munition [Assembly-CSharp.dll]            -> writes out/dll/Assembly-CSharp.dll
+    python -m deadlock_tools dll munition [Assembly-CSharp.dll]            -> writes the work-tree DLL copy
     python -m deadlock_tools dll munition [Assembly-CSharp.dll] --revert   -> restores the original check
     (or as part of: dll patch --munition-load)
 
@@ -345,7 +343,7 @@ def main():
     ap.add_argument("cmd", choices=["patch", "check", "revert"]); ap.add_argument("dll", nargs="?", metavar="DLL", help="default: 'dll' in deadlock.json")
     ap.add_argument("--dll", dest="dll_opt", metavar="PATH", help="same as giving DLL")
     config.add_path_args(ap, "out")
-    ap.add_argument("--fresh", action="store_true", help="start from the original DLL, not from out/dll/ (earlier patches are dropped)")
+    ap.add_argument("--fresh", action="store_true", help="start from the original DLL, not the work-tree copy (earlier patches are dropped)")
     ap.add_argument("--armour-factor", type=float); ap.add_argument("--revive-turns", type=float)
     ap.add_argument("--max-rank", type=int, nargs="?", const=10, help="patch: new max rank; revert: give the flag alone")
     ap.add_argument("--command-nodes", type=int, nargs="?", const=0, help="patch: node count; revert: give the flag alone"); ap.add_argument("--command-step", type=int, default=1); ap.add_argument("--command-first-rank", type=int, default=1)

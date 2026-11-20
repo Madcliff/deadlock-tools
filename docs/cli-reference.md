@@ -11,7 +11,7 @@ python -m deadlock_tools gui --no-browser
 ```
 
 - `deadlock.json` shares paths between the GUI and CLI. `--levels`, `--dll`, and `--bundles` override the relevant paths for tools that accept those options.
-- For commands that accept `-o DIR`, it selects an output root. The tool appends `levels/`, `dll/`, or `bundles/` as appropriate. Configure a separate output root for independent builds.
+- The configured work folder is the continuing edit location. It mirrors `BSG_Data/`, with level files at the root, the DLL in `Managed/`, and ship bundles in `StreamingAssets/`. The editor has no separate output folder.
 - Table and DLL edits build on a staged file of the same name where available. `--fresh` uses the configured source for the operation. A fresh write can replace the staged copy it targets.
 - Bundle edits read the selected path or bundle name. Keep related prefab edits in a single invocation when rebuilding from the same source.
 - Relative paths supplied on the command line are resolved from your working directory. Relative settings-file paths resolve from the project directory or the directory containing the single-file build.
@@ -111,7 +111,7 @@ python -m deadlock_tools dll revert --revive
 ```bash
 python -m deadlock_tools xor check colonialmercury
 python -m deadlock_tools xor decrypt colonialmercury
-python -m deadlock_tools xor encrypt work/decrypted/colonialmercury.dec
+python -m deadlock_tools xor encrypt work/.deadlock-tools/decrypted/colonialmercury.dec
 ```
 
-`xor` also accepts a folder for recursive conversion. Use `--work DIR` to choose the scratch root for decryption, `-o DIR` to choose the root for encrypted output, or `--key HEX` when you have a specific key to use. Decryption creates `.dec` files. Encryption drops the `.dec` suffix from the output name.
+`xor` also accepts a folder for recursive conversion. Conversion uses the configured work tree: decrypted scratch files go under `work/.deadlock-tools/decrypted/`, while encrypted bundles are written into `work/BSG_Data/StreamingAssets/`. Use `--key HEX` when you have a specific key to use. Decryption creates `.dec` files. Encryption drops the `.dec` suffix from the output name.

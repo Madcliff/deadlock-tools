@@ -41,6 +41,18 @@ The tool reads the game's XOR-wrapped UnityFS bundles and the serialized type tr
 
 The database supplies fighter and utility counts. The prefab contains the actual launch actions, bay compatibility, and optional icon transforms. Keep these in agreement. Slot IDs start at zero, with fighter slots before utility slots. The inspected installed Mercury had five fighter slots and one utility slot, but some fighter positions pointed to support-only bay compatibility lists. The staged correction aligned the lists while retaining a Raptor-compatible utility bay and moved the two extra icon markers. The build and deployment screens still need visual verification for a given configuration.
 
+The installed Mercury bundle can also have a full Fighters radial menu. Adding the turnaround repair action alone then fails for lack of a free position. A staged rebuild using the level record's 5 fighter and 1 support slots, grouped into separate 5/1 submenus, created six launch actions and bays and added the repair action successfully. This is a prefab-level validation; confirm icon spacing and the campaign build/deployment presentation in game.
+
+### Creating a new ship
+
+The existing `shipdb addblueprint` command only adds research entries for a ship record that already exists. A complete new ship needs a distinct record and ID in every level table that contains `ShipDataTable`, matching campaign unlock entries, a ship bundle prefab, and localisation keys. The bundle also needs valid mount, slot, ability, and shared-asset references. Copying a bundle alone does not register a buildable ship. The current database writer edits existing records and does not yet insert a new record, so do not use `addblueprint` as a ship-cloning operation.
+
+### Localisation and in-game screen layout
+
+The installed game includes Unity's Localization module, but the current toolkit has not identified or decoded the game's active string-table/catalogue assets. Ship `DescriptionHeaderID` values are references, not editable text. Localisation editing should wait until the active tables, key format, and asset dependencies are confirmed, then write staged copies with round-trip checks.
+
+The known Mercury build and deployment display issue is tied to the relationship between level slot counts and bundle launch actions, bay compatibility, and icon positions. The tool can align those bundle structures, but this repository has no validated patch for the build, deployment, or research screen layout itself. Verify screen changes in the running game before treating them as fixed; database values and serialized prefab checks alone cannot confirm the UI presentation.
+
 ### Donor abilities and menu capacity
 
 The donor-based options use local game assets. Defender supplies turnaround repair, technical support, and reinforcement. Celestra supplies targeted munition resupply and plating. Turnaround repair needs a suitable docking bay. The Defender's Raptor-related actions need an appropriate bay and squadron. Resupply has two stock buttons in its submenu. The tool uses the existing Abilities submenu where available and checks for a free position. Serialized component checks establish that links are present in the output, while skirmish testing establishes whether the game executes the action.

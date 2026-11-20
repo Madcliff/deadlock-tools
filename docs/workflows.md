@@ -17,10 +17,10 @@ The ship editor's **Hull & armour** fields update the ship database. **Armour re
 
 ## Edit a ship in the browser
 
-1. Run `python -m deadlock_tools gui` from the project folder. In **Settings**, choose the level data folder, game DLL, and optionally the ship bundle folder. Click **Save and load**.
-2. Select a ship. Edit its stats, research entries, or veterancy and click **Apply**. Ship database changes are staged in `out/levels/`.
-3. Check **Bundle file** when editing a prefab. The editor selects a matching file by name when it finds one. Use **Browse** to choose another file. **Inspect current bundle** displays mounts, launch action counts, and available module settings.
-4. Set the relevant bundle fields on the ship page and click **Save bundle edits**. The edited prefab normally goes to `out/bundles/` under its game filename. The selected bundle is the input for each run, so keep all desired prefab options together when rebuilding from the same input.
+1. Run `python -m deadlock_tools gui` from the project folder. In **Settings**, choose the default level-data folder, ship-bundle folder, DLL file, and work folder. Click **Save and load**.
+2. The work folder mirrors the game's `BSG_Data/` tree. A same-named file there takes priority over the configured source. Ship database changes are saved in the work tree's `BSG_Data/` root.
+3. Check **Bundle file** when editing a prefab. The editor selects a matching work copy first, then a matching file in the configured bundle folder. Use **Load bundle…** to import a chosen file into the work tree. **Inspect current bundle** displays mounts, launch action counts, and available module settings.
+4. Set the relevant bundle fields on the ship page and click **Save bundle edits**. The edited prefab goes to `BSG_Data/StreamingAssets/` in the work folder. **Overwrite opened bundle** replaces that work copy after confirmation and keeps a backup beside it.
 5. Check the status and output log after each save. **Database** groups the other table tools by subject. Its write forms display current values from staged files where available, and **Start from the originals** previews source values.
 
 ## Add munition slots to Colonial Mercury
@@ -59,7 +59,7 @@ The editor checks the staged DLL first. An installed patch keeps its current val
 
 ## Add support abilities
 
-Select a ship, choose its bundle, and enable the desired controls under **Abilities**. The tool uses the stock Defender or Celestra values for blank fields on new modules. Expand an ability to see its settings. For an existing module, open that bundle and enter only the values to change. It looks up `colonialdefender` and `colonialcelestra` in the configured bundle or decrypted work folder. Use **Defender donor** or **Celestra donor** to supply an explicit path. **Inspect current bundle** shows which modules are present and their stored settings.
+Select a ship, choose its bundle, and enable the desired controls under **Abilities**. Choose donor bundles from the live list for the configured ship-bundle folder; no fallback folders or donor filenames are assumed. Expand an ability to see its settings. For an existing module, open that bundle and enter only the values to change. **Inspect current bundle** shows which modules are present and their stored settings.
 
 | Ability | Donor | Recipient requirements |
 |---|---|---|
@@ -86,13 +86,13 @@ In **Bundle file**, select your installed Mercury bundle and use **Inspect curre
 
 | Staged files | Game destination |
 |---|---|
-| `out/levels/*` | Corresponding files in `BSG_Data/` |
-| `out/dll/Assembly-CSharp.dll` | `BSG_Data/Managed/Assembly-CSharp.dll` |
-| Encrypted files in `out/bundles/` | The directory containing the equivalent installed ship bundles |
-| `work/decrypted/*.dec` or plain `.dec` output | Scratch files for inspection or conversion |
+| Work folder `BSG_Data/*` | Corresponding files in the game's `BSG_Data/` tree |
+| Work folder `BSG_Data/Managed/Assembly-CSharp.dll` | Game's `BSG_Data/Managed/Assembly-CSharp.dll` |
+| Work folder `BSG_Data/StreamingAssets/*` | Corresponding installed ship bundles |
+| Work folder `.deadlock-tools/` | Editor staging and conversion scratch; do not merge into the game |
 
 3. Start the game and test the feature where it is used. Use a new campaign for changes to research unlocks. Test added mounts, slots, and abilities in battle.
-4. Restore the backed-up destination files to roll back. To build another revision, use a separate output root or inspect the existing staged files before continuing.
+4. Restore the backed-up destination files to roll back. Work copies remain the editor's defaults for the next session.
 
 ### If a change is missing in game
 

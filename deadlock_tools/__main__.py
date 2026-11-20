@@ -1,14 +1,14 @@
 """python -m deadlock_tools <tool> [options]      (run a tool with -h for its own help)
 
 tools:
-  config    show or save the paths every tool uses (game level folder, DLL, bundle folder, output folder)
+  config    show or save the source folders, DLL file, and work folder
   xor       decrypt / encrypt ship bundles
   weapons   edit a ship bundle: turrets, carrier/munition slots, systems, abilities
   shipdb    read and edit the ship / munition / research / commander tables in the level files
   dll       patch Assembly-CSharp.dll (armour regen, squadron revive, max rank, command nodes, munition load)
   gui       the graphical editor in your web browser (all of the above as forms)
 
-Results go to out/levels, out/dll and out/bundles under the game's own file names; edits stack until you pass --fresh.
+Results continue in the configured work folder's BSG_Data tree; edits stack until you pass --fresh.
 """
 import importlib
 import sys

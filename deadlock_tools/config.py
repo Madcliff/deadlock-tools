@@ -6,21 +6,20 @@ tools and the GUI alike:
     levels   folder with the game's level files (level0, level1, ... sharedassets9.assets)
     dll      the game's Assembly-CSharp.dll
     bundles  folder with ship bundles (encrypted game files or decrypted .dec)
-    out      output folder (default: out/ in the project folder)
-    work     scratch folder for decrypted bundles (default: work/ in the project folder)
+    work     editable work folder (default: work/ in the project folder)
 
-Relative paths in deadlock.json are relative to the project folder. Every tool also takes --levels / --dll / --bundles /
---out on the command line, which win over the file.
+Relative paths in deadlock.json are relative to the project folder. Every tool also takes --levels / --dll / --bundles
+on the command line, which win over the file. Optional command-line -o overrides are temporary per-run destinations.
 
-Output layout - every result keeps the game's own file name, so a folder can be copied straight over the game's files:
+The work folder mirrors the game's BSG_Data layout:
 
-    out/levels/    level0 ... sharedassets9.assets
-    out/dll/       Assembly-CSharp.dll
-    out/bundles/   colonialmercury ... (encrypted, ready for the game)
-    work/decrypted/  .dec files made along the way
+    work/BSG_Data/                    level0 ... sharedassets9.assets
+    work/BSG_Data/Managed/            Assembly-CSharp.dll
+    work/BSG_Data/StreamingAssets/    ship bundles (encrypted, ready for the game)
+    work/.deadlock-tools/             editor staging and decrypted scratch
 
-Edits stack: a tool starts from the file already in out/ when there is one (use --fresh to start again from the
-original). The originals are never written to.
+The work copy takes priority over the configured source. Edits stack there; --fresh starts again from the configured
+original. The originals are never written to.
 """
 import json
 import os
@@ -32,19 +31,19 @@ ZIPAPP = None                                                         # set when
 if getattr(sys, "frozen", False):
     PROJECT_DIR = os.path.dirname(os.path.abspath(sys.executable))
 elif os.path.isfile(PROJECT_DIR):
-    ZIPAPP, PROJECT_DIR = PROJECT_DIR, os.path.dirname(PROJECT_DIR)   # settings, out/ and work/ then live next to the .pyz
+    ZIPAPP, PROJECT_DIR = PROJECT_DIR, os.path.dirname(PROJECT_DIR)   # settings and work/ then live next to the .pyz
 SETTINGS_FILE = os.path.join(PROJECT_DIR, "deadlock.json")
 OLD_SETTINGS_FILE = os.path.expanduser("~/.deadlock_ships.json")      # the GUI's settings before the reorganisation
 
-KEYS = ("levels", "dll", "bundles", "out", "work")
-DEFAULTS = {"levels": "", "dll": "", "bundles": "", "out": "out", "work": "work"}
-KINDS = ("levels", "dll", "bundles")                                  # sub-folders of the output folder
+KEYS = ("levels", "dll", "bundles", "work")
+DEFAULTS = {"levels": "", "dll": "", "bundles": "", "work": "work"}
+WORK_PATHS = {"levels": (), "dll": ("Managed",), "bundles": ("StreamingAssets",)}
+KINDS = tuple(WORK_PATHS)
 HELP = {
     "levels": "folder with the game's level files",
     "dll": "the game's Assembly-CSharp.dll",
     "bundles": "folder with ship bundles",
-    "out": "output folder",
-    "work": "scratch folder for decrypted bundles",
+    "work": "editable work folder",
 }
 
 
@@ -62,6 +61,8 @@ def load():
             raise SystemExit("cannot read %s: %s" % (path, e))
         keys = KEYS if path == SETTINGS_FILE else ("levels", "dll", "bundles")   # the old file's 'out' meant something else
         cfg.update({k: str(v).strip() for k, v in data.items() if k in keys and v})
+        if path == SETTINGS_FILE and data.get("out"):
+            cfg["_legacy_out"] = str(data["out"]).strip()
     return cfg
 
 
@@ -94,21 +95,51 @@ def setting(key, override=None, required=True):
 
 
 def out_root(override=None):
-    return setting("out", override)
+    return os.path.abspath(os.path.expanduser(override)) if override else setting("work")
+
+
+def migrate_legacy_out(work_override=None):
+    """Move old out/<kind> edits into the merge-ready work tree once, preserving existing work files."""
+    cfg = load()
+    legacy = cfg.get("_legacy_out")
+    if not legacy: return False
+    import shutil
+    source_root = resolve(legacy)
+    work_root = os.path.abspath(os.path.expanduser(work_override)) if work_override else setting("work")
+    for kind, parts in WORK_PATHS.items():
+        old_dir = os.path.join(source_root, kind)
+        new_dir = os.path.join(work_root, "BSG_Data", *parts)
+        if not os.path.isdir(old_dir): continue
+        os.makedirs(new_dir, exist_ok=True)
+        for filename in os.listdir(old_dir):
+            source, target = os.path.join(old_dir, filename), os.path.join(new_dir, filename)
+            if os.path.isfile(source) and not os.path.exists(target): shutil.copy2(source, target)
+    old_scratch = os.path.join(work_root, "decrypted")
+    new_scratch = os.path.join(work_root, ".deadlock-tools", "decrypted")
+    if os.path.isdir(old_scratch):
+        for root, _dirs, files in os.walk(old_scratch):
+            relative = os.path.relpath(root, old_scratch)
+            target_root = new_scratch if relative == "." else os.path.join(new_scratch, relative)
+            os.makedirs(target_root, exist_ok=True)
+            for filename in files:
+                source, target = os.path.join(root, filename), os.path.join(target_root, filename)
+                if not os.path.exists(target): shutil.copy2(source, target)
+    save(cfg)
+    return True
 
 
 def out_dir(kind, override=None, create=True):
-    """out/<kind>, e.g. out/levels. override = a different output folder (its <kind> sub-folder is used)."""
-    if kind not in KINDS:
-        raise ValueError(kind)
-    d = os.path.join(out_root(override), kind)
+    """Return a work-tree destination, or <override>/<kind> for a one-off CLI destination."""
+    if kind not in WORK_PATHS: raise ValueError(kind)
+    if not override: migrate_legacy_out()
+    d = os.path.join(out_root(override), kind) if override else os.path.join(setting("work"), "BSG_Data", *WORK_PATHS[kind])
     if create:
         os.makedirs(d, exist_ok=True)
     return d
 
 
 def work_dir(name="decrypted", create=True):
-    d = os.path.join(setting("work"), name)
+    d = os.path.join(setting("work"), ".deadlock-tools", name)
     if create:
         os.makedirs(d, exist_ok=True)
     return d
@@ -122,8 +153,8 @@ def same_file(a, b):
 
 
 def latest(original, kind, override=None, fresh=False, quiet=False):
-    """The file to start an edit from: the copy already in out/<kind> (earlier edits) unless fresh, else the original."""
-    cand = os.path.join(out_root(override), kind, os.path.basename(original))
+    """Use the work-tree copy as the continuing source unless --fresh or a one-off -o is given."""
+    cand = os.path.join(out_dir(kind, override, create=False), os.path.basename(original))
     if not fresh and os.path.isfile(cand) and not same_file(cand, original):
         if not quiet:
             print("   (continuing from your earlier edits in %s; use --fresh to start from the original instead)" % cand)
@@ -142,17 +173,18 @@ def write(path, data, original=None):
 
 
 def add_path_args(ap, *keys):
-    """Add the standard --levels / --dll / --bundles / --out options to an argparse parser."""
+    """Add source-path options; keep the internal staging override out of help text."""
     for k in keys:
         if k == "out":
-            ap.add_argument("-o", "--out", metavar="DIR", help="output folder (default: 'out' setting, results go into its levels/ dll/ bundles/ sub-folders)")
+            import argparse
+            ap.add_argument("-o", "--out", metavar="DIR", help=argparse.SUPPRESS)
         else:
             ap.add_argument("--" + k, metavar="PATH", help="%s (default: '%s' in deadlock.json)" % (HELP[k], k))
     return ap
 
 
 def config_main(argv=None):
-    """python -m deadlock_tools config [--levels P] [--dll P] [--bundles P] [--out P] [--work P]   (no option = show)"""
+    """python -m deadlock_tools config [--levels P] [--dll P] [--bundles P] [--work P]   (no option = show)"""
     import argparse
     ap = argparse.ArgumentParser(prog="deadlock config", description="Show or change the saved paths (deadlock.json).")
     for k in KEYS:
@@ -161,6 +193,8 @@ def config_main(argv=None):
     cfg = load()
     changes = {k: getattr(a, k) for k in KEYS if getattr(a, k) is not None}
     if changes:
+        migrate_legacy_out(changes.get("work"))
+        cfg = load()
         for k, v in changes.items():
             cfg[k] = os.path.abspath(os.path.expanduser(v)) if v else DEFAULTS[k]
         save(cfg)
@@ -170,7 +204,7 @@ def config_main(argv=None):
     for k in KEYS:
         v = cfg.get(k, "")
         full = resolve(v)
-        flag = "" if not full else ("" if os.path.exists(full) else "   (missing)" if k not in ("out", "work") else "   (created when needed)")
+        flag = "" if not full else ("" if os.path.exists(full) else "   (missing)" if k != "work" else "   (created when needed)")
         print("  %-8s %s%s" % (k, full or "(not set)", flag))
     return 0
 

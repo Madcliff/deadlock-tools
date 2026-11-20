@@ -4,10 +4,10 @@ BSG Deadlock ship database tool.
 
 Reads the ship / munition / blueprint tables out of the game's level files using the field layout from
 Assembly-CSharp.dll (names come from the DLL, nothing is guessed) and edits them. Originals are never touched:
-results go to out/levels/ under the game's file names.
+results continue in the configured work folder's BSG_Data tree.
 
 ARGUMENTS
-  python -m deadlock_tools shipdb <command> [command arguments] [--levels PATH] [--dll PATH] [-o DIR] [--fresh]
+  python -m deadlock_tools shipdb <command> [command arguments] [--levels PATH] [--dll PATH] [--fresh]
   --levels and --dll default to the paths saved in deadlock.json ('config'), so they are usually left out.
   --levels takes the game's level folder (normal), a single level file, or a comma-separated list. With a folder, every
   level file that holds the table is patched (the game ships ~10 identical copies of the ship database). Read-only
@@ -17,9 +17,9 @@ ARGUMENTS
 COMMANDERS (ranks / fleet-size traits; DataTables in the level files)
   python -m deadlock_tools shipdb commanders                         (show ranks, XP, leadership interval, trait counts)
   python -m deadlock_tools shipdb fixspecs      [--revert-specs]     (repair the base-game Tactician (subsystem 0) captain-skill list, see below)
-  python -m deadlock_tools shipdb setcommanders --add 10 --every-level   (ranks 11-20, a fleet-size trait at every rank; continues from your earlier edits in out/levels like the other commands, --fresh starts over;
+  python -m deadlock_tools shipdb setcommanders --add 10 --every-level   (ranks 11-20, a fleet-size trait at every rank; continues from your earlier work-tree edits, --fresh starts over;
         then patch the DLL: python -m deadlock_tools dll patch --max-rank 20 --command-nodes 10
-        (the skill tree's node count is hard-coded in the DLL: without --command-nodes the Command column stays at 4 nodes; 10 = one per rank 1-10). -o sets the output folder)
+        (the skill tree's node count is hard-coded in the DLL: without --command-nodes the Command column stays at 4 nodes; 10 = one per rank 1-10)
 
 SHIPS
   python -m deadlock_tools shipdb list     
@@ -64,9 +64,8 @@ FLEET MAP ICONS
         Copies a ship's fleet icon to other ships in every scene that has the table. (--factory all is not recommended.)
 
 COMBINING EDITS
-  Just run the commands one after another: each continues from the earlier results in out/levels/
-  (use --fresh to start over, -o to pick another output folder). Finally back up the game's level files and copy
-  out/levels/* over them.
+  Just run the commands one after another: each continues from the earlier work-tree files.
+  Use --fresh to start over. When ready, merge work/BSG_Data/ into the game's BSG_Data/ folder.
 """
 import struct, glob, sys, argparse, os
 
@@ -1074,7 +1073,7 @@ def main():
     ap.add_argument("--revert-specs", action="store_true", help="fixspecs: put the game's original specialisation lists back (undo the fix)")
     ap.add_argument("--xp-growth", type=float, default=1.2, help="setcommanders: each new rank costs this much more XP than the step before (default 1.2)")
     ap.add_argument("--every-level", action="store_true", help="setcommanders: leadership interval 1 and one fleet-size trait per rank")
-    ap.add_argument("--fresh", action="store_true", help="ignore earlier edits already in the output folder and start again from the original files")
+    ap.add_argument("--fresh", action="store_true", help="ignore earlier work-tree edits and start again from the original files")
     ap.add_argument("--factory", default="FleetModelFactory", help="FleetModelFactory (war-room fleet icon, default) or ProjectionFactory")
     a = ap.parse_args()
     _normalise(a)
@@ -1115,7 +1114,7 @@ def main():
         run(a, chain_source(a, a.level0, a.out), os.path.join(a.out, os.path.basename(a.level0)))
     else:
         level0 = a.level0 if a.cmd in ("fleeticons", "fleeticon") else ship_table_file(a)
-        if a.cmd in ("list", "show", "vet") and not a.fresh:          # show the current state: your edits in out/levels/ if there are any (like the GUI)
+        if a.cmd in ("list", "show", "vet") and not a.fresh:          # show the current state from work/BSG_Data when available
             cand = os.path.join(a.out, os.path.basename(level0))
             if os.path.isfile(cand) and not config.same_file(cand, level0): print("(showing your edited copy %s; --fresh shows the original)" % cand); level0 = cand
         run(a, level0, os.path.join(a.out, os.path.basename(level0 or "")))

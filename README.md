@@ -4,7 +4,9 @@ Modding tools for **Battlestar Galactica: Deadlock**: edit ship bundles (turrets
 abilities), the ship / munition / research / commander tables in the level files, and patch `Assembly-CSharp.dll`.
 Everything is also available as a browser GUI. Uses Python and the standard library. Python 3.10 or newer is recommended for the editor.
 
-Select a ship to edit its stats, bundle slots, weapons, systems, and abilities on the same page. Use **Bundle file** to inspect or convert the prefab. The editor selects a matching bundle from the configured folder when it finds one.
+Select a ship to edit its database values and bundle settings on the same page, or use **Load bundle…** to edit a bundle directly without loading a similarly named ship. **Compare with bundle…** shows the editable prefab settings and installed abilities side by side. In the editor, **Overwrite opened bundle** replaces the work copy after confirmation and leaves a `.bak` copy; **Save bundle edits** writes to that same work copy.
+
+The editor keeps changes in the configured work folder, mirroring `BSG_Data/`: level files at its root, ship bundles in `StreamingAssets/`, and the edited DLL in `Managed/`. A matching work copy takes priority over its configured source. Loading a bundle imports it into this tree.
 
 ## Standalone Windows build
 
@@ -26,6 +28,7 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
 
 ## Guides
 
+- [Release notes](docs/release-notes-0.3.2.md) lists the latest changes.
 - [Editing and installing a mod](docs/workflows.md) covers the browser editor, file types, slot changes, DLL prompts, testing in game, and rollback.
 - [Command-line reference](docs/cli-reference.md) covers all command families, common flags, and examples.
 - [Technical findings](docs/technical-findings.md) records the DLL patches, bundle dependencies, carrier UI findings, and verification limits.
@@ -35,30 +38,32 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
 | Tool | What it does | Writes to |
 |---|---|---|
 | `config` | show / save the paths every tool uses | `deadlock.json` |
-| `gui` | all of the below as forms in your browser (127.0.0.1 only) | same places as the tools |
-| `shipdb` | ship stats, veterancy, XP, munitions, research/blueprints, fleet limits, fleet icons, commanders, squadron hull | `out/levels/` |
-| `weapons` | edit a ship bundle: clone/resize turrets, slots, hull/armour regen, munition factory, squadron revive, micro-FTL, augury, stealth | `out/bundles/` |
-| `dll` | patch `Assembly-CSharp.dll`: armour regen, squadron revive, commander max rank, command-tree nodes, munition load; `check` / `revert` | `out/dll/` |
-| `xor` | decrypt / encrypt / check ship bundles | `work/decrypted/`, `out/bundles/` |
+| `gui` | ship, bundle, DLL, and database editing in your browser (127.0.0.1 only) | configured work folder, mirroring `BSG_Data/` |
+| `shipdb` | ship stats, veterancy, XP, munitions, research/blueprints, fleet limits, fleet icons, commanders, squadron hull | `work/BSG_Data/` |
+| `weapons` | edit a ship bundle: clone/resize turrets, slots, hull/armour regen, munition factory, squadron revive, micro-FTL, augury, stealth | `work/BSG_Data/StreamingAssets/` |
+| `dll` | patch `Assembly-CSharp.dll`: armour regen, squadron revive, commander max rank, command-tree nodes, munition load; `check` / `revert` | `work/BSG_Data/Managed/` |
+| `xor` | decrypt / encrypt / check ship bundles | `work/.deadlock-tools/decrypted/`, `work/BSG_Data/StreamingAssets/` |
 
-## How inputs and outputs work (the same for every tool)
+## Command-line inputs and outputs
 
 - **Inputs** default to the paths in `deadlock.json`; `--levels`, `--dll`, `--bundles` override them. A bundle can be
   given by name (`colonialmercury`) and is looked up in the bundle folder. Encrypted bundles are decrypted automatically.
 - **Outputs** keep the game's own file names, so a folder can be copied straight over the game's files:
 
   ```
-  out/levels/    level0 ... sharedassets9.assets      -> copy over BSG_Data/
-  out/dll/       Assembly-CSharp.dll                  -> copy over BSG_Data/Managed/
-  out/bundles/   colonialmercury ...                  -> copy over the game's ship bundles
-  work/decrypted/  decrypted .dec copies made along the way
+  work/BSG_Data/                    level0 ... sharedassets9.assets
+  work/BSG_Data/Managed/            Assembly-CSharp.dll
+  work/BSG_Data/StreamingAssets/    ship bundles
+  work/.deadlock-tools/decrypted/   decrypted .dec scratch files
   ```
 
-  `-o DIR` picks a different output folder (its `levels/`, `dll/`, `bundles/` sub-folders are used).
-- **Edits stack.** `shipdb` and `dll` start from the file already in `out/` if there is one, so separate runs add up;
+- The editor's temporary staging folder is hidden inside the work folder; there is no separate output setting.
+- **Edits stack.** Tools start from the matching file in `work/` if there is one, so separate runs add up;
   `--fresh` starts again from the configured source. `weapons` starts from the selected bundle each time. Include all desired prefab options when rebuilding from the same source.
 
-Back up the game's files before copying the results over them.
+The configured work folder is the single continuing edit location. Merge its `BSG_Data/` tree into the game installation when ready. The settings let you choose level data, ship bundles, the DLL, and work folder independently. See [Editing and installing a mod](docs/workflows.md).
+
+Back up the game's files before copying command-line results over them.
 
 ## Project layout
 
@@ -85,16 +90,16 @@ skipped otherwise).
 ## Single-file version
 
 `python scripts/build_pyz.py` writes `dist/deadlock.pyz`. Copy it anywhere and run `python deadlock.pyz gui` (or any
-tool). Its `deadlock.json`, `out/` and `work/` are kept next to the `.pyz`.
+tool). Its `deadlock.json` and `work/` are kept next to the `.pyz`.
 
 ## Changes from the old scripts
 
 | Before | Now |
 |---|---|
 | `python deadlock_shipdb.py set <levels> <dll> ...` (munition/blueprint/fleet commands: `<dll> <levels>`) | `python -m deadlock_tools shipdb set ...` with `--levels/--dll` from settings (the old positional form still works) |
-| `patched_out/` relative to the current folder | `out/levels/` |
-| `Assembly-CSharp.dll.patched` next to the DLL; separate runs did not combine | `out/dll/Assembly-CSharp.dll`, patches stack |
-| `decrypted/`, `encrypted/` next to the script | `work/decrypted/`, `out/bundles/` |
+| `patched_out/` relative to the current folder | `work/BSG_Data/` |
+| `Assembly-CSharp.dll.patched` next to the DLL; separate runs did not combine | `work/BSG_Data/Managed/Assembly-CSharp.dll`, patches stack |
+| `decrypted/`, `encrypted/` next to the script | `work/.deadlock-tools/decrypted/`, `work/BSG_Data/StreamingAssets/` |
 | `deadlock_weapons.py SRC.dec DST --encrypt` | `weapons BUNDLE` (encrypted or not; output encrypted by default, `--no-encrypt` to keep it plain) |
 | `patch_munition_load.py` | `dll patch --munition-load` |
 | GUI settings in `~/.deadlock_ships.json`, tools embedded in `deadlock_editor.py` | one `deadlock.json`; the GUI uses the package directly |

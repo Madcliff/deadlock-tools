@@ -6,20 +6,18 @@ The bundles are normal UnityFS bundles (Unity 2018.4.3f1, LZMA) that have been X
 repeating key. XOR is symmetric, so the same operation decrypts and re-encrypts.
 
 Where results go (the same places every tool uses, see deadlock.json):
-    decrypt  -> work/decrypted/<name>.dec
-    encrypt  -> out/bundles/<name>      (the ".dec" is dropped, so the file can be copied straight into the game folder)
+    decrypt  -> work/.deadlock-tools/decrypted/<name>.dec
+    encrypt  -> work/BSG_Data/StreamingAssets/<name> (the ".dec" is dropped)
 A folder is processed recursively and its sub-folder layout is kept.
 
 Usage:
     python -m deadlock_tools xor decrypt  colonialmercury        a file, or a name looked up in the 'bundles' folder
     python -m deadlock_tools xor decrypt  [FOLDER]               every file (default: the 'bundles' folder)
-    python -m deadlock_tools xor encrypt  colonialmercury.dec    (a bare name is looked up in work/decrypted/)
+    python -m deadlock_tools xor encrypt  colonialmercury.dec    (a bare name is looked up in the work scratch folder)
     python -m deadlock_tools xor encrypt  FOLDER
     python -m deadlock_tools xor check    colonialmercury        just report, write nothing
 
 Options:
-    -o, --out DIR         output folder for encrypt (writes DIR/bundles/)
-    --work DIR            scratch folder for decrypt (writes DIR/decrypted/)
     --bundles DIR         where bare bundle names are looked up
     --key 0f0f070d0507    override the key (hex). By default the key is recovered
                           automatically from the "UnityFS" header of each file.
@@ -116,16 +114,17 @@ def out_name(name: str, mode: str) -> str:
 
 
 def find_source(src, mode, bundles=None):
-    """src as given if it exists; otherwise a bare name is looked up in the bundle folder (decrypt/check) or work/decrypted (encrypt)."""
+    """Resolve explicit paths, work-tree bundles, configured source bundles, or decrypted scratch files."""
     if src and os.path.exists(src):
         return src
     if not src:
         return config.setting("bundles", bundles)
-    folder = config.work_dir(create=False) if mode == "encrypt" else config.setting("bundles", bundles, required=False)
-    for name in (src, src + ".dec") if mode == "encrypt" else (src,):
-        cand = os.path.join(folder, name) if folder else ""
-        if cand and os.path.exists(cand):
-            return cand
+    folders = [config.work_dir(create=False)] if mode == "encrypt" else [
+        config.out_dir("bundles", create=False), config.setting("bundles", bundles, required=False)]
+    for folder in folders:
+        for name in (src, src + ".dec") if mode == "encrypt" else (src,):
+            cand = os.path.join(folder, name) if folder else ""
+            if cand and os.path.exists(cand): return cand
     raise SystemExit("no such file: %s%s" % (src, " (also looked in %s)" % folder if folder else ""))
 
 
@@ -134,13 +133,12 @@ def main():
     ap.add_argument("mode", choices=["decrypt", "encrypt", "check"])
     ap.add_argument("src", nargs="?", help="bundle file, folder, or bundle name (default: the 'bundles' folder)")
     config.add_path_args(ap, "out", "bundles")
-    ap.add_argument("--work", metavar="DIR", help="scratch folder for decrypt (default: 'work' in deadlock.json)")
     ap.add_argument("--key", help="hex key override")
     a = ap.parse_args()
     key = bytes.fromhex(a.key) if a.key else None
     src = find_source(a.src, a.mode, a.bundles)
     if a.mode == "decrypt":
-        outdir = os.path.join(os.path.abspath(a.work), "decrypted") if a.work else config.work_dir()
+        outdir = config.work_dir()
     elif a.mode == "encrypt":
         outdir = config.out_dir("bundles", a.out)
     else:
