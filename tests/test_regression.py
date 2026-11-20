@@ -96,10 +96,109 @@ class Regression(unittest.TestCase):
         self.run_tool("shipdb", "setxp", "4", "100", *p)
         for name, h in SET_LEVELS.items(): self.assertHash(os.path.join(self.out, "levels", name), h)
 
+    def test_editor_reads_staged_database_values(self):
+        self.need("dll", "level0")
+        from deadlock_tools.editor import Project
+
+        project = Project(INPUTS["levels"], INPUTS["dll"], self.out, "")
+        edits = {"name": "colonial guided", "settings": "MaxMissiles 123"}
+        result = project.run_tool("setmunition", edits)
+        self.assertTrue(result["ok"], result["output"])
+        for fresh in (False, True):
+            result = project.run_tool("munitions", {"name": edits["name"]}, fresh=fresh)
+            self.assertTrue(result["ok"], result["output"])
+            self.assertEqual("MaxMissiles 123" in result["output"], not fresh)
+        result = project.run_tool("fleeticons", {"factory": "all"})
+        self.assertTrue(result["ok"], result["output"])
+
     def test_shipdb_setcommanders(self):
         self.need("dll", "level0")
         self.run_tool("shipdb", "setcommanders", "--add", "10", "--every-level", "--levels", INPUTS["levels"], "--dll", INPUTS["dll"], "-o", self.out)
         for name, h in CMD_LEVELS.items(): self.assertHash(os.path.join(self.out, "levels", name), h)
+
+    def test_align_launch_bays_and_move_icon(self):
+        from deadlock_tools.weapons import load_support_donor
+
+        self.need("mercury_dec")
+        self.run_tool("weapons", INPUTS["mercury_dec"], "-o", self.out, "--no-encrypt",
+                      "--fighter-slots", "5", "--utility-slots", "1", "--align-launch-bays",
+                      "--bay-icon", "2=10,20,30", "--bay-icon", "5=-10,20,30")
+        bundle = os.path.join(self.out, "bundles", "colonialmercury.dec")
+        file, components = load_support_donor(bundle)
+        bays = {fields["SlotNo"]: fields for fields in (file.read(obj)[0] for obj in components["LaunchPoint"])
+                if fields["CanLaunch"]}
+        self.assertEqual(set(bays), set(range(6)))
+        for slot in range(5):
+            self.assertIn(113, bays[slot]["LaunchCompatibility"])
+            self.assertNotIn(2, bays[slot]["LaunchCompatibility"])
+        self.assertIn(2, bays[5]["LaunchCompatibility"])
+        for slot, x in ((2, 10), (5, -10)):
+            icon = file.by_pid[bays[slot]["iconPosition"]["m_PathID"]]
+            self.assertEqual(file.read(icon)[0]["m_LocalPosition"], {"x": x, "y": 20, "z": 30})
+
+    def test_support_abilities_preserve_prefab_links(self):
+        from pathlib import Path
+        from deadlock_tools.editor import Project
+        from deadlock_tools.weapons import SUPPORT_ABILITIES, load_support_donor
+
+        self.need("mercury_dec")
+        mercury = Path(INPUTS["mercury_dec"])
+        donor_folder = mercury.parent
+        donor_paths = {name: donor_folder / ("colonial" + name + ".dec")
+                       for name in ("defender", "celestra")}
+        if not all(path.is_file() for path in donor_paths.values()):
+            self.skipTest("Defender and Celestra donor bundles must be alongside the Mercury fixture")
+
+        fields = {entry["dest"] for entry in Project.bundle_form(None)}
+        self.assertTrue(SUPPORT_ABILITIES.keys() <= fields)
+        initial = os.path.join(self.out, "initial")
+        self.run_tool("weapons", str(mercury), "-o", initial, "--no-encrypt",
+                      "--mini-jump", "--ability-submenu")
+        source = os.path.join(initial, "bundles", "colonialmercury.dec")
+        self.run_tool("weapons", source, "--bundles", str(donor_folder), "-o", self.out,
+                      "--no-encrypt", "--ability-submenu", "--fighter-slots", "5",
+                      "--utility-slots", "1", "--split-squadrons",
+                      *("--" + ability.replace("_", "-") for ability in SUPPORT_ABILITIES))
+        result = os.path.join(self.out, "bundles", "colonialmercury.dec")
+        prefab, components = load_support_donor(result)
+        celestra, donor_components = load_support_donor(str(donor_paths["celestra"]))
+
+        def owner(obj):
+            ref = prefab.read(obj)[0]["m_GameObject"]
+            self.assertEqual(ref["m_FileID"], 0)
+            go = prefab.read(prefab.by_pid[ref["m_PathID"]])[0]
+            self.assertIn(obj.pid, [entry["component"]["m_PathID"] for entry in go["m_Component"]])
+            return go["m_Name"]
+
+        for ability, (module, action, _) in SUPPORT_ABILITIES.items():
+            self.assertEqual([owner(obj) for obj in components[module]], ["ColonialMercury"])
+            expected_menu = {
+                "turnaround_repair_bay": ["Fighters"],
+                "targeted_resupply": ["RestockMunitions", "RestockMunitions"],
+            }.get(ability, ["Abilities"])
+            self.assertEqual([owner(obj) for obj in components[action]], expected_menu)
+        self.assertEqual([owner(obj) for obj in components["MiniJumpAction"]], ["Abilities"])
+        abilities = [obj for obj in prefab.objs
+                     if obj.classid == 1 and prefab.read(obj)[0]["m_Name"] == "Abilities"]
+        self.assertEqual(len(abilities), 1)
+        resupply = [prefab.read(obj)[0] for obj in components["ResupplyMunitionAction"]]
+        self.assertEqual([obj["radialMenuPosition"] for obj in resupply], [2, 3])
+        restock_go = resupply[0]["m_GameObject"]
+        submenu, = [obj for obj in components["SubMenuAction"]
+                    if prefab.read(obj)[0]["SubMenu"] == restock_go]
+        self.assertEqual(owner(submenu), "Abilities")
+        plating = prefab.read(components["DeployPlatingModule"][0])[0]
+        donor_plating = celestra.read(donor_components["DeployPlatingModule"][0])[0]
+        self.assertEqual(plating["droneTemplate"], donor_plating["droneTemplate"])
+        bundle, = [obj for obj in prefab.objs if obj.classid == 142]
+        metadata = prefab.read(bundle)[0]
+        container, = [entry["second"] for entry in metadata["m_Container"]]
+        start = container["preloadIndex"]
+        self.assertIn(plating["droneTemplate"],
+                      metadata["m_PreloadTable"][start:start + container["preloadSize"]])
+
+        self.assertTrue(any(fields["CanDock"] and 0 in fields["LaunchCompatibility"]
+                            for fields in (prefab.read(obj)[0] for obj in components["LaunchPoint"])))
 
     def test_weapons_everything(self):
         self.need("mercury_dec", "orion_dec")

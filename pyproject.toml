@@ -7,7 +7,7 @@ name = "deadlock-tools"
 dynamic = ["version"]
 description = "Modding tools for Battlestar Galactica: Deadlock - ship bundles, ship database, DLL patches and a browser GUI"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]

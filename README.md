@@ -2,7 +2,9 @@
 
 Modding tools for **Battlestar Galactica: Deadlock**: edit ship bundles (turrets, carrier and munition slots, systems,
 abilities), the ship / munition / research / commander tables in the level files, and patch `Assembly-CSharp.dll`.
-Everything is also available as a browser GUI. Pure Python 3.8+, no dependencies.
+Everything is also available as a browser GUI. Uses Python and the standard library. Python 3.10 or newer is recommended for the editor.
+
+Select a ship to edit its stats, bundle slots, weapons, systems, and abilities on the same page. Use **Bundle file** to inspect or convert the prefab. The editor selects a matching bundle from the configured folder when it finds one.
 
 ## Quick start
 
@@ -11,12 +13,18 @@ Everything is also available as a browser GUI. Pure Python 3.8+, no dependencies
 python -m deadlock_tools config --levels ../BSG_Data --dll ../Assembly-CSharp.dll --bundles ../decrypted
 
 python -m deadlock_tools gui                                     # the graphical editor
-python -m deadlock_tools shipdb set "Colonial Mercury" MunitionSlots 4
-python -m deadlock_tools weapons colonialmercury --munition-slots 4 --mini-jump
-python -m deadlock_tools dll patch --max-rank 20 --command-nodes 10
+python -m deadlock_tools shipdb show "Colonial Mercury"
+python -m deadlock_tools weapons colonialmercury --inspect
+python -m deadlock_tools dll check
 ```
 
 Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <tool> ...` works from anywhere.
+
+## Guides
+
+- [Editing and installing a mod](docs/workflows.md) covers the browser editor, file types, slot changes, DLL prompts, testing in game, and rollback.
+- [Command-line reference](docs/cli-reference.md) covers all command families, common flags, and examples.
+- [Technical findings](docs/technical-findings.md) records the DLL patches, bundle dependencies, carrier UI findings, and verification limits.
 
 ## Tools
 
@@ -44,9 +52,7 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
 
   `-o DIR` picks a different output folder (its `levels/`, `dll/`, `bundles/` sub-folders are used).
 - **Edits stack.** `shipdb` and `dll` start from the file already in `out/` if there is one, so separate runs add up;
-  `--fresh` starts again from the original. `weapons` always starts from the original bundle (cloning turrets twice
-  would double them), so give all its options in one command.
-- **Originals are never written to.** A tool refuses to write if the output would land on its input.
+  `--fresh` starts again from the configured source. `weapons` starts from the selected bundle each time. Include all desired prefab options when rebuilding from the same source.
 
 Back up the game's files before copying the results over them.
 

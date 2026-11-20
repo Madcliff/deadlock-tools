@@ -134,7 +134,8 @@ TAGBITS = {k: max(1, (len(v) - 1).bit_length()) for k, v in CODED.items()}
 
 class Meta:
     def __init__(self, path):
-        d = open(path, "rb").read()
+        with open(path, "rb") as source:
+            d = source.read()
         self.d = d
         pe = struct.unpack_from("<I", d, 0x3C)[0]
         nsec = struct.unpack_from("<H", d, pe + 6)[0]
@@ -468,7 +469,8 @@ def enum_names(S, ti):
 class Db:
     def __init__(self, dll, lvl, schema=None):
         self.S = S = schema or Schema(dll)
-        self.buf = bytearray(open(lvl, "rb").read())
+        with open(lvl, "rb") as source:
+            self.buf = bytearray(source.read())
         ti = S.typedef_index("ShipDataTable")
         self.res = None
         for pid, abs_off, size, cid, _epos in read_objects(bytes(self.buf)):
@@ -563,12 +565,12 @@ def load_factory(db, scene_path, factory):
     raise LookupError("no %s in %s" % (factory, scene_path))
 
 
-def chain_source(a, f_, outdir):
+def chain_source(a, f_, outdir, *, quiet=False):
     """If this file was already patched into outdir by an earlier command, continue from THAT copy so edits stack
     (otherwise every command would start again from the original and overwrite the previous one). --fresh disables this."""
     cand = os.path.join(outdir, os.path.basename(f_))
     if not getattr(a, "fresh", False) and os.path.exists(cand) and os.path.abspath(cand) != os.path.abspath(f_):
-        print("   (continuing from your earlier edits in %s; use --fresh to start from the original instead)" % cand)
+        if not quiet: print("   (continuing from your earlier edits in %s; use --fresh to start from the original instead)" % cand)
         return cand
     return f_
 
@@ -614,11 +616,19 @@ def munitions_cmd(a):
         outdir = a.out; os.makedirs(outdir, exist_ok=True)
     shown = False; patched = []; skipped = []
     for f_ in files:
-        srcf = chain_source(a, f_, outdir) if a.cmd == "setmunition" else f_
+        srcf = chain_source(a, f_, a.out, quiet=a.cmd == "munitions")
         buf = bytearray(open(srcf, "rb").read())
         try: off, res = load_missiles(S, bytes(buf))
         except LookupError: skipped.append(os.path.basename(f_)); continue
         if a.cmd == "munitions":
+            if rest:
+                matches = [m for m in res["objects"] if m["name"].lower() == rest[0].lower()]
+                for m in matches:
+                    shown = True
+                    print("%s · %s" % (os.path.basename(f_), m["name"]))
+                    for field in MUNITION_EDITABLE:
+                        print("  %s %s" % (field, m[field]))
+                continue
             if shown: print("(%s has the same table layout; not repeated)" % os.path.basename(f_)); continue
             shown = True
             print("munition table in %s: %d types\n" % (os.path.basename(f_), len(res["objects"])))
@@ -647,7 +657,7 @@ def munitions_cmd(a):
         print("\npatched %d file(s): %s" % (len(patched), ", ".join(patched) or "none"))
         print("no munition table (left alone): %s" % (", ".join(skipped) or "none"))
         print("Patched copies are in %s/ (same file names). Back up the originals, then copy them over." % outdir)
-    elif not shown: print("no munition table found in the given files")
+    elif not shown: print("no munition named %r" % rest[0] if rest else "no munition table found in the given files")
 
 
 # ----------------------------------------------------------------------------- blueprints (war-room research unlocks)
@@ -735,7 +745,7 @@ def blueprint_cmd(a):
         os.makedirs(outdir, exist_ok=True); ship_name = rest[0]
     shown = False; done = []; skipped = []
     for f_ in files:
-        src = chain_source(a, f_, outdir) if a.cmd == "addblueprint" else f_
+        src = chain_source(a, f_, outdir, quiet=a.cmd == "blueprints")
         buf = open(src, "rb").read()
         try: pid, off, size, res = load_wardata(S, buf)
         except LookupError: 
@@ -830,7 +840,7 @@ def fleetinfo_cmd(a):
         os.makedirs(outdir, exist_ok=True)
     done = []
     for f_ in files:
-        src = chain_source(a, f_, outdir) if edits else f_
+        src = chain_source(a, f_, outdir, quiet=not edits)
         buf = bytearray(open(src, "rb").read())
         try: pid, off, size, res = load_wardata(S, bytes(buf))
         except LookupError: continue
@@ -915,7 +925,7 @@ def squadron_cmd(a):
         os.makedirs(outdir, exist_ok=True)
     done = []
     for f_ in files:
-        src = chain_source(a, f_, outdir) if edits else f_
+        src = chain_source(a, f_, outdir, quiet=not edits)
         try:
             raw = open(src, "rb").read()
             if len(raw) < 20 or struct.unpack(">I", raw[4:8])[0] != len(raw): continue
@@ -1029,7 +1039,11 @@ def commanders_cmd(a):
         except BaseException: hit = None
         if not hit: continue
         pid, off, size, res = hit; n += 1; print(os.path.basename(f), "- DataTables object", pid)
-        if a.cmd == "commanders": show_commanders(res); continue
+        if a.cmd == "commanders":
+            show_commanders(res)
+            for entry in res["CommanderSpecialisations"]:
+                print("  subsystem %d specialisations: %s" % (entry["SubSystem"], entry["Specialisations"]))
+            continue
         if a.cmd == "fixspecs": fix_specialisations(buf, off, res, f, outdir, a.revert_specs); continue
         new_mono, new = extend_commanders(buf[off:off + size], res, a.add, a.xp_growth, a.every_level)
         out = resize_object(bytearray(buf), pid, new_mono)
@@ -1143,7 +1157,7 @@ def ship_table_file(a):
 
 
 def run(a, level0, out):
-    db = Db(a.dll, level0) if level0 else None
+    db = Db(a.dll, level0) if level0 and a.cmd not in ("fleeticons", "fleeticon") else None
 
     if a.cmd == "list":
         print("%-26s %-9s %5s %5s %5s %6s %6s  %-9s %s" % ("ship", "buildable", "cost", "time", "rush", "hull", "fleetpt", "faction", "class"))
@@ -1255,7 +1269,7 @@ def run(a, level0, out):
             outdir = a.out; os.makedirs(outdir, exist_ok=True)
         patched = []; skipped = []
         for f_orig in files:
-            f_ = chain_source(a, f_orig, outdir) if a.cmd == "fleeticon" else f_orig
+            f_ = chain_source(a, f_orig, a.out, quiet=a.cmd == "fleeticons")
             try: fdb = Db(a.dll, f_, schema)                 # this scene's own ship database
             except (SystemExit, Exception): skipped.append(os.path.basename(f_)); continue
             ids = {sh["id"]: sh["name"] for sh in fdb.ships}
@@ -1267,7 +1281,7 @@ def run(a, level0, out):
                     print("\n%s in %s: %d entries" % (fac_name, f_, len(fac["objects"])))
                     for e in fac["objects"]:
                         print("  id %-4s %-24s ship: %-26s prefab file %s path %s" % (e["id"], e["name"], ids.get(e["id"], "?"), e["prefab"][1][0], e["prefab"][1][1]))
-                    buf = buf_; continue
+                    continue
                 src = fdb.find(name_s); by = {e["id"]: e for e in fac["objects"]}
                 if src["id"] not in by: print("[skip] %s: %s has no %s entry" % (f_, src["name"], fac_name)); continue
                 for tn in names_t:

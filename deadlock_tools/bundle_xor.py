@@ -26,6 +26,7 @@ Options:
 """
 import argparse
 import os
+from pathlib import Path
 import struct
 import sys
 
@@ -79,6 +80,9 @@ def header_ok(plain: bytes, total_size: int):
 def process(src: str, dst, key_override, mode: str):
     data = open(src, "rb").read()
     if mode == "encrypt":
+        if not data.startswith(MAGIC):
+            print(f"[skip] {src}: encryption requires a plain UnityFS bundle")
+            return False
         key = key_override or DEFAULT_KEY
         if dst:
             open(dst, "wb").write(xor(data, key))
@@ -143,6 +147,11 @@ def main():
         outdir = None
 
     if os.path.isdir(src):
+        source_folder = Path(src).resolve()
+        if outdir:
+            output_folder = Path(outdir).resolve()
+            if source_folder == output_folder or source_folder in output_folder.parents:
+                raise SystemExit("choose an output folder outside the input folder")
         good = bad = 0
         for root, _d, files in os.walk(src):
             for name in sorted(files):
@@ -151,6 +160,10 @@ def main():
                 d = None
                 if outdir:
                     d = os.path.join(outdir, os.path.dirname(rel), out_name(os.path.basename(rel), a.mode))
+                    if os.path.exists(d) and config.same_file(s, d):
+                        print(f"[skip] {s}: output resolves to the input file")
+                        bad += 1
+                        continue
                     os.makedirs(os.path.dirname(d), exist_ok=True)
                 good, bad = (good + 1, bad) if process(s, d, key, a.mode) else (good, bad + 1)
         print(f"\nDone: {good} processed, {bad} skipped/failed" + (f"  (output in {outdir})" if outdir else ""))

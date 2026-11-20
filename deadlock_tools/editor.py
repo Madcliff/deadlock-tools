@@ -8,7 +8,7 @@ The paths come from deadlock.json (the same settings file the command-line tools
 (Settings tab, with a Browse button); changes are saved back to deadlock.json. On the command line:
     LEVELS         the folder with the game's level files
     DLL            Assembly-CSharp.dll
-    --bundles DIR  folder with ship bundles (encrypted or .dec; encrypted ones are decrypted automatically) for the Bundles tab (optional)
+    --bundles DIR  folder with ship bundles (encrypted or .dec; encrypted ones are decrypted automatically) for the Ships page (optional)
     --out DIR      output folder (default out/): results go to its levels/, dll/ and bundles/ sub-folders, the same places the
                    command-line tools use, so edits made in either stack
 
@@ -18,9 +18,9 @@ TABS
   Settings the four paths (level data folder, DLL, ship asset folder, output folder), each with a Browse button.
   Ships    pick a ship, edit its stats (hull, armour per side, speed, turn rate, DRADIS range, build cost/time/rush, fleet
            points, carrier slots, flags ...), press Apply: every level file with the ship table is rewritten into out/levels/.
-  Bundles  every option of the 'weapons' tool (turrets, slots, abilities, systems) as a form, run on a bundle of your choice.
+           Bundle controls appear alongside the ship's stats, with a file picker and inspection controls above.
   DLL      the 'dll' patches (armour regen, squadron revive, max rank, command nodes, munition load).
-  Tools    every other 'shipdb' command as a form: commanders (ranks, fixspecs), ship list, XP per rank, copy veterancy,
+  Database related 'shipdb' command as a form: commanders (ranks, fixspecs), ship list, XP per rank, copy veterancy,
            munitions, research lists, fleet limits, fleet map icons, squadron hull. Research for ONE ship is on its Ships page.
 
 Copy out/levels/*, out/dll/* and out/bundles/* over the game's originals (back them up first).
@@ -73,18 +73,22 @@ class Project:
         cand = os.path.join(self.lev_out, os.path.basename(f))
         return cand if (not fresh and os.path.exists(cand) and os.path.abspath(cand) != os.path.abspath(f)) else f
 
-    def view(self):
-        path = self.src_for(self.table_files[0]); key = (path, os.path.getmtime(path))
-        if not self._view or self._view[0] != key: self._view = (key, sd.Db(self.dll, path, self.S))
-        return self._view[1]
+    def view(self, fresh=False):
+        path = self.src_for(self.table_files[0], fresh); key = (path, os.path.getmtime(path))
+        cached = self._view
+        if cached and cached[0] == key:
+            return cached[1]
+        db = sd.Db(self.dll, path, self.S)
+        self._view = (key, db)
+        return db
 
     def ships(self):
         db = self.view()
         return [{"name": s["name"], "faction": db.faction.get(s["Faction"], str(s["Faction"])), "class": db.sclass.get(s["ShipClass"], str(s["ShipClass"])),
                  "buildable": s["Buildable"], "cost": s["BuildCost"], "hull": num(s["MaxHullPoints"]), "fleet": s["FleetPointValue"]} for s in db.ships]
 
-    def ship(self, name):
-        db = self.view(); s = db.find(name); fields = []
+    def ship(self, name, fresh=False):
+        db = self.view(fresh); s = db.find(name); fields = []
         for k, (off, code) in s["_off"].items():
             if k in HIDDEN: continue
             v = s.get(k); kind = SIMPLE.get(code)
@@ -93,23 +97,24 @@ class Project:
             elif kind and k not in READONLY and isinstance(v, (int, float)): fields.append({"name": k, "type": kind, "value": num(v)})
             else: fields.append({"name": k, "type": "ro", "value": str(num(v) if not isinstance(v, (list, tuple, dict)) else v)})
         return {"name": s["name"], "fields": fields, "advantages": [db.eff(x) for x in s["AdvantageList"]], "penalties": [db.eff(x) for x in s["PenaltyList"]],
-                "research": self.research(name),
+                "source": self.src_for(self.table_files[0], fresh),
+                "research": self.research(name, fresh),
                 "vet": {"ranks": [{"rank": r["Rank"], "xp": r["XPRequired"]} for r in db.res["CrewVeterancyRankInfo"]],
                         "effects": {str(i): n for i, n in db.effect.items()},
                         "current": [{"rank": rk["Rank"], "effects": [{"effect": e["Effect"], "value": num(e["BonusAmount"])} for e in rk["Effects"]]} for rk in s["CrewVeterancyRankEffects"]]}}
 
     # ---- research (the war-room blueprint lists: which campaign can research the ship, for how many RP) ----
-    def _war_path(self):
+    def _war_path(self, fresh=False):
         for f in self.table_files:
-            p = self.src_for(f)
+            p = self.src_for(f, fresh)
             try: sd.load_wardata(self.S, open(p, "rb").read()); return p
             except LookupError: continue
         return None
 
-    def research(self, name):
-        p = self._war_path()
+    def research(self, name, fresh=False):
+        p = self._war_path(fresh)
         if not p: return None
-        db = self.view(); s = db.find(name); sid = s["id"]; cls = str(db.sclass.get(s["ShipClass"], "")).lower()
+        db = self.view(fresh); s = db.find(name); sid = s["id"]; cls = str(db.sclass.get(s["ShipClass"], "")).lower()
         pid, off, size, res = sd.load_wardata(self.S, open(p, "rb").read()); rows = []
         for it in res["BlueprintInfo"]:
             row = None
@@ -219,7 +224,7 @@ class Project:
         out = []
         for t in TOOLS:
             fields = [dict(f, default=(assets if f["default"] == "@assets" and os.path.isfile(assets) else "" if f["default"] == "@assets" else f["default"])) for f in t["fields"]]
-            out.append({k: t.get(k) for k in ("id", "group", "title", "help")} | {"writes": bool(t.get("writes")), "fields": fields})
+            out.append({k: t.get(k) for k in ("id", "group", "title", "help", "current")} | {"writes": bool(t.get("writes")), "fields": fields})
         return out
 
     def run_tool(self, tid, v, fresh=False):
@@ -228,10 +233,10 @@ class Project:
         argv = t["build"](self, v or {})
         if "--levels" not in argv: argv += ["--levels", self.levels]
         argv += ["--dll", self.dll]
-        if t.get("writes"): argv += ["-o", self.out] + (["--fresh"] if fresh else [])
+        argv += ["-o", self.out] + (["--fresh"] if fresh else [])
         with self.lock: r = run_cmd(tool_cmd("shipdb") + argv, 900)
         if t.get("writes"): self._view = None
-        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-30000:], "cmd": "shipdb " + " ".join(argv)}
+        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-30000:] if t.get("writes") else r.stdout + r.stderr, "cmd": "shipdb " + " ".join(argv)}
 
     # ---- bundles (weapons) ----
     def bundle_files(self):
@@ -240,28 +245,50 @@ class Project:
 
     def bundle_form(self):
         ap = wmod.build_parser(); out = []
+        ability_group = {
+            option: ability.replace("_", " ").capitalize()
+            for ability, fields in wmod.SUPPORT_SETTINGS.items()
+            for option in (ability, *fields)
+        }
+        for label, prefixes in (
+            ("Micro-FTL", ("mini_jump", "jump_")),
+            ("Predictive Augury", ("augury",)),
+            ("Stealth", ("stealth",)),
+        ):
+            ability_group.update({a.dest: label for a in ap._actions if a.dest.startswith(prefixes)})
         for g in ap._action_groups:
             if g.title in ("positional arguments", "options"): continue
             for a in g._group_actions:
-                if not a.option_strings or a.dest in ("help", "out", "bundles") or a.help == argparse.SUPPRESS: continue
+                if not a.option_strings or a.dest in ("help", "out", "bundles", "inspect") or a.help == argparse.SUPPRESS: continue
                 kind = "bool" if isinstance(a, argparse._StoreTrueAction) else "choice" if a.choices else "list" if isinstance(a, argparse._AppendAction) else "text"
-                out.append({"group": g.title, "dest": a.dest, "flag": a.option_strings[-1], "kind": kind, "help": (a.help or "").replace("%%", "%"), "choices": list(a.choices) if a.choices else None,
+                out.append({"group": g.title, "ability": ability_group.get(a.dest), "dest": a.dest, "flag": a.option_strings[-1], "kind": kind, "help": (a.help or "").replace("%%", "%"), "choices": list(a.choices) if a.choices else None,
                             "default": None if a.default in (None, False) else str(a.default), "metavar": a.metavar or ""})
         return out
 
     def bundle_src(self, bundle):
-        """(path, file name) of the bundle chosen in the Bundles tab"""
+        """(path, file name) of the bundle chosen on the Ships page"""
         if os.path.isabs(bundle):                                      # a path picked with the Browse button
             if not os.path.isfile(bundle): raise ValueError("bundle file not found: %s" % bundle)
             return bundle, os.path.basename(bundle)
         if bundle in self.bundle_files(): return os.path.join(self.bundles, bundle), bundle
         raise ValueError("choose a bundle file")
 
-    def run_xor(self, bundle, mode):
+    def run_xor(self, bundle, mode, key=""):
         """the 'xor' tool on one bundle: decrypt -> work/decrypted/, encrypt -> out/bundles/, check = report only"""
         if mode not in ("decrypt", "encrypt", "check"): raise ValueError("bad mode")
-        src, _name = self.bundle_src(bundle)
-        cmd = tool_cmd("xor") + [mode, src, "-o", self.out]
+        bundle = bundle.strip()
+        if bundle and not os.path.isdir(bundle):
+            bundle, _ = self.bundle_src(bundle)
+        cmd = tool_cmd("xor") + [mode]
+        if bundle:
+            cmd.append(bundle)
+        cmd += ["-o", self.out]
+        if self.bundles:
+            cmd += ["--bundles", self.bundles]
+        if key.strip():
+            key = key.strip()
+            bytes.fromhex(key)
+            cmd += ["--key", key]
         with self.lock: r = run_cmd(cmd, 300)
         return {"ok": r.returncode == 0, "output": r.stdout + r.stderr, "cmd": " ".join(cmd[3:])}
 
@@ -269,7 +296,7 @@ class Project:
         src, bundle = self.bundle_src(bundle)
         ap = wmod.build_parser()
         stem = bundle[:-4] if bundle.endswith(".dec") else bundle
-        dst = None if opts.get("list_mounts") else os.path.join(self.bundle_out, stem + (".dec" if opts.get("no_encrypt") else ""))
+        dst = None if (opts.get("list_mounts") or opts.get("inspect")) else os.path.join(self.bundle_out, stem + (".dec" if opts.get("no_encrypt") else ""))
         cmd = tool_cmd("weapons") + [src, "-o", self.out] + (["--bundles", self.bundles] if self.bundles else [])
         for a in ap._actions:
             v = opts.get(a.dest)
@@ -283,12 +310,14 @@ class Project:
         return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-20000:], "dst": dst, "cmd": " ".join(cmd[3:])}
 
     # ---- DLL patches (the 'dll' tool; it continues from out/dll/ itself, so patches stack) ----
-    def dll_src(self):
-        return config.latest(self.dll, "dll", self.out, quiet=True)
+    def dll_src(self, fresh=False):
+        return config.latest(self.dll, "dll", self.out, fresh=fresh, quiet=True)
 
-    def dll_check(self):
-        r = run_cmd(tool_cmd("dll") + ["check", self.dll_src()], 120)
-        return {"source": self.dll_src(), "output": r.stdout + r.stderr}
+    def dll_check(self, fresh=False):
+        with self.lock:
+            source = self.dll_src(fresh)
+            r = run_cmd(tool_cmd("dll") + ["check", source], 120)
+        return {"source": source, "output": r.stdout + r.stderr}
 
     def dll_patch(self, o):
         dst = os.path.join(self.dll_out, os.path.basename(self.dll))
@@ -297,8 +326,8 @@ class Project:
                           ("command_step", "--command-step"), ("command_first_rank", "--command-first-rank")):
             if str(o.get(key, "")).strip(): cmd += [flag, str(o[key]).strip()]
         if o.get("munition_load") in (True, "true", 1, "1"): cmd.append("--munition-load")
-        if o.get("fresh") in (True, "true", 1, "1"): cmd.append("--fresh")
         if not any(c.startswith("--") and c not in ("--command-step", "--command-first-rank") for c in cmd[base:]): raise ValueError("fill in at least one patch value")
+        if o.get("fresh") in (True, "true", 1, "1"): cmd.append("--fresh")
         with self.lock: r = run_cmd(cmd, 300)
         return {"ok": r.returncode == 0, "output": r.stdout + r.stderr, "dst": dst}
 
@@ -321,13 +350,15 @@ def _need(v, k, what):
     return x
 
 
-def _pairs(v, k):
+def _pairs(v, k, *, allow_bool=False):
     toks = []
     for ln in str(v.get(k, "")).splitlines():
         p = ln.split()
         if not p: continue
         if len(p) != 2: raise ValueError("each line needs a field name and a value, e.g. MaxMissiles 80 (got %r)" % ln)
-        float(p[1]); toks += p
+        if not (allow_bool and p[0] == "HasUnlimitedMunitions" and p[1].lower() in ("true", "false", "yes")):
+            float(p[1])
+        toks += p
     if not toks: raise ValueError("enter at least one line: field value")
     return toks
 
@@ -340,31 +371,35 @@ F = lambda name, label, kind="text", default="", help="": {"name": name, "label"
 TOOLS = [
     {"id": "commanders", "group": "Commanders", "title": "Show commanders", "help": "Ranks, XP table, leadership interval and trait counts.", "fields": [],
      "build": lambda P, v: ["commanders"]},
-    {"id": "setcommanders", "group": "Commanders", "title": "Add commander ranks", "writes": True,
+    {"id": "setcommanders", "current": "commanders", "group": "Commanders", "title": "Add commander ranks", "writes": True,
      "help": "Adds ranks above the original maximum. Afterwards patch the DLL (DLL tab: max rank 20, command nodes 10) or the new ranks do nothing.",
      "fields": [F("add", "ranks to add", "int", "10"), F("every_level", "a fleet-size trait at every rank (leadership interval 1)", "bool", True), F("xp_growth", "XP growth per rank", "float", "1.2", "each new rank costs this much more XP than the previous one")],
      "build": lambda P, v: ["setcommanders", "--add", str(int(float(v.get("add") or 10))), "--xp-growth", str(float(v.get("xp_growth") or 1.2))] + _bool_flag(v, "every_level", "--every-level")},
-    {"id": "fixspecs", "group": "Commanders", "title": "Specialisation lists (fixspecs)", "writes": True,
+    {"id": "fixspecs", "current": "commanders", "group": "Commanders", "title": "Specialisation lists (fixspecs)", "writes": True,
      "help": "Sets each subsystem's captain-skill list to its own three skills. Tick the box to put the game's original lists back.",
      "fields": [F("revert", "undo: restore the original lists", "bool", False)],
      "build": lambda P, v: ["fixspecs"] + _bool_flag(v, "revert", "--revert-specs")},
     {"id": "list", "group": "Ships", "title": "List all ships", "help": "Name, buildable, cost, time, rush cost, hull, fleet points, faction, class.", "fields": [],
-     "build": lambda P, v: ["list", "--levels", P.src_for(P.table_files[0])]},
-    {"id": "setxp", "group": "Ships", "title": "XP needed per veterancy rank", "writes": True, "help": "Changes the XP a crew needs to reach a rank (the same for every ship).",
-     "fields": [F("rank", "rank", "int", "2"), F("xp", "XP needed", "int", "10")],
+     "build": lambda P, v: ["list"]},
+    {"id": "show", "group": "Ships", "title": "Inspect ship", "help": "Show the selected ship’s stats and veterancy.",
+     "fields": [F("ship", "Ship", "ship")], "build": lambda P, v: ["show", _need(v, "ship", "ship")]},
+    {"id": "vet", "group": "Ships", "title": "Show veterancy", "help": "Show the XP table and bonuses. Leave Ship blank to see every ship.",
+     "fields": [F("ship", "Ship", "ship")], "build": lambda P, v: ["vet"] + ([v["ship"]] if v.get("ship") else [])},
+    {"id": "setxp", "current": "vet", "group": "Ships", "title": "XP needed per veterancy rank", "writes": True, "help": "Changes the XP a crew needs to reach a rank (the same for every ship).",
+     "fields": [F("rank", "rank", "int", "2"), F("xp", "New XP needed", "int")],
      "build": lambda P, v: ["setxp", str(int(float(_need(v, "rank", "rank")))), str(int(float(_need(v, "xp", "XP"))))]},
-    {"id": "copyvet", "group": "Ships", "title": "Copy veterancy between ships", "writes": True, "help": "Copies every rank of one ship's veterancy bonuses onto another (replaces the target's).",
+    {"id": "copyvet", "current": "vet", "group": "Ships", "title": "Copy veterancy between ships", "writes": True, "help": "Copies every rank of one ship's veterancy bonuses onto another (replaces the target's).",
      "fields": [F("src", "copy FROM ship", "ship"), F("dst", "copy TO ship", "ship")],
      "build": lambda P, v: ["copyvet", _need(v, "src", "source ship"), _need(v, "dst", "target ship")]},
-    {"id": "munitions", "group": "Munitions", "title": "List munition types", "help": "Capacity, salvo size, supply cost.", "fields": [],
-     "build": lambda P, v: ["munitions"]},
-    {"id": "setmunition", "group": "Munitions", "title": "Edit a munition type", "writes": True,
+    {"id": "munitions", "group": "Munitions", "title": "List munition types", "help": "Capacity, salvo size, supply cost.", "fields": [F("name", "Munition (blank for all)")],
+     "build": lambda P, v: ["munitions"] + ([v["name"].strip()] if v.get("name", "").strip() else [])},
+    {"id": "setmunition", "current": "munitions", "group": "Munitions", "title": "Edit a munition type", "writes": True,
      "help": "Editable: StandardSalvoSize MaxMissiles HasUnlimitedMunitions SupplyCostPerMunition SurvivalCostPerMunition PointValue. One 'field value' per line.",
-     "fields": [F("name", "munition (part of its name)", "text", "colonial guided"), F("settings", "settings", "lines", "MaxMissiles 80")],
-     "build": lambda P, v: ["setmunition", _need(v, "name", "munition name")] + _pairs(v, "settings")},
+     "fields": [F("name", "Munition (exact name)"), F("settings", "New settings", "lines", "", "Example: MaxMissiles 80")],
+     "build": lambda P, v: ["setmunition", _need(v, "name", "munition name")] + _pairs(v, "settings", allow_bool=True)},
     {"id": "blueprints", "group": "Research", "title": "List research unlocks", "help": "Per campaign: ships that can be researched, cost, mission, starts-unlocked. Edit one ship's entries on its Ships page.", "fields": [],
      "build": lambda P, v: ["blueprints"]},
-    {"id": "addblueprint", "group": "Research", "title": "Add a ship to research (bulk)", "writes": True,
+    {"id": "addblueprint", "current": "blueprints", "group": "Research", "title": "Add a ship to research (bulk)", "writes": True,
      "help": "Adds the ship to the research lists AND makes it buildable (build stats copied from the reference ship). Needs a NEW campaign.",
      "fields": [F("ship", "ship", "ship"), F("cost", "research cost (blank = same as reference)", "int"), F("like", "reference ship", "ship", "Jupiter Mk2"), F("campaigns", "campaigns (e.g. 2,3,4,5; blank = all)"),
                 F("mission", "mission required (-1 none)", "int", "-1"), F("label", "label", "text", "Mc"), F("list", "list", "choice:battlestar,capital", "battlestar"),
@@ -374,18 +409,18 @@ TOOLS = [
                            + _bool_flag(v, "unlocked", "--unlocked") + _bool_flag(v, "keep", "--keep-build-stats")},
     {"id": "fleetinfo", "group": "Fleet limits", "title": "Show fleet limits", "help": "MaxShips (per fleet group), StartingFleetPointCap ...", "fields": [],
      "build": lambda P, v: ["fleetinfo"]},
-    {"id": "setfleetinfo", "group": "Fleet limits", "title": "Change fleet limits", "writes": True, "help": "One 'field value' per line, e.g. MaxShips 10 and StartingFleetPointCap 6000.",
-     "fields": [F("settings", "settings", "lines", "MaxShips 10")], "build": lambda P, v: ["setfleetinfo"] + _pairs(v, "settings")},
-    {"id": "fleeticons", "group": "Fleet map icons", "title": "List icon tables", "help": "The war-room icon tables.", "fields": [],
-     "build": lambda P, v: ["fleeticons"]},
-    {"id": "fleeticon", "group": "Fleet map icons", "title": "Copy a fleet icon", "writes": True, "help": "Gives other ships the fleet-map icon of one ship (in every scene that has the table).",
-     "fields": [F("ships", "ships to change (comma separated)"), F("like", "copy the icon of", "ship"), F("factory", "icon table", "choice:FleetModelFactory,ProjectionFactory", "FleetModelFactory")],
+    {"id": "setfleetinfo", "current": "fleetinfo", "group": "Fleet limits", "title": "Change fleet limits", "writes": True, "help": "One 'field value' per line, e.g. MaxShips 10 and StartingFleetPointCap 6000.",
+     "fields": [F("settings", "New settings", "lines", "", "Example: MaxShips 10")], "build": lambda P, v: ["setfleetinfo"] + _pairs(v, "settings")},
+    {"id": "fleeticons", "group": "Fleet map icons", "title": "List icon tables", "help": "The war-room icon tables.", "fields": [F("factory", "Icon table", "choice:FleetModelFactory,ProjectionFactory,all", "FleetModelFactory")],
+     "build": lambda P, v: ["fleeticons", "--factory", str(v.get("factory") or "FleetModelFactory")]},
+    {"id": "fleeticon", "current": "fleeticons", "group": "Fleet map icons", "title": "Copy a fleet icon", "writes": True, "help": "Gives other ships the fleet-map icon of one ship (in every scene that has the table).",
+     "fields": [F("ships", "ships to change (comma separated)"), F("like", "copy the icon of", "ship"), F("factory", "icon table", "choice:FleetModelFactory,ProjectionFactory,all", "FleetModelFactory")],
      "build": lambda P, v: ["fleeticon", _need(v, "ships", "ships"), _need(v, "like", "icon ship"), "--factory", str(v.get("factory") or "FleetModelFactory")]},
     {"id": "squadrons", "group": "Squadrons", "title": "List squadrons", "help": "Fighter count, hull pool, hull per fighter, loss thresholds (read from sharedassets9.assets).",
      "fields": [F("assets", "sharedassets9.assets", "file", "@assets")], "build": lambda P, v: ["squadrons", "--levels", _need(v, "assets", "assets file")]},
-    {"id": "setsquadron", "group": "Squadrons", "title": "Change squadron hull", "writes": True,
+    {"id": "setsquadron", "current": "squadrons", "group": "Squadrons", "title": "Change squadron hull", "writes": True,
      "help": "HullFactor F multiplies the pool and every fighter-loss threshold; MaxHullPoints N sets the pool; FighterHull N sets hull per fighter. Name is part of the squadron name, or 'all'.",
-     "fields": [F("assets", "sharedassets9.assets", "file", "@assets"), F("name", "squadron", "text", "all"), F("settings", "settings", "lines", "HullFactor 2")],
+     "fields": [F("assets", "sharedassets9.assets", "file", "@assets"), F("name", "squadron", "text", "all"), F("settings", "New settings", "lines", "", "Example: HullFactor 2")],
      "build": lambda P, v: ["setsquadron", _need(v, "name", "squadron")] + _pairs(v, "settings") + ["--levels", _need(v, "assets", "assets file")]},
 ]
 TOOLS_BY_ID = {t["id"]: t for t in TOOLS}
@@ -457,9 +492,13 @@ class Handler(BaseHTTPRequestHandler):
             if u.path in ("/api/state", "/api/config"): return self.send(config_info())
             if u.path == "/api/browse": return self.send(browse(q.get("path", [""])[0], q.get("files", ["0"])[0] == "1"))
             if u.path == "/api/ships": return self.send(self.need().ships())
-            if u.path == "/api/ship": return self.send(self.need().ship(q["name"][0]))
+            if u.path == "/api/ship":
+                project = self.need()
+                with project.lock:
+                    ship = project.ship(q["name"][0], q.get("fresh") == ["1"])
+                return self.send(ship)
             if u.path == "/api/bundle/form": return self.send(self.need().bundle_form())
-            if u.path == "/api/dll/check": return self.send(self.need().dll_check())
+            if u.path == "/api/dll/check": return self.send(self.need().dll_check(q.get("fresh") == ["1"]))
             if u.path == "/api/tools": return self.send(self.need().tools())
             self.send({"error": "not found"}, 404)
         except BaseException as e: self.send({"error": str(e)}, 400)
@@ -474,7 +513,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/bundle/run": return self.send(P.run_bundle(body["bundle"], body["options"]))
             if self.path == "/api/dll/patch": return self.send(P.dll_patch(body))
             if self.path == "/api/dll/revert": return self.send(P.dll_revert(body))
-            if self.path == "/api/xor": return self.send(P.run_xor(body["bundle"], body["mode"]))
+            if self.path == "/api/xor": return self.send(P.run_xor(body["bundle"], body["mode"], body.get("key", "")))
             if self.path == "/api/tools/run": return self.send(P.run_tool(body["id"], body.get("values", {}), body.get("fresh", False)))
             self.send({"error": "not found"}, 404)
         except BaseException as e: self.send({"error": str(e)}, 400)
@@ -518,9 +557,11 @@ header{display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:
 h1{font-size:16px;margin:0 8px 0 0}nav button{background:none;border:0;padding:6px 10px;color:var(--muted);cursor:pointer;font:inherit;border-bottom:2px solid transparent}
 nav button.on{color:var(--ink);border-color:var(--accent)}.sp{flex:1}
 button.pri{background:var(--accent);color:var(--accent-ink);border:0;border-radius:6px;padding:7px 14px;font:inherit;cursor:pointer}button.pri:disabled{opacity:.4;cursor:default}
-button.sec{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 12px;font:inherit;cursor:pointer}
+button.sec[aria-pressed=true]{outline:2px solid var(--accent);outline-offset:-2px}button.sec{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 12px;font:inherit;cursor:pointer}
 main{display:grid;grid-template-columns:270px 1fr;gap:0;min-height:calc(100vh - 54px)}
 #side{border-right:1px solid var(--line);background:var(--panel);padding:10px;overflow:auto;max-height:calc(100vh - 54px);position:sticky;top:54px}
+.ability-options{border-top:1px solid var(--line);padding:8px 0}.ability-options summary{cursor:pointer;font-weight:600}.ability-options .grid{margin-top:8px}
+.bundle-slot-fields:not(:empty){border-top:1px solid var(--line);margin-top:12px}
 #side input{width:100%;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);margin-bottom:8px}
 .ship{padding:6px 8px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;gap:6px}.ship:hover{background:var(--bg)}.ship.on{background:var(--chg);outline:1px solid var(--accent)}
 .ship small{color:var(--muted)}.dot{color:var(--accent)}
@@ -536,18 +577,17 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 @media (max-width:760px){main{grid-template-columns:1fr}#side{position:static;max-height:240px;border-right:0;border-bottom:1px solid var(--line)}}
 </style></head><body>
 <header><h1>Deadlock Ship Editor</h1>
-<nav><button data-t="ships" class="on">Ships</button><button data-t="bundles">Bundles</button><button data-t="dll">DLL</button><button data-t="tools">Tools</button><button data-t="settings">Settings</button></nav>
+<nav><button data-t="ships" class="on">Ships</button><button data-t="dll">DLL</button><button data-t="tools">Database</button><button data-t="settings">Settings</button></nav>
 <span class="sp"></span><span id="pend" class="hint"></span>
 <label class="hint"><input type="checkbox" id="fresh"> start from the originals</label>
 <button class="sec" id="discard" disabled>Discard</button><button class="pri" id="apply" disabled>Apply</button></header>
-<main id="tab-ships"><aside id="side"><input id="q" placeholder="Search ships" autocomplete="off"><div id="list"></div></aside><section id="view"><p class="hint">Pick a ship on the left.</p></section></main>
-<section id="tab-bundles" hidden style="padding:16px 20px;max-width:980px"></section>
+<main id="tab-ships"><aside id="side"><input id="q" placeholder="Search ships" autocomplete="off"><button class="sec" id="ship-tools">Ship database tools</button><div id="list"></div></aside><section id="view"><p class="hint">Pick a ship on the left.</p></section></main>
 <section id="tab-dll" hidden style="padding:16px 20px;max-width:980px"></section>
 <section id="tab-tools" hidden style="padding:16px 20px;max-width:1100px"></section>
 <section id="tab-settings" hidden style="padding:16px 20px;max-width:980px"></section>
 <script>
 const $=s=>document.querySelector(s);
-const state={ships:[],cur:null,data:null,pending:{},info:{}};
+const state={ships:[],cur:null,data:null,pending:{},info:{},toolGroup:'Ships'};
 async function api(path,body){const r=await fetch(path,body!==undefined?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j}
 const el=(t,a={},...kids)=>{const e=document.createElement(t);for(const k in a){if(k==='class')e.className=a[k];else if(k.startsWith('on'))e.addEventListener(k.slice(2),a[k]);else if(a[k]!==false&&a[k]!==null&&a[k]!==undefined)e.setAttribute(k,a[k]===true?'':a[k])}for(const c of kids.flat())e.append(c&&c.nodeType?c:document.createTextNode(c??''));return e};
 const GROUPS=[
@@ -598,58 +638,227 @@ function vetCard(d){const v=d.vet,k=key(state.cur,'__vet'),card=el('div',{class:
     el('button',{class:'sec',title:'remove this effect',onclick:()=>{const cc=get(),rr=rankOf(cc,rinfo.rank);rr.effects.splice(i,1);put(cc)}},'x')));
    const used=new Set(r.effects.map(e=>e.effect)),free=Object.keys(v.effects).find(id=>!used.has(Number(id)));
    kids.push(el('div',{style:'margin:10px 0 2px'},el('strong',{},'Rank '+rinfo.rank),el('span',{class:'hint'},'  ('+rinfo.xp+' XP)')),...rows,
-    free!==undefined?el('button',{class:'sec',onclick:()=>{const cc=get(),rr=rankOf(cc,rinfo.rank);rr.effects.push({effect:Number(free),value:0});put(cc)}},'+ add effect'):'')}
+    el('div',{class:'row'},
+      free!==undefined?el('button',{class:'sec',onclick:()=>{const cc=get(),rr=rankOf(cc,rinfo.rank);rr.effects.push({effect:Number(free),value:0});put(cc)}},'+ add effect'):'',
+      r.effects.length?el('button',{class:'sec',onclick:()=>{const cc=get();rankOf(cc,rinfo.rank).effects=[];put(cc)}},'Clear rank effects'):''))}
   card.replaceChildren(...kids)}
  draw();return card}
-function renderShip(){const d=state.data;if(!d)return;const by={};d.fields.forEach(f=>by[f.name]=f);const used=new Set();const v=$('#view');v.replaceChildren(el('h2',{style:'margin:0 0 12px'},d.name));
- for(const [title,names] of GROUPS){const fs=names.map(n=>by[n]).filter(Boolean);if(!fs.length)continue;fs.forEach(f=>used.add(f.name));v.append(el('div',{class:'card'},el('h3',{},title),el('div',{class:'grid'},fs.map(fieldInput))))}
+function renderShip(){const d=state.data;if(!d)return;const by={};d.fields.forEach(f=>by[f.name]=f);const used=new Set();const v=$('#view');
+ if(activeBundle?.ship!==d.name)activeBundle=shipBundleFields(d.name);
+ const bundle=activeBundle;
+ v.replaceChildren(el('h2',{style:'margin:0 0 12px'},d.name),el('p',{class:'hint'},'Values from '+d.source),bundle.source);
+ for(const [title,names] of GROUPS){
+   const fields=names.map(name=>by[name]).filter(Boolean);
+   fields.forEach(field=>used.add(field.name));
+   const prefab=title==='Carrier & munition slots'?bundle.slots:null;
+   if(fields.length||prefab){
+     v.append(el('div',{class:'card'},el('h3',{},title),el('div',{class:'grid'},fields.map(fieldInput)),prefab));
+   }
+ }
+ v.append(bundle.sections,bundle.actions);
  const rest=d.fields.filter(f=>!used.has(f.name)&&f.type!=='ro'),ro=d.fields.filter(f=>f.type==='ro');
  if(rest.length)v.append(el('div',{class:'card'},el('h3',{},'Other editable fields'),el('div',{class:'grid'},rest.map(fieldInput))));
  v.append(el('div',{class:'card'},el('h3',{},'Advantages & penalties'),el('div',{class:'ro'},'Advantages: '+(d.advantages.join(', ')||'none')),el('div',{class:'ro'},'Penalties: '+(d.penalties.join(', ')||'none')),el('p',{class:'hint'},'Advantages and penalties are read only for now (shipdb edits veterancy in the same way).')));
  v.append(researchCard(d));
  v.append(vetCard(d));
  v.append(el('div',{class:'card'},el('h3',{},'Read-only fields'),el('div',{class:'grid'},ro.map(f=>el('div',{class:'ro'},el('span',{class:'hint'},f.name+': '),f.value)))))}
-async function openShip(name){state.cur=name;renderList();try{state.data=await api('/api/ship?name='+encodeURIComponent(name));renderShip()}catch(e){$('#view').replaceChildren(el('p',{class:'msg-bad'},e.message))}}
+let shipRequest=0;
+async function openShip(name){
+ const request=++shipRequest;
+ state.cur=name;renderList();
+ try{
+   const fresh=$('#fresh').checked?'&fresh=1':'';
+   const data=await api('/api/ship?name='+encodeURIComponent(name)+fresh);
+   if(request===shipRequest){state.data=data;renderShip()}
+ }catch(e){
+   if(request===shipRequest)$('#view').replaceChildren(el('p',{class:'msg-bad'},e.message));
+ }
+}
 async function loadShips(){state.ships=await api('/api/ships');renderList()}
 $('#q').addEventListener('input',renderList);
 $('#discard').onclick=()=>{state.pending={};updPend();renderShip()};
 $('#apply').onclick=async()=>{const edits=Object.values(state.pending);const b=$('#apply');b.disabled=true;try{const r=await api('/api/apply',{edits,fresh:$('#fresh').checked});state.pending={};await loadShips();await openShip(state.cur);updPend();alert('Applied. '+r.log.slice(0,6).join('\n')+(r.log.length>6?'\n...':'')+'\n\nCopy the files from '+state.info.out+' over the game files (back them up first).')}catch(e){alert('Failed: '+e.message);b.disabled=false}};
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));for(const t of ['ships','bundles','dll','tools','settings'])$('#tab-'+t).hidden=t!==b.dataset.t;if(b.dataset.t==='bundles')loadBundles();if(b.dataset.t==='dll')loadDll();if(b.dataset.t==='tools')loadTools();if(b.dataset.t==='settings')loadSettings()});
-let bundleForm=null;
-async function loadBundles(){const box=$('#tab-bundles');if(box.dataset.ok)return;
- if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}
- box.dataset.ok=1;bundleForm=await api('/api/bundle/form');
+document.querySelectorAll('header nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('on',x===b));for(const t of ['ships','dll','tools','settings'])$('#tab-'+t).hidden=t!==b.dataset.t;if(b.dataset.t==='dll')loadDll();if(b.dataset.t==='tools')loadTools();if(b.dataset.t==='settings')loadSettings()});
+let bundleForm;
+let activeBundle;
+const openedBundles=new Map();
+function shipBundleFields(ship){
+ const bundle={
+   ship,
+   source:el('div',{class:'card ship-bundle'},el('h3',{},'Bundle file'),el('p',{class:'hint'},'Loading bundle tools…')),
+   slots:el('div',{class:'bundle-slot-fields'}),
+   sections:el('div'),
+   actions:el('div',{class:'card'})
+ };
+ bundleForm??=api('/api/bundle/form');
+ bundleForm.then(options=>loadBundleTools(bundle,options)).catch(error=>{
+   bundleForm=undefined;
+   bundle.source.replaceChildren(el('h3',{},'Bundle file'),el('p',{class:'msg-bad'},error.message),
+     el('button',{class:'sec',onclick:()=>{activeBundle=undefined;renderShip()}},'Retry'));
+ });
+ return bundle;
+}
+function loadBundleTools(bundle,bundleOptions){
+ const {ship,source,slots,sections,actions}=bundle;
+ const get=id=>source.querySelector('#'+id)??actions.querySelector('#'+id);
  const path=el('input',{type:'text',id:'bpath',placeholder:'path to a ship bundle (encrypted game file or decrypted .dec)',style:'flex:1;min-width:280px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'});
- const pick=el('button',{class:'sec',onclick:async()=>{const r=await pickPath({files:true,start:path.value||state.info.bundle_dir||state.info.home,title:'Choose a ship bundle'});if(r)path.value=r}},'Browse...');
- const sel=el('select',{onchange:e=>{if(e.target.value)path.value=joinPath(state.info.bundle_dir,e.target.value)}},[el('option',{value:''},state.info.bundles.length?'or pick from the asset folder':'(no asset folder set)'),...state.info.bundles.map(b=>el('option',{value:b},b))]);
- const norm=x=>x.toLowerCase().replace(/[^a-z0-9]/g,'');
- if(state.cur){const m=state.info.bundles.find(b=>norm(b.replace(/[.]dec$/,''))===norm(state.cur));if(m){sel.value=m;path.value=joinPath(state.info.bundle_dir,m)}}
- const groups={};bundleForm.forEach(o=>(groups[o.group]=groups[o.group]||[]).push(o));
- box.replaceChildren(el('div',{class:'card'},el('h3',{},'Ship asset (bundle)'),el('div',{class:'row'},path,pick),el('div',{class:'row',style:'margin-top:8px'},sel,el('span',{class:'hint'},'Each run starts from the original bundle and writes to '+state.info.out+'/bundles/. The file matching the open ship is preselected when its name matches.'))),
-  el('div',{class:'card'},el('h3',{},'Decrypt / encrypt'),el('div',{class:'row'},...[['decrypt','Decrypt (to '+state.info.work+'/decrypted/)'],['encrypt','Encrypt (to '+state.info.out+'/bundles/)'],['check','Check']].map(([m,l])=>el('button',{class:'sec',onclick:()=>runXor(m)},l)),el('span',{id:'xmsg',class:'hint'})),
-   el('p',{class:'hint',style:'margin:6px 0 0'},'Works on the bundle chosen above. Not needed before Run (encrypted bundles are decrypted automatically); use Encrypt for a result made with --no-encrypt.'),el('pre',{id:'xout',hidden:true})));
- for(const [g,os] of Object.entries(groups)){box.append(el('div',{class:'card'},el('h3',{},g),el('div',{class:'grid'},os.map(o=>{let i;
-  if(o.kind==='bool'){i=el('input',{type:'checkbox','data-d':o.dest});return el('label',{class:'f chk',title:o.help},i,o.flag)}
+ function selectBundle(file){
+   path.value=file;
+   openedBundles.set(ship,file);
+   get('bcurrent').hidden=true;
+ }
+ const pick=el('button',{class:'sec',onclick:async()=>{
+   const file=await pickPath({files:true,start:path.value||state.info.bundle_dir||state.info.home,title:'Open a ship bundle'});
+   if(file){selectBundle(file);await inspectBundle(get)}
+ }},'Open bundle…');
+ path.addEventListener('change',()=>selectBundle(path.value.trim()));
+ const sel=el('select',{onchange:event=>{
+   if(event.target.value)selectBundle(joinPath(state.info.bundle_dir,event.target.value));
+ }},[el('option',{value:''},state.info.bundles.length?'Choose a configured bundle':'No bundle folder configured'),
+    ...state.info.bundles.map(name=>el('option',{value:name},name))]);
+ const normalize=name=>name.toLowerCase().replace(/[^a-z0-9]/g,'');
+ const match=state.info.bundles.find(name=>normalize(name.replace(/\.dec$/i,''))===normalize(ship));
+ const remembered=openedBundles.get(ship);
+ if(remembered!==undefined){path.value=remembered}
+ else if(match){sel.value=match;path.value=joinPath(state.info.bundle_dir,match)}
+ const groups={};bundleOptions.forEach(o=>(groups[o.group]=groups[o.group]||[]).push(o));
+ source.replaceChildren(el('h3',{},'Bundle file'),el('div',{class:'row'},path,pick,el('button',{class:'sec',onclick:async()=>{const r=await pickPath({files:false,start:state.info.bundle_dir||state.info.home,title:'Choose a folder for bundle conversion'});if(r)path.value=r}},'Browse folders…')),el('div',{class:'row',style:'margin-top:8px'},sel,el('button',{class:'sec',id:'binspect',onclick:()=>inspectBundle(get)},'Inspect current bundle')),
+   el('pre',{id:'bcurrent',hidden:true,'aria-live':'polite'}),
+  el('div',{class:'card'},el('h3',{},'Decrypt / encrypt'),el('label',{class:'f'},'Hex key override',el('input',{id:'xor-key',placeholder:'Automatic'})),el('div',{class:'row'},...[['decrypt','Decrypt (to '+state.info.work+'/decrypted/)'],['encrypt','Encrypt (to '+state.info.out+'/bundles/)'],['check','Check']].map(([m,l])=>el('button',{class:'sec',onclick:()=>runXor(get,m)},l)),el('span',{id:'xmsg',class:'hint'})),
+   el('p',{class:'hint',style:'margin:6px 0 0'},'Choose a bundle file or browse for a folder to convert in bulk.'),el('pre',{id:'xout',hidden:true})));
+ const optionsByGroup=Object.entries(groups);
+ for(const [group,options] of optionsByGroup){
+  const buildGrid=fields=>el('div',{class:'grid'},fields.map(o=>{let i;
+  if(o.kind==='bool'){i=el('input',{type:'checkbox','data-d':o.dest});return el('label',{class:'f chk',title:o.help},i,bundleFieldLabel(o))}
   if(o.kind==='choice'){i=el('select',{'data-d':o.dest},[el('option',{value:''},'(default)'),...o.choices.map(c=>el('option',{value:c},c))])}
   else if(o.kind==='list'){i=el('textarea',{'data-d':o.dest,rows:2,placeholder:'one per line, e.g. '+(o.metavar||'fore=1'),style:'padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'})}
   else i=el('input',{type:'text','data-d':o.dest,placeholder:o.default||o.metavar||''});
-  return el('label',{class:'f',title:o.help},o.flag,i,el('span',{class:'orig'},o.help.slice(0,110)+(o.help.length>110?'...':'')))}))))}
- box.append(el('div',{class:'row'},el('button',{class:'pri',id:'brun',onclick:runBundle},'Run'),el('span',{id:'bmsg',class:'hint'})),el('pre',{id:'bout',hidden:true}))}
-async function runXor(mode){const m=$('#xmsg');m.className='hint';m.textContent='running...';
- try{const r=await api('/api/xor',{bundle:$('#bpath').value,mode});$('#xout').hidden=false;$('#xout').textContent=r.cmd+'\n\n'+r.output;m.textContent=r.ok?'done':'failed';m.className=r.ok?'msg-ok':'msg-bad'}catch(e){m.textContent=e.message;m.className='msg-bad'}}
-async function runBundle(){const opts={};document.querySelectorAll('#tab-bundles [data-d]').forEach(i=>{opts[i.dataset.d]=i.type==='checkbox'?i.checked:i.value});
- $('#brun').disabled=true;$('#bmsg').textContent='running...';try{const r=await api('/api/bundle/run',{bundle:$('#bpath').value,options:opts});$('#bout').hidden=false;$('#bout').textContent=r.cmd+'\n\n'+r.output;$('#bmsg').textContent=r.ok?(r.dst?'done -> '+r.dst:'done'):'failed';$('#bmsg').className=r.ok?'msg-ok':'msg-bad'}catch(e){$('#bmsg').textContent=e.message;$('#bmsg').className='msg-bad'}$('#brun').disabled=false}
+  return el('label',{class:'f',title:o.help},bundleFieldLabel(o),i,el('span',{class:'orig'},o.help))}));
+  if(group==='Abilities'){
+    const card=el('div',{class:'card'},el('h3',{},'Abilities'));
+    const categories=new Map();
+    for(const option of options){
+      const name=option.ability||'Ability menu and donors';
+      if(!categories.has(name))categories.set(name,[]);
+      categories.get(name).push(option);
+    }
+    for(const [name,fields] of categories){
+      card.append(el('details',{class:'ability-options'},el('summary',{},name),buildGrid(fields)));
+    }
+    sections.append(card);
+    continue;
+  }
+  const grid=buildGrid(options);
+  if(group==='Squadron / munition slots'){
+    slots.replaceChildren(el('h4',{},'Bundle slot controls'),grid);
+  }else{
+    sections.append(el('div',{class:'card'},el('h3',{},group==='Output'?'Bundle output':group),grid));
+  }
+ }
+ actions.replaceChildren(el('div',{class:'row'},
+   el('button',{class:'pri',id:'brun',onclick:()=>runBundle(bundle,get)},'Save bundle edits'),
+   el('span',{id:'bmsg',class:'hint'},'Writes to the bundle output folder.')),
+   el('pre',{id:'bout',hidden:true}));
+}
+function bundleFieldLabel(option){
+ const label=option.flag.replace(/^--/,'').replaceAll('-',' ');
+ return label.charAt(0).toUpperCase()+label.slice(1);
+}
+async function runXor(get,mode){const m=get('xmsg');m.className='hint';m.textContent='running...';
+ try{if(!get('bpath').value.trim())throw new Error('Choose a bundle or folder first.');const r=await api('/api/xor',{bundle:get('bpath').value,mode,key:get('xor-key').value});get('xout').hidden=false;get('xout').textContent=r.cmd+'\n\n'+r.output;m.textContent=r.ok?'done':'failed';m.className=r.ok?'msg-ok':'msg-bad'}catch(e){m.textContent=e.message;m.className='msg-bad'}}
+async function inspectBundle(get){
+ const button=get('binspect'),out=get('bcurrent');
+ button.disabled=true;out.hidden=false;out.textContent='Reading selected bundle…';
+ try{
+   const result=await api('/api/bundle/run',{bundle:get('bpath').value,options:{inspect:true}});
+   out.textContent=result.output;
+ }catch(e){out.textContent=e.message}
+ finally{button.disabled=false}
+}
+async function bundlePatchOptions(options){
+ const required=[
+   {option:'armour_regen',name:'armour regeneration',field:'armour_factor',label:'Armour regeneration factor',value:'1',min:0,allowMin:false},
+   {option:'squadron_revive',name:'squadron revive',field:'revive_turns',label:'Squadron revive delay in turns (0 revives immediately)',value:'0',min:0,allowMin:true}
+ ].filter(patch=>options[patch.option]);
+ if(options.list_mounts||!required.length)return {};
+ const check=await api('/api/dll/check');
+ const patches={};
+ for(const patch of required){
+   const status=check.output.split('\n').find(line=>line.startsWith(patch.name+' patch: '));
+   if(status?.startsWith(patch.name+' patch: INSTALLED'))continue;
+   if(!status?.startsWith(patch.name+' patch: not installed')){
+     throw new Error('Could not verify the '+patch.name+' patch. Check the configured DLL on the DLL page.');
+   }
+   const value=window.prompt('This bundle edit needs the '+patch.name+' DLL patch.\n'+patch.label,patch.value);
+   if(value===null)return null;
+   const number=Number(value);
+   if(!value.trim()||!Number.isFinite(number)||number<patch.min||(!patch.allowMin&&number===patch.min)){
+     throw new Error('Enter a '+(patch.allowMin?'non-negative':'positive')+' number for '+patch.label.toLowerCase()+'.');
+   }
+   patches[patch.field]=number;
+ }
+ return patches;
+}
+async function runBundle(bundle,get){
+ const opts={};
+ for(const area of [bundle.slots,bundle.sections]){
+   area.querySelectorAll('[data-d]').forEach(input=>{
+     opts[input.dataset.d]=input.type==='checkbox'?input.checked:input.value;
+   });
+ }
+ const button=get('brun'),message=get('bmsg'),output=get('bout');
+ const source=get('bpath').value.trim();
+ let saved=false;
+ button.disabled=true;
+ message.className='hint';
+ output.hidden=true;
+ try{
+   if(!source)throw new Error('Choose a bundle file first.');
+   message.textContent='Checking bundle requirements…';
+   const patches=await bundlePatchOptions(opts);
+   if(patches===null){
+     message.textContent='Bundle edit cancelled.';
+     return;
+   }
+   message.textContent='Saving bundle…';
+   const result=await api('/api/bundle/run',{bundle:source,options:opts});
+   output.textContent=result.cmd+'\n\n'+result.output;
+   output.hidden=false;
+   if(!result.ok)throw new Error('The bundle tool reported an error.');
+   saved=Boolean(result.dst);
+   if(Object.keys(patches).length){
+     message.textContent='Applying required DLL patches…';
+     const dll=await api('/api/dll/patch',patches);
+     output.textContent+='\n\n'+dll.output;
+     if(!dll.ok)throw new Error('The required DLL patch failed. See the output below.');
+     message.textContent='Saved bundle and patched DLL. DLL output: '+dll.dst;
+   }else{
+     message.textContent=result.dst?'Saved bundle to '+result.dst:'Done';
+   }
+   message.className='msg-ok';
+ }catch(error){
+   message.textContent=(saved?'Bundle saved. ':'')+error.message;
+   message.className='msg-bad';
+ }finally{
+   button.disabled=false;
+ }
+}
 async function loadDll(){const box=$('#tab-dll');if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}const fld=(id,l,h)=>el('label',{class:'f'},l,el('input',{type:'number',id,step:'any'}),el('span',{class:'orig'},h));
  if(!box.dataset.ok){box.dataset.ok=1;box.replaceChildren(el('div',{class:'card'},el('h3',{},'Current DLL'),el('pre',{id:'dchk'},'checking...')),
-  el('div',{class:'card'},el('h3',{},'Patch'),el('div',{class:'grid'},fld('d_armour','Armour regen factor','Ships built with --armour-regen (armour per tick = hull rate x factor)'),fld('d_revive','Squadron revive (turns)','0 = rebuild at once'),fld('d_rank','Commander max rank','Game default 10'),fld('d_nodes','Command-tree nodes','Game default 4; 10 = one per rank 1-10'),fld('d_step','Ranks between nodes','default 1'),fld('d_first','First node at rank','default 1'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches normally add to the DLL already in the output folder'},el('input',{type:'checkbox',id:'d_fresh'}),'Start from the original DLL (drops earlier patches)')),
+  el('div',{class:'card'},el('h3',{},'Patch'),el('div',{class:'grid'},fld('d_armour','Armour regen factor','Ships built with --armour-regen (armour per tick = hull rate x factor)'),fld('d_revive','Squadron revive (turns)','0 = rebuild at once'),fld('d_rank','Commander max rank','Game default 10'),fld('d_nodes','Command-tree nodes','Game default 4; 10 = one per rank 1-10'),fld('d_step','Ranks between nodes','default 1'),fld('d_first','First node at rank','default 1'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches normally add to the DLL already in the output folder'},el('input',{type:'checkbox',id:'d_fresh',onchange:loadDll}),'Start from the original DLL (drops earlier patches)')),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'pri',id:'dgo',onclick:patchDll},'Patch DLL'),el('span',{id:'dmsg',class:'hint'}))),
   el('div',{class:'card'},el('h3',{},'Revert'),el('div',{class:'grid'},...[['r_armour','Armour regen'],['r_revive','Squadron revive'],['r_rank','Max rank (back to 10)'],['r_nodes','Command-tree nodes'],['r_mun','Munition load fix']].map(([id,l])=>el('label',{class:'f chk'},el('input',{type:'checkbox',id}),l))),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'sec',id:'rgo',onclick:revertDll},'Revert ticked (none ticked = all)'),el('span',{id:'rmsg',class:'hint'}))),el('pre',{id:'dout',hidden:true}))}
- try{const r=await api('/api/dll/check');$('#dchk').textContent=r.output+'\n(source: '+r.source+')'}catch(e){$('#dchk').textContent=e.message}}
-async function patchDll(){$('#dgo').disabled=true;try{const r=await api('/api/dll/patch',{armour_factor:$('#d_armour').value,revive_turns:$('#d_revive').value,max_rank:$('#d_rank').value,command_nodes:$('#d_nodes').value,command_step:$('#d_step').value,command_first_rank:$('#d_first').value,munition_load:$('#d_mun').checked,fresh:$('#d_fresh').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;$('#dmsg').textContent=r.ok?'written to '+r.dst+' - copy it over BSG_Data/Managed/Assembly-CSharp.dll':'failed';$('#dmsg').className=r.ok?'msg-ok':'msg-bad';loadDll()}catch(e){$('#dmsg').textContent=e.message;$('#dmsg').className='msg-bad'}$('#dgo').disabled=false}
+ try{const r=await api('/api/dll/check'+($('#d_fresh').checked?'?fresh=1':''));$('#dchk').textContent=r.output+'\n(source: '+r.source+')'}catch(e){$('#dchk').textContent=e.message}}
+async function patchDll(){$('#dgo').disabled=true;try{const r=await api('/api/dll/patch',{armour_factor:$('#d_armour').value,revive_turns:$('#d_revive').value,max_rank:$('#d_rank').value,command_nodes:$('#d_nodes').value,command_step:$('#d_step').value,command_first_rank:$('#d_first').value,munition_load:$('#d_mun').checked,fresh:$('#d_fresh').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;$('#dmsg').textContent=r.ok?'written to '+r.dst+' - copy it over BSG_Data/Managed/Assembly-CSharp.dll':'failed';$('#dmsg').className=r.ok?'msg-ok':'msg-bad';if(r.ok)$('#d_fresh').checked=false;loadDll()}catch(e){$('#dmsg').textContent=e.message;$('#dmsg').className='msg-bad'}$('#dgo').disabled=false}
 
 const joinPath=(a,b)=>a.endsWith('/')?a+b:a+'/'+b;
-function showTab(t){document.querySelector('nav button[data-t='+t+']').click()}
+function showTab(t){document.querySelector('header nav button[data-t='+t+']').click()}
+$('#ship-tools').onclick=()=>{state.toolGroup='Ships';delete $('#tab-tools').dataset.ok;showTab('tools')};
+$('#fresh').addEventListener('change',()=>{
+ if(state.cur)openShip(state.cur);
+ $('#refresh-current')?.click();
+});
 function pickPath({files=false,start='',title='Choose'}){return new Promise(res=>{
  let cur=start;const back=el('div',{style:'position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50'});
  const dlg=el('div',{class:'card',style:'width:min(640px,94vw);max-height:80vh;display:flex;flex-direction:column;margin:0'});
@@ -671,36 +880,85 @@ function loadSettings(){const box=$('#tab-settings'),I=state.info;
  box.replaceChildren(
   row('s_levels','Level data folder','The folder with the level files (level0, level5 ...). Every file that holds the ship table is edited. Results go to the output folder and the originals are never touched.',I.levels,false),
   row('s_dll','Game DLL (Assembly-CSharp.dll)','Gives the field layouts. Use the DLL from the same game version as the level files.',I.dll,true),
-  row('s_bundles','Ship asset folder (optional)','Folder with ship bundles for the Bundles tab. Encrypted game bundles are decrypted automatically. Any single bundle file can also be picked there.',I.bundles,false),
+  row('s_bundles','Ship asset folder (optional)','Folder used to match bundles to ships. You can also browse for a bundle from a ship’s page.',I.bundles,false),
   row('s_work','Work folder','Scratch space: decrypted copies of bundles go to its decrypted/ sub-folder.',I.work,false),
   row('s_out','Output folder','Where edited files go: its levels/, dll/ and bundles/ sub-folders, the same places the command-line tools use, so all edits stack.',I.out,false),
   el('div',{class:'row'},el('button',{class:'pri',id:'s_save',onclick:saveSettings},'Save and load'),el('span',{id:'s_msg',class:I.error?'msg-bad':'hint'},I.error||'')))}
 async function saveSettings(){const m=$('#s_msg');$('#s_save').disabled=true;m.className='hint';m.textContent='loading the level data (about 15 seconds)...';
  try{state.info=await api('/api/config',{levels:$('#s_levels').value,dll:$('#s_dll').value,bundles:$('#s_bundles').value,out:$('#s_out').value,work:$('#s_work').value});
-  state.pending={};state.cur=null;state.data=null;$('#view').replaceChildren(el('p',{class:'hint'},'Pick a ship on the left.'));
-  for(const t of ['bundles','dll','tools'])delete $('#tab-'+t).dataset.ok;await loadShips();updPend();m.className='msg-ok';m.textContent='loaded '+state.info.tables+' level file(s) with the ship table.';showTab('ships')}
+  shipRequest++;activeBundle=undefined;openedBundles.clear();state.pending={};state.cur=null;state.data=null;$('#view').replaceChildren(el('p',{class:'hint'},'Pick a ship on the left.'));
+  for(const t of ['dll','tools'])delete $('#tab-'+t).dataset.ok;await loadShips();updPend();m.className='msg-ok';m.textContent='loaded '+state.info.tables+' level file(s) with the ship table.';showTab('ships')}
  catch(e){m.className='msg-bad';m.textContent=e.message}$('#s_save').disabled=false}
 async function loadTools(){const box=$('#tab-tools');if(box.dataset.ok)return;
  if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}
  box.dataset.ok=1;const tools=await api('/api/tools');const groups={};tools.forEach(t=>(groups[t.group]=groups[t.group]||[]).push(t));
- const side=el('div',{style:'min-width:210px'}),form=el('div',{style:'flex:1;min-width:300px'});let cur=null;
+ const side=el('div',{class:'row'}),form=el('div',{style:'min-width:280px'});
+ const operations=el('div',{class:'row',style:'margin:12px 0'});
+ const byId=Object.fromEntries(tools.map(t=>[t.id,t]));
  const dl=el('datalist',{id:'shipnames'},state.ships.map(s=>el('option',{value:s.name})));
- function show(t){cur=t;side.querySelectorAll('.ship').forEach(x=>x.classList.toggle('on',x.dataset.id===t.id));
+ function show(t){
+  operations.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.id===t.id)));
+  const initialShip=t.group==='Ships'?state.cur:'';
+
   const vals={};const inputs=t.fields.map(f=>{let i;
    if(f.kind==='bool'){i=el('input',{type:'checkbox'});i.checked=!!f.default;vals[f.name]=()=>i.checked;return el('label',{class:'f chk',title:f.help},i,f.label)}
    if(f.kind==='lines'){i=el('textarea',{rows:'3',style:'padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:13px monospace'});i.value=f.default}
    else if(f.kind.startsWith('choice:')){i=el('select',{},f.kind.slice(7).split(',').map(o=>el('option',{value:o},o)));i.value=f.default}
-   else{i=el('input',{type:f.kind==='int'||f.kind==='float'?'number':'text',step:f.kind==='int'?'1':'any',value:f.default,list:f.kind==='ship'?'shipnames':null})}
+   else{i=el('input',{type:f.kind==='int'||f.kind==='float'?'number':'text',step:f.kind==='int'?'1':'any',value:f.default||(['ship','dst'].includes(f.name)?initialShip:''),list:f.kind==='ship'?'shipnames':null})}
    vals[f.name]=()=>i.value;
-   const row=el('label',{class:'f',title:f.help},f.label,f.kind==='file'?el('div',{class:'row'},i,el('button',{class:'sec',type:'button',onclick:async()=>{const r=await pickPath({files:true,start:i.value||state.info.levels,title:f.label});if(r)i.value=r}},'Browse...')):i);return row});
+   const row=el('label',{class:'f',title:f.help,'data-current-selector':['assets','factory','dst','name'].includes(f.name)?'':null},f.label,f.kind==='file'?el('div',{class:'row'},i,el('button',{class:'sec',type:'button',onclick:async()=>{const r=await pickPath({files:true,start:i.value||state.info.levels,title:f.label});if(r){i.value=r;i.dispatchEvent(new Event('change',{bubbles:true}))}}},'Browse...')):i);return row});
+  const values=()=>Object.fromEntries(Object.entries(vals).map(([key,get])=>[key,get()]));
+  const current=el('pre',{'aria-live':'polite'});
+  let inspection=0;
+  async function refreshCurrent(fresh=$('#fresh').checked){
+    const request=++inspection;
+    const v=values();
+    const args={assets:v.assets, factory:v.factory, name:v.name, ship:t.id==='copyvet'?v.dst:undefined};
+    current.textContent=fresh?'Reading source files…':'Reading staged copies and source files…';
+    try{
+      const r=await api('/api/tools/run',{id:t.current,values:args,fresh});
+      if(request===inspection)current.textContent=(fresh?'Source values\n':'Current values (staged copies where available)\n')+(r.output||'No values found.');
+    }catch(e){if(request===inspection)current.textContent=e.message}
+  }
+  const refresh=el('button',{class:'sec',id:'refresh-current',onclick:()=>refreshCurrent()},'Refresh current values');
   const out=el('pre',{hidden:true}),msg=el('span',{class:'hint'});
-  const run=el('button',{class:'pri',onclick:async()=>{const v={};for(const k in vals)v[k]=vals[k]();run.disabled=true;msg.className='hint';msg.textContent='running...';out.hidden=true;
-    try{const r=await api('/api/tools/run',{id:t.id,values:v,fresh:$('#fresh').checked});out.textContent='$ '+r.cmd+'\n\n'+r.output;out.hidden=false;msg.className=r.ok?'msg-ok':'msg-bad';msg.textContent=r.ok?'done':'the tool reported an error';
-     if(r.ok&&t.writes){await loadShips();if(state.cur)await openShip(state.cur)}}
-    catch(e){msg.className='msg-bad';msg.textContent=e.message}run.disabled=false}},t.writes?'Run and save':'Run');
-  form.replaceChildren(el('div',{class:'card'},el('h3',{},t.group+' - '+t.title),el('p',{class:'hint'},t.help+(t.writes?' Results go to '+state.info.out+' (the same folder as everything else, so edits stack).':'')),el('div',{class:'grid'},inputs),el('div',{class:'row',style:'margin-top:10px'},run,msg)),out,dl)}
- for(const [g,ts] of Object.entries(groups)){side.append(el('div',{class:'hint',style:'margin:10px 0 3px;font-weight:600'},g));ts.forEach(t=>side.append(el('div',{class:'ship','data-id':t.id,onclick:()=>show(t)},t.title)))}
- box.replaceChildren(el('div',{class:'row',style:'align-items:flex-start;gap:20px'},side,form));show(tools[0])}
+  const run=el('button',{class:'pri',onclick:async()=>{
+    run.disabled=true;msg.className='hint';msg.textContent='Running…';out.hidden=true;
+    try{
+      const r=await api('/api/tools/run',{id:t.id,values:values(),fresh:$('#fresh').checked});
+      out.textContent=r.output;out.hidden=false;
+      msg.className=r.ok?'msg-ok':'msg-bad';msg.textContent=r.ok?'Done':'The tool reported an error';
+      if(r.ok&&t.writes){
+        if(t.current)await refreshCurrent(false);
+        await loadShips();
+        if(state.cur)await openShip(state.cur);
+      }
+    }catch(e){msg.className='msg-bad';msg.textContent=e.message}
+    finally{run.disabled=false}
+  }},t.writes?'Run and save':'Read values');
+  const grid=el('div',{class:'grid'},inputs);
+  form.replaceChildren(el('div',{class:'card'},el('h3',{},t.title),el('p',{class:'hint'},t.help),
+    ...(t.current?[el('div',{class:'row'},el('strong',{},'Current values'),refresh),current]:[]),
+    grid,el('div',{class:'row',style:'margin-top:10px'},run,msg)),out,dl);
+  if(t.current){
+    grid.addEventListener('change',e=>{
+      if(e.target.closest('[data-current-selector]'))refreshCurrent();
+    });
+    refreshCurrent();
+  }
+ }
+ function showGroup(group){
+   state.toolGroup=group;
+   side.querySelectorAll('button').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.group===group)));
+   operations.replaceChildren(...groups[group].map(t=>el('button',{class:'sec','data-id':t.id,onclick:()=>show(byId[t.id])},t.title)));
+   show(groups[group][0]);
+ }
+ for(const group of Object.keys(groups)){
+   side.append(el('button',{class:'sec','data-group':group,onclick:()=>showGroup(group)},group));
+ }
+ box.replaceChildren(side,operations,form);
+ showGroup(groups[state.toolGroup]?state.toolGroup:tools[0].group);
+}
 (async()=>{try{state.info=await api('/api/config');if(state.info.ready)await loadShips();else showTab('settings')}catch(e){$('#view').replaceChildren(el('p',{class:'msg-bad'},e.message))}})();
 </script></body></html>
 """

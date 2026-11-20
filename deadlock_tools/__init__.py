@@ -2,4 +2,4 @@
 
 Run everything through one command:  python -m deadlock_tools <tool> ...   (or `deadlock <tool> ...` once installed)
 """
-__version__ = "0.2.0"
+__version__ = "0.3.0"

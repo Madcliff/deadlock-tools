@@ -229,7 +229,8 @@ def _decompress(raw, usize, mode):
 
 
 def read_bundle(path):
-    d = open(path, "rb").read()
+    with open(path, "rb") as source:
+        d = source.read()
     o = d.index(b"\0") + 1; ver = struct.unpack(">I", d[o:o + 4])[0]; o += 4
     j = d.index(b"\0", o); pl = d[o:j].decode(); o = j + 1
     j = d.index(b"\0", o); rev = d[o:j].decode(); o = j + 1
@@ -404,7 +405,159 @@ def build_hull_query(F, RESS, val):
     return ys
 
 
-def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=None, fighter_slots=None, utility_slots=None, bay_offset=(0.0, 3.0, 4.0), hull_regen=None, armour_regen=False, clones=(), list_mounts=False, clone_scale=None, scales=(), layout="offset", gap=1.5, mirror=True, munition_factory=False, squadron_revive=False, hull_follow=True, min_gap=None, mini_jump=None, augury=None, stealth=None, slot_parts="buttons,bays,icons", ability_submenu=False, stealth_mesh="ship", squadron_groups=None, icon_offset=(12.0, 0.0, -4.0)):
+PLATING_OPTIONS = {
+    "plating_supply": ("platingCapacity", "total plating supply carried by the ship"),
+    "plating_drone_load": ("dronePlatingCapacity", "plating carried per drone load"),
+    "plating_facing_cap": ("maxPlating", "maximum additional plating on one facing"),
+    "plating_rate": ("platingDeploymentRate", "rate at which the drone applies plating"),
+}
+
+
+# CLI field, serialized field, and type. Blank options preserve the source value.
+SUPPORT_SETTINGS = {
+    "deploy_plating": {**{name: (field, float) for name, (field, _) in PLATING_OPTIONS.items()},
+                       "plating_range": ("deployRange", float)},
+    "turnaround_repair_bay": {"repair_bay_fraction": ("fullRepairPercent", float),
+                              "repair_bay_relaunch_offset": ("moveOnLaunchSquadronOffset", str)},
+    "targeted_resupply": {"resupply_range": ("deployRange", float),
+                          "resupply_swap_time": ("swapTime", float),
+                          "resupply_cooldown": ("swapCooldown", int)},
+    "technical_support": {"technical_support_range": ("deployRange", float),
+                          "technical_support_spare_parts": ("sparePartsSupply", float),
+                          "technical_support_parts_rate": ("sparePartsPerTick", float),
+                          "technical_support_boost": ("boostValue", float),
+                          "technical_support_resupply_seconds": ("resupplySeconds", float),
+                          "technical_support_minimum_repair": ("minimumSubsystemRepairBoost", float),
+                          "technical_support_unlimited_parts": ("unlimitedSpareParts", str)},
+    "marine_reinforcement": {"marines_per_raptor": ("marinesPerRaptor", int)},
+}
+
+
+def configured_support_settings(args):
+    import math
+
+    settings = {}
+    for ability, options in SUPPORT_SETTINGS.items():
+        for option, (field, _) in options.items():
+            value = getattr(args, option)
+            if value is None:
+                continue
+            if field == "moveOnLaunchSquadronOffset":
+                xyz = tuple(map(float, value.split(",")))
+                if len(xyz) != 3 or any(not math.isfinite(n) or abs(n) > 3.4028234663852886e38 for n in xyz):
+                    raise ValueError("repair bay relaunch offset expects finite X,Y,Z coordinates")
+                value = dict(zip("xyz", xyz))
+            elif field == "unlimitedSpareParts":
+                value = value == "on"
+            elif not math.isfinite(value) or value < 0 or value > (
+                2**31 - 1 if isinstance(value, int) else 3.4028234663852886e38
+            ) or (ability == "deploy_plating" and value == 0) or (field == "fullRepairPercent" and value > 1):
+                raise ValueError(f"invalid value for --{option.replace('_', '-')}")
+            settings.setdefault(ability, {})[field] = value
+    return settings
+
+
+SUPPORT_ABILITIES = {
+    "turnaround_repair_bay": ("TurnaroundRepairBayModule", "TurnaroundRepairBayAction", "defender"),
+    "targeted_resupply": ("ResupplyMunitionModule", "ResupplyMunitionAction", "celestra"),
+    "deploy_plating": ("DeployPlatingModule", "DeployPlatingAction", "celestra"),
+    "technical_support": ("JuryRigBoosterModule", "TechnicalSupportAction", "defender"),
+    "marine_reinforcement": ("ReinforcementModule", "ReinforcementAction", "defender"),
+}
+
+
+def load_support_donor(path):
+    bundle = read_bundle(path)
+    offset, size, *_ = bundle["nodes"][0]
+    file = SerFile(bundle["data"][offset:offset + size])
+    scripts = {obj.pid: file.read(obj)[0]["m_ClassName"] for obj in file.objs if obj.classid == 115}
+    components = {}
+    for obj in file.objs:
+        if obj.classid == 114:
+            fields = file.read(obj)[0]
+            script = scripts.get(fields.get("m_Script", {}).get("m_PathID"))
+            if script:
+                components.setdefault(script, []).append(obj)
+    return file, components
+
+
+def print_bundle_settings(objects, value):
+    """Show stored prefab values alongside the weapon mount list."""
+    scripts = {o.pid: value(o.pid)["m_ClassName"] for o in objects if o.classid == 115}
+    components = {}
+    for obj in objects:
+        if obj.classid == 114:
+            fields = value(obj.pid)
+            script = scripts.get(fields.get("m_Script", {}).get("m_PathID"))
+            if script:
+                components.setdefault(script, []).append(fields)
+
+    print("\nPrefab settings")
+    for bay in sorted(components.get("LaunchPoint", []), key=lambda fields: fields["SlotNo"]):
+        if not bay["CanLaunch"]:
+            continue
+        name = value(bay["m_GameObject"]["m_PathID"])["m_Name"]
+        icon = bay["iconPosition"]
+        coordinates = "no local marker"
+        if not icon["m_FileID"] and icon["m_PathID"]:
+            position = value(icon["m_PathID"])["m_LocalPosition"]
+            coordinates = ",".join(f"{position[axis]:g}" for axis in "xyz")
+        print(f"Launch bay {bay['SlotNo']} ({name}): types {bay['LaunchCompatibility']}, icon {coordinates}")
+    for label, script in (("Munition actions", "FireMissileAction"), ("Squadron launch actions", "LaunchFightersAction")):
+        print(f"{label}: {len(components.get(script, []))}")
+    for label, script, keys in (
+        ("Hull regeneration", "RegenerativeHullResinModule", ("hullPerTick",)),
+        ("Munition Factory", "MunitionFactoryModule", ()),
+        ("Micro-FTL", "MiniJumpAgent", ("jumpDelay", "jumpDuration", "jumpRangeHorizontal", "jumpRangeVertical", "cooldownTurns")),
+        ("Predictive Augury", "PredictiveAuguryModule", ("maxAmmunition",)),
+        ("Stealth", "StealthModule", ("batteryMax", "activeByDefault", "destealthCooldownTurns")),
+        ("Turnaround repair bay", "TurnaroundRepairBayModule", ("fullRepairPercent", "moveOnLaunchSquadronOffset")),
+        ("Targeted resupply", "ResupplyMunitionModule", ("deployRange", "swapTime", "swapCooldown")),
+        ("Deploy plating", "DeployPlatingModule", ("deployRange", "platingCapacity", "dronePlatingCapacity", "platingDeploymentRate", "maxPlating")),
+        ("Technical support", "JuryRigBoosterModule", ("deployRange", "boostValue", "minimumSubsystemRepairBoost", "sparePartsSupply", "sparePartsPerTick", "unlimitedSpareParts", "resupplySeconds")),
+        ("Marine reinforcement", "ReinforcementModule", ("marinesPerRaptor",)),
+    ):
+        entries = components.get(script, [])
+        if not entries:
+            print(f"{label}: absent")
+            continue
+        for fields in entries:
+            detail = ", ".join(f"{key} = {fields[key]}" for key in keys if key in fields)
+            print(f"{label}: {detail or 'present'}")
+
+
+# SquadronShipType values used by the supported Deadlock assemblies.
+FIGHTER_SQUADRON_TYPES = {0, 1, 5, 100, 101, 105, 110, 113, 114}
+UTILITY_SQUADRON_TYPES = {2, 3, 4, 102, 103, 104, 106, 107, 108, 109, 111, 112}
+
+
+def bay_alignment(launch_bays, fighter_slots, utility_slots):
+    """Use compatible types already present on this ship, split by the database slot order."""
+    available = set().union(*(bay["LaunchCompatibility"] for bay in launch_bays))
+    fighter = sorted(available & FIGHTER_SQUADRON_TYPES)
+    utility = sorted(available & UTILITY_SQUADRON_TYPES)
+    if available - FIGHTER_SQUADRON_TYPES - UTILITY_SQUADRON_TYPES:
+        raise ValueError("launch bays contain unknown squadron types")
+    if (fighter_slots and not fighter) or (utility_slots and not utility):
+        raise ValueError("the ship needs an existing compatibility list for each requested slot class")
+    return fighter, utility
+
+
+def parse_bay_icons(entries):
+    from math import isfinite
+
+    positions = {}
+    for entry in entries:
+        slot, coordinates = entry.split("=", 1)
+        position = tuple(map(float, coordinates.split(",")))
+        slot = int(slot)
+        if slot < 0 or len(position) != 3 or not all(map(isfinite, position)):
+            raise ValueError("--bay-icon expects SLOT=X,Y,Z with a non-negative slot and finite coordinates")
+        positions[slot] = dict(zip("xyz", position))
+    return positions
+
+
+def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=None, fighter_slots=None, utility_slots=None, bay_offset=(0.0, 3.0, 4.0), hull_regen=None, armour_regen=False, clones=(), list_mounts=False, clone_scale=None, scales=(), layout="offset", gap=1.5, mirror=True, munition_factory=False, squadron_revive=False, hull_follow=True, min_gap=None, mini_jump=None, augury=None, stealth=None, slot_parts="buttons,bays,icons", ability_submenu=False, stealth_mesh="ship", squadron_groups=None, icon_offset=(12.0, 0.0, -4.0), inspect=False, support_abilities=None, align_launch_bays=False, bay_icons=None, support_settings=None):
     B = read_bundle(src)
     (O1, S1, F1, N1), (O2, S2, F2, N2) = B["nodes"]
     CAB = B["data"][O1:O1 + S1]; RESS = B["data"][O2:O2 + S2]
@@ -430,14 +583,15 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
         if sel.startswith("name:"): return sel[5:] in name.lower()
         assert sel in QUADS, f"unknown selector '{sel}': use all, sides, {', '.join(QUADS)}, type:N or name:TEXT"
         return quad == sel
-    if list_mounts:
+    if list_mounts or inspect:
         print(f"{'mount':<22}{'quadrant':<10}{'type':<6}x      y      z")
         for o in sorted(mounts, key=lambda o: (mount_info(o)[1], mount_info(o)[0])):
             n, q, t, p = mount_info(o); print(f"{n:<22}{q:<10}{t:<6}{p['x']:<7.1f}{p['y']:<7.1f}{p['z']:.1f}")
         by = {}
         for o in mounts: by.setdefault((mount_info(o)[1], mount_info(o)[2]), []).append(o)
         print("\ngroups (quadrant, weapon type): " + "; ".join(f"{q} type {t} x{len(l)}" for (q, t), l in sorted(by.items())))
-        sys.exit(0)
+        if inspect: print_bundle_settings(F.objs, val)
+        return
     ncopy = {}
     for o in mounts:
         n = copies
@@ -662,6 +816,41 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
     # ---- extra carrier (fighter / support squadron) slots ----------------------------------------------------------
     # game rules (from the code): slots 0..FighterSlots-1 are fighter slots, the next UtilityFighterSlots are support slots;
     # the prefab needs ONE LaunchFightersAction per slot (UI/launch) and a LaunchPoint bay per SlotNo (falls back to any compatible bay).
+    bay_icons = dict(bay_icons or {})
+    if align_launch_bays and (fighter_slots is None or utility_slots is None):
+        raise ValueError("--align-launch-bays requires both --fighter-slots and --utility-slots")
+    existing_bays = [obj for obj in F.objs if obj.classid == 114 and
+                     "SlotNo" in val(obj.pid) and val(obj.pid).get("CanLaunch")] if align_launch_bays or bay_icons else []
+    if align_launch_bays:
+        fighter_types, utility_types = bay_alignment(
+            [val(obj.pid) for obj in existing_bays], fighter_slots, utility_slots
+        )
+
+    def update_bay_icon(bay, position):
+        icon = bay["iconPosition"]
+        pid = icon["m_PathID"]
+        if icon["m_FileID"] or not pid or pid not in F.by_pid or F.by_pid[pid].classid != 4:
+            raise ValueError(f"slot {bay['SlotNo']} has no editable local icon marker")
+        if sum(val(obj.pid)["iconPosition"] == icon for obj in existing_bays) != 1:
+            raise ValueError(f"slot {bay['SlotNo']} shares its icon marker with another launch bay")
+        marker = copy.deepcopy(val(pid))
+        marker["m_LocalPosition"] = position
+        replaced[pid] = F.write(F.by_pid[pid], marker)
+
+    for obj in existing_bays:
+        bay = val(obj.pid)
+        slot = bay["SlotNo"]
+        if align_launch_bays and 0 <= slot < fighter_slots + utility_slots:
+            types = fighter_types if slot < fighter_slots else utility_types
+            if set(bay["LaunchCompatibility"]) != set(types):
+                edited = dict(bay, LaunchCompatibility=types)
+                replaced[obj.pid] = F.write(obj, edited)
+                print(f"aligned launch bay {slot} to squadron types {types}")
+        if slot in bay_icons:
+            if sum(val(other.pid)["SlotNo"] == slot for other in existing_bays) != 1:
+                raise ValueError(f"multiple launch bays use slot {slot}; cannot choose an icon")
+            update_bay_icon(bay, bay_icons.pop(slot))
+
     if fighter_slots is not None or utility_slots is not None:
         assert fighter_slots is not None and utility_slots is not None, "give BOTH --fighter-slots and --utility-slots (the final values you set in the level files)"
         total = fighter_slots + utility_slots
@@ -749,6 +938,8 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             lp = st["m_LocalPosition"]; lp["x"] += bay_offset[0] * k_; lp["y"] += bay_offset[1] * k_; lp["z"] += bay_offset[2] * k_
             old_kids = st["m_Children"]; st["m_Children"] = []
             sv["m_GameObject"]["m_PathID"] = ngo; sv["SlotNo"] = slot
+            if align_launch_bays:
+                sv["LaunchCompatibility"] = fighter_types if slot < fighter_slots else utility_types
             # clone the Icon marker (child transform) so the UI icon sits with the new bay
             ic = sv["iconPosition"]["m_PathID"]
             if ic and "icons" in slot_parts:
@@ -758,6 +949,8 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
                 ict["m_GameObject"]["m_PathID"] = nig; ict["m_Father"]["m_PathID"] = ntr; ict["m_Children"] = []
                 side_ = -1.0 if st["m_LocalPosition"]["x"] > 0 else 1.0                            # +x offset = towards the centre line, mirrored for port / starboard
                 il_ = ict["m_LocalPosition"]; il_["x"] += icon_offset[0] * side_ * k_; il_["y"] += icon_offset[1] * k_; il_["z"] += icon_offset[2] * k_
+                if slot in bay_icons:
+                    ict["m_LocalPosition"] = bay_icons.pop(slot)
                 st["m_Children"].append({"m_FileID": 0, "m_PathID": nit}); sv["iconPosition"]["m_PathID"] = nit
                 appended += [(nig, go_type, F.write(go_type, icg)), (nit, tr_type, F.write(tr_type, ict))]
                 new_pids += [nig, nit]
@@ -765,6 +958,8 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             appended += [(ngo, go_type, F.write(go_type, sgo)), (ntr, tr_type, F.write(tr_type, st)), (nmb, src.tidx, F.write(src.tidx, sv))]
             new_pids += [ngo, ntr, nmb]
             print(f"  + launch bay for carrier slot {slot} (copy of {goname_of(sg)}, moved by {tuple(round(bay_offset[i]*k_,1) for i in range(3))})")
+    if bay_icons:
+        raise ValueError("no editable launch bay icon for slot(s) " + ", ".join(map(str, sorted(bay_icons))))
     for father, kids in children_add.items():
         fo = F.by_pid[father]; fv = copy.deepcopy(val(father))
         for k in kids: fv["m_Children"].append({"m_FileID": 0, "m_PathID": k})
@@ -778,11 +973,14 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
         pre = bytearray(F.prefix); nt_pos = 4 + len(F.unity) + 1 + 4 + 1
         struct.pack_into("<i", pre, nt_pos, struct.unpack_from("<i", pre, nt_pos)[0] + 1); pre += raw
         F.prefix = bytes(pre); script_state["types"] += 1; return idx
+    injected_scripts = {}
     def add_script_component(cls, type_raw, ms_raw, mb_raw, go_pid, patch):
         """append a MonoBehaviour of script class <cls> (adding its serialized type + MonoScript if the bundle lacks them)"""
         ms_pid = next((o.pid for o in F.objs if o.classid == 115 and val(o.pid)["m_ClassName"] == cls), None)
         ms_type = next(o.tidx for o in F.objs if o.classid == 115)
-        if ms_pid is None:
+        if cls in injected_scripts:
+            ms_pid, new_type_idx = injected_scripts[cls]
+        elif ms_pid is None:
             n_scripts = struct.unpack_from("<i", F.suffix, 0)[0]
             new_type_idx = len(F.types) + script_state["types"]
             t_raw = bytearray(type_raw); struct.pack_into("<h", t_raw, 5, n_scripts)             # point the type at the new script entry
@@ -797,6 +995,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             F.suffix = bytes(suf)
             script_state["types"] += 1
             appended.append((ms_pid, ms_type, ms_raw)); new_pids.append(ms_pid)
+            injected_scripts[cls] = ms_pid, new_type_idx
         else:
             idx = next(i for i in range(struct.unpack_from("<i", F.suffix, 0)[0]) if struct.unpack_from("<iq", F.suffix, 4 + 12 * i)[1] == ms_pid)
             new_type_idx = next(i for i, t in enumerate(F.types) if t.classid == 114 and t.script_idx == idx)
@@ -809,9 +1008,20 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
     if armour_regen and hull_regen is not None:
         assert hull_regen > 0, "--armour-regen needs a hull regen value above 0 (the sign of hullPerTick is the flag)"
     if hull_regen is not None:
-        assert not any(o.classid == 114 and "hullPerTick" in val(o.pid) for o in F.objs), "this ship already has a Regenerative Hull Resin module"
-        add_script_component("RegenerativeHullResinModule", RESIN_TYPE_RAW, RESIN_MS_RAW, RESIN_MB_RAW, root.pid, lambda b: struct.pack_into("<f", b, 32, -hull_regen if armour_regen else hull_regen))
-        print(f"added Regenerative Hull Resin module to {val(root.pid)['m_Name']} (hullPerTick {-hull_regen if armour_regen else hull_regen}{', armour regeneration ON - needs dll patch --armour-factor' if armour_regen else ''})")
+        existing_resin = [obj for obj in F.objs if obj.classid == 114 and "hullPerTick" in val(obj.pid)]
+        if len(existing_resin) > 1:
+            raise ValueError("the bundle has multiple Hull Resin modules")
+        if existing_resin:
+            obj = existing_resin[0]
+            fields = val(obj.pid)
+            rate = -abs(hull_regen) if armour_regen or fields["hullPerTick"] < 0 else hull_regen
+            replaced[obj.pid] = F.write(obj, dict(fields, hullPerTick=rate))
+            print(f"updated Hull Resin rate to {rate:g}")
+        else:
+            rate = -hull_regen if armour_regen else hull_regen
+            add_script_component("RegenerativeHullResinModule", RESIN_TYPE_RAW, RESIN_MS_RAW, RESIN_MB_RAW,
+                                 root.pid, lambda data: struct.pack_into("<f", data, 32, rate))
+            print(f"added Hull Resin at {rate:g} per tick")
     elif armour_regen:
         mods = [o for o in F.objs if o.classid == 114 and "hullPerTick" in val(o.pid)]
         assert mods, "this ship has no Regenerative Hull Resin module: add one with --hull-regen X --armour-regen"
@@ -831,7 +1041,30 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
         if g not in act_used: act_used[g] = {val(o.pid)["radialMenuPosition"] for o in cs if "radialMenuPosition" in val(o.pid) and val(o.pid)["m_GameObject"]["m_PathID"] == g and not val(o.pid)["hideInMenu"]}
         if ability_submenu:
             if "go" not in sub_state:
-                fgo_ = next(o for o in F.objs if o.classid == 1 and val(o.pid)["m_Name"] == "Fighters")
+                existing = [
+                    v["SubMenu"]["m_PathID"]
+                    for obj in cs
+                    for v in (val(obj.pid),)
+                    if scr_n[v["m_Script"]["m_PathID"]] == "SubMenuAction"
+                    and v["m_GameObject"]["m_PathID"] == g
+                    and not v["SubMenu"]["m_FileID"]
+                    and v["SubMenu"]["m_PathID"] in F.by_pid
+                    and val(v["SubMenu"]["m_PathID"]).get("m_Name") == "Abilities"
+                ]
+                if len(existing) > 1:
+                    raise ValueError("multiple existing Abilities submenus")
+                if existing:
+                    menu = existing[0]
+                    used = {
+                        v["radialMenuPosition"] for obj in cs for v in (val(obj.pid),)
+                        if v["m_GameObject"]["m_PathID"] == menu
+                        and "radialMenuPosition" in v and not v.get("hideInMenu")
+                    }
+                    sub_state.update(go=menu, used=used)
+            if "go" not in sub_state:
+                fgo_ = next((o for o in F.objs if o.classid == 1 and val(o.pid)["m_Name"] == "Fighters"), None)
+                if fgo_ is None:
+                    raise ValueError("--ability-submenu needs an existing Fighters menu as a template")
                 ftr_ = next(c["component"]["m_PathID"] for c in val(fgo_.pid)["m_Component"] if F.by_pid[c["component"]["m_PathID"]].classid == 4)
                 back_ = next(o for c in val(fgo_.pid)["m_Component"] for o in [F.by_pid[c["component"]["m_PathID"]]] if o.classid == 114 and scr_n[val(o.pid)["m_Script"]["m_PathID"]] == "BackAction")
                 smb_ = next(o for o in cs if scr_n[val(o.pid)["m_Script"]["m_PathID"]] == "SubMenuAction" and val(o.pid)["SubMenu"]["m_PathID"] == fgo_.pid)
@@ -901,6 +1134,26 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             def set_aug_action(b): struct.pack_into("<i", b, 32, pos); b[36] = 0
             add_script_component("PredictiveAuguryAction", PAX_TYPE_RAW, PAX_MS_RAW, PAX_MB_RAW, agopid, set_aug_action)
             print(f"added the Predictive Augury button to the Actions menu (radial position {pos})")
+    if stealth is not None:
+        scripts = {obj.pid for obj in F.objs if obj.classid == 115 and val(obj.pid)["m_ClassName"] == "StealthModule"}
+        modules = [obj for obj in F.objs if obj.classid == 114
+                   and val(obj.pid).get("m_Script", {}).get("m_PathID") in scripts]
+        if len(modules) > 1:
+            raise ValueError("the bundle has multiple Stealth modules")
+        if modules:
+            module = modules[0]
+            fields = dict(val(module.pid))
+            for option, key in (("battery", "batteryMax"), ("start_on", "activeByDefault")):
+                if stealth[option] is not None:
+                    fields[key] = stealth[option]
+            replaced[module.pid] = F.write(module, fields)
+            print("updated existing Stealth settings")
+            stealth = None
+        elif not stealth["donor"]:
+            raise ValueError("select a bundle with Stealth or provide an Orion donor using --stealth")
+        else:
+            stealth["battery"] = 100.0 if stealth["battery"] is None else stealth["battery"]
+            stealth["start_on"] = True if stealth["start_on"] is None else stealth["start_on"]
     if stealth is not None:
         # Stealth (Colonial Orion): StealthModule on the ship + StealthAction button, plus the two effect object trees the module points to, copied from the Orion bundle
         import tempfile
@@ -990,6 +1243,213 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             def set_st_action(b): struct.pack_into("<i", b, 32, pos); b[36] = 0
             add_script_component("StealthAction", at_, ams_, amb_, agopid, set_st_action)
             print(f"added the Stealth button to the Actions menu (radial position {pos})")
+    support_settings = support_settings or {}
+    external_preloads = []
+    if support_abilities or support_settings:
+        scripts = {obj.pid: val(obj.pid)["m_ClassName"] for obj in F.objs if obj.classid == 115}
+        components = {}
+        for obj in F.objs:
+            if obj.classid != 114:
+                continue
+            fields = val(obj.pid)
+            script = scripts.get(fields.get("m_Script", {}).get("m_PathID"))
+            if script:
+                components.setdefault(script, []).append(obj)
+        for ability, changes in support_settings.items():
+            module, _, _ = SUPPORT_ABILITIES[ability]
+            matches = components.get(module, [])
+            if len(matches) == 1:
+                obj = matches[0]
+                fields = val(obj.pid)
+                if not changes.keys() <= fields.keys():
+                    raise ValueError(f"{module} lacks one or more requested fields")
+                replaced[obj.pid] = F.write(obj, dict(fields, **changes))
+                print(f"updated existing {ability.replace('_', ' ')} settings")
+            elif matches or ability not in (support_abilities or {}):
+                raise ValueError(f"select a bundle with one {module} or enable --{ability.replace('_', '-')}")
+        donors = {}
+
+        def ptr(pid):
+            return {"m_FileID": 0, "m_PathID": pid}
+
+        def external_table(file):
+            count = struct.unpack_from("<i", file.suffix)[0]
+            end = getattr(file, "suffix_len", None) or file._suffix_len()
+            return file.suffix[4 + 12 * count:end]
+
+        def donor_component(donor, script):
+            matches = donor[1].get(script, [])
+            if len(matches) != 1:
+                raise ValueError(f"donor needs exactly one {script} component")
+            return matches[0]
+
+        def copy_component(file, script, obj, parent, **changes):
+            fields = file.read(obj)[0]
+            script_ref = fields["m_Script"]
+            if script_ref["m_FileID"] or script_ref["m_PathID"] not in file.by_pid:
+                raise ValueError(f"{script} has an unsupported script reference")
+            if struct.unpack_from("<iq", file.raw(obj), 16) != (0, script_ref["m_PathID"]):
+                raise ValueError(f"{script} has an unsupported component layout")
+            source_type = file.types[obj.tidx]
+            for existing in components.get(script, []):
+                if F.types[existing.tidx].script_hash != source_type.script_hash:
+                    raise ValueError(f"{script} differs between the donor and recipient bundles")
+            fields.update(changes)
+            raw = file.write(obj, fields)
+            return add_script_component(script, file.types[obj.tidx].raw,
+                                        file.raw(file.by_pid[script_ref["m_PathID"]]),
+                                        raw, parent, lambda _: None)
+
+        def current_fields(pid):
+            if pid in F.by_pid:
+                obj = F.by_pid[pid]
+                if pid not in replaced:
+                    return val(pid)
+                type_index, data = obj.tidx, replaced[pid]
+            else:
+                _, type_index, data = next(entry for entry in appended if entry[0] == pid)
+            return F._rd(F.types[type_index].nodes, 0, data, [0])[0]
+
+        def add_restock_menu(donor, actions):
+            # Preserve the donor's two numbered restock controls and its submenu metadata.
+            file, catalogue = donor
+            action_fields = [file.read(obj)[0] for obj in actions]
+            parents = {fields["m_GameObject"]["m_PathID"] for fields in action_fields}
+            if len(parents) != 1 or {fields["radialMenuPosition"] for fields in action_fields} != {2, 3}:
+                raise ValueError("expected the Celestra's two Restock Munitions controls")
+            original_go = file.by_pid[parents.pop()]
+            go = file.read(original_go)[0]
+            if go["m_Name"] != "RestockMunitions":
+                raise ValueError("expected a RestockMunitions menu in the donor")
+            original_transform = next(file.by_pid[entry["component"]["m_PathID"]]
+                                      for entry in go["m_Component"]
+                                      if file.by_pid[entry["component"]["m_PathID"]].classid == 4)
+            back, = [obj for obj in catalogue.get("BackAction", [])
+                     if file.read(obj)[0]["m_GameObject"] == ptr(original_go.pid)]
+            submenu, = [obj for obj in catalogue.get("SubMenuAction", [])
+                        if file.read(obj)[0]["SubMenu"] == ptr(original_go.pid)]
+            parent_go, position = alloc_action_pos(7)
+            actions_go = val(components["MoveAction"][0].pid)["m_GameObject"]["m_PathID"]
+            actions_transform = next(entry["component"]["m_PathID"] for entry in val(actions_go)["m_Component"]
+                                     if F.by_pid[entry["component"]["m_PathID"]].classid == 4)
+            # Submenus are sibling transforms under Actions, including when linked from Abilities.
+            new_go, new_transform = newpid(), newpid()
+            transform = file.read(original_transform)[0]
+            transform.update(m_GameObject=ptr(new_go), m_Father=ptr(actions_transform), m_Children=[])
+            go_type = F.by_pid[actions_go].tidx
+            transform_type = F.by_pid[actions_transform].tidx
+            appended.append((new_transform, transform_type, F.write(transform_type, transform)))
+            new_pids.extend([new_go, new_transform])
+            late_children.setdefault(actions_transform, []).append(new_transform)
+            copy_component(file, "BackAction", back, new_go)
+            for obj in sorted(actions, key=lambda entry: file.read(entry)[0]["radialMenuPosition"]):
+                copy_component(file, "ResupplyMunitionAction", obj, new_go)
+            copy_component(file, "SubMenuAction", submenu, parent_go,
+                           SubMenu=ptr(new_go), radialMenuPosition=position)
+            go["m_Component"] = [{"component": ptr(pid)} for pid in [new_transform] + comp_add.pop(new_go)]
+            appended.append((new_go, go_type, F.write(go_type, go)))
+
+        bays = [val(obj.pid) for obj in components.get("LaunchPoint", [])]
+        for ability, donor_path in (support_abilities or {}).items():
+            module, action, _ = SUPPORT_ABILITIES[ability]
+            existing_module = components.get(module, [])
+            existing_action = components.get(action, [])
+            repair_plating = ability == "deploy_plating" and len(existing_module) == len(existing_action) == 1
+            if ability in support_settings and len(existing_module) == 1 and existing_action and not repair_plating:
+                continue
+            if (existing_module or existing_action) and not repair_plating:
+                raise ValueError(f"this bundle already has {ability.replace('_', ' ')}")
+            if donor_path not in donors:
+                donors[donor_path] = load_support_donor(donor_path)
+            donor = donors[donor_path]
+            file, catalogue = donor
+            source = donor_component(donor, module)
+            module_fields = file.read(source)[0]
+            references = [value for key, value in module_fields.items()
+                          if key not in ("m_GameObject", "m_Script")
+                          and isinstance(value, dict) and "m_FileID" in value]
+            if references and (ability != "deploy_plating" or references != [module_fields["droneTemplate"]]
+                               or not 0 < references[0]["m_FileID"] <= struct.unpack_from("<i", external_table(file))[0]
+                               or not references[0]["m_PathID"]
+                               or external_table(F) != external_table(file)):
+                raise ValueError(f"{module} has an external reference that does not match the recipient bundle")
+            if ability == "deploy_plating":
+                drone = module_fields["droneTemplate"]
+                if not references or drone not in references:
+                    raise ValueError("the donor has no external plating drone template")
+                donor_bundle, = [obj for obj in file.objs if obj.classid == 142]
+                donor_preload = file.read(donor_bundle)[0]["m_PreloadTable"]
+                if drone not in donor_preload:
+                    raise ValueError("the donor does not preload its plating drone")
+                # Carry the donor's external preload dependencies. File IDs are safe to
+                # reuse because the complete external tables were checked above.
+                external_preloads.extend(ref for ref in donor_preload
+                                         if ref["m_FileID"] and ref["m_PathID"])
+                if repair_plating:
+                    if val(existing_module[0].pid)["droneTemplate"] != drone:
+                        raise ValueError("the existing plating drone differs from the donor")
+                    print("updated Deploy Plating drone preload dependencies")
+                    continue
+            if ability in ("technical_support", "marine_reinforcement") and not any(
+                bay["CanLaunch"] and 2 in bay["LaunchCompatibility"] for bay in bays
+            ):
+                raise ValueError(f"{ability.replace('_', ' ')} requires a Raptor-compatible launch bay")
+            if ability == "turnaround_repair_bay":
+                docks = [obj for obj in components.get("LaunchPoint", []) if val(obj.pid)["CanDock"]]
+                if not docks:
+                    raise ValueError("turnaround repair bay requires an existing docking bay")
+                dock = min(docks, key=lambda obj: bool(val(obj.pid)["CanLaunch"]))
+                dock_fields = copy.deepcopy(current_fields(dock.pid))
+                donor_dock = next(file.read(obj)[0] for obj in catalogue.get("LaunchPoint", [])
+                                  if file.read(obj)[0]["CanDock"])
+                dock_fields["LaunchCompatibility"] = sorted(set(dock_fields["LaunchCompatibility"])
+                                                            | set(donor_dock["LaunchCompatibility"]))
+                if dock_fields["CanLaunch"]:
+                    dock_go = F.by_pid[dock_fields["m_GameObject"]["m_PathID"]]
+                    go = copy.deepcopy(val(dock_go.pid))
+                    transform_obj = next(F.by_pid[entry["component"]["m_PathID"]] for entry in go["m_Component"]
+                                         if F.by_pid[entry["component"]["m_PathID"]].classid == 4)
+                    transform = copy.deepcopy(val(transform_obj.pid))
+                    parent = transform["m_Father"]["m_PathID"]
+                    if not parent or parent not in F.by_pid:
+                        raise ValueError("the docking bay needs a local parent transform")
+                    go_id, transform_id, dock_id = newpid(), newpid(), newpid()
+                    go.update(m_Name="TurnaroundLandingBay",
+                              m_Component=[{"component": ptr(pid)} for pid in (transform_id, dock_id)])
+                    transform.update(m_GameObject=ptr(go_id), m_Children=[])
+                    dock_fields.update(m_GameObject=ptr(go_id), CanLaunch=0, iconPosition=ptr(0))
+                    for pid, obj, fields in ((go_id, dock_go, go), (transform_id, transform_obj, transform),
+                                             (dock_id, dock, dock_fields)):
+                        appended.append((pid, obj.tidx, F.write(obj, fields)))
+                        new_pids.append(pid)
+                    late_children.setdefault(parent, []).append(transform_id)
+                else:
+                    replaced[dock.pid] = F.write(dock, dock_fields)
+                menu = next((obj for obj in F.objs if obj.classid == 1 and val(obj.pid)["m_Name"] == "Fighters"), None)
+                if menu is None:
+                    raise ValueError("turnaround repair bay requires a Fighters menu")
+                used = set()
+                for entry in current_fields(menu.pid)["m_Component"]:
+                    fields = current_fields(entry["component"]["m_PathID"])
+                    if "radialMenuPosition" in fields and not fields.get("hideInMenu"):
+                        used.add(fields["radialMenuPosition"])
+                position = next((pos for pos in (3, 2, 1, 4, 5, 6, 7) if pos not in used), None)
+                if position is None:
+                    raise ValueError("the Fighters menu has no free position for turnaround repair")
+                parent_go = menu.pid
+            elif ability != "targeted_resupply":
+                parent_go, position = alloc_action_pos(7)
+            changes = support_settings.get(ability, {})
+            if not changes.keys() <= module_fields.keys():
+                raise ValueError("the donor plating module lacks one or more requested fields")
+            copy_component(file, module, source, root.pid, **changes)
+            if ability == "targeted_resupply":
+                add_restock_menu(donor, catalogue.get(action, []))
+            else:
+                copy_component(file, action, donor_component(donor, action), parent_go,
+                               radialMenuPosition=position, hideInMenu=0)
+            print(f"added {ability.replace('_', ' ')}")
+
     if squadron_revive:
         assert munition_factory or any(o.classid == 115 and val(o.pid)["m_ClassName"] == "MunitionFactoryModule" for o in F.objs), "--squadron-revive needs the Munition Factory module: add it with --munition-factory (this ship has none)"
         ships_ = [o for o in F.objs if o.classid == 114 and "ShowExclusionInEditor" in val(o.pid) and val(o.pid)["m_GameObject"]["m_PathID"] == root.pid]
@@ -997,23 +1457,41 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
         v = copy.deepcopy(val(ships_[0].pid)); v["ShowExclusionInEditor"] = 1; replaced[ships_[0].pid] = F.write(ships_[0], v)
         print("flagged the ship to rebuild destroyed squadrons (needs dll patch --revive-turns in the DLL)")
     for gp, pids in comp_add.items():
-        if gp == sub_state.get("go"):
+        if gp == sub_state.get("go") and "gov" in sub_state:
             gv = sub_state["gov"]
             for p_ in pids: gv["m_Component"].append({"component": {"m_FileID": 0, "m_PathID": p_}})
             i_ = next(i for i, t in enumerate(appended) if t[0] == gp); appended[i_] = (gp, appended[i_][1], F.write(appended[i_][1], gv)); continue
         gv = copy.deepcopy(val(gp))
+        if support_abilities and gp in replaced:
+            gv = current_fields(gp)
         for p_ in pids: gv["m_Component"].append({"component": {"m_FileID": 0, "m_PathID": p_}})
         replaced[gp] = F.write(F.by_pid[gp], gv)
-    if sub_state:                                       # hang the Abilities submenu under the Actions object (like Munitions / Fighters)
+    if "tr" in sub_state:                               # hang the Abilities submenu under the Actions object (like Munitions / Fighters)
         late_children.setdefault(sub_state["father"], []).append(sub_state["tr"])
     for fa, kids_ in late_children.items():
-        assert fa not in replaced, "internal: Actions transform was already rewritten"
-        fv = copy.deepcopy(val(fa))
+        if support_abilities and fa in replaced:
+            fv = current_fields(fa)
+        else:
+            assert fa not in replaced, "internal: Actions transform was already rewritten"
+            fv = copy.deepcopy(val(fa))
         for k_ in kids_: fv["m_Children"].append({"m_FileID": 0, "m_PathID": k_})
         replaced[fa] = F.write(F.by_pid[fa], fv)
     abv = copy.deepcopy(val(ab.pid))
-    for p in new_pids: abv["m_PreloadTable"].append({"m_FileID": 0, "m_PathID": p})
-    for e in abv["m_Container"]: e["second"]["preloadSize"] += len(new_pids)
+    preload = abv["m_PreloadTable"]
+    if external_preloads:
+        entries = [entry["second"] for entry in abv["m_Container"]]
+        if len(entries) != 1 or entries[0]["preloadIndex"] + entries[0]["preloadSize"] != len(preload):
+            raise ValueError("unsupported ship prefab preload layout for Deploy Plating")
+    added_preloads = [{"m_FileID": 0, "m_PathID": pid} for pid in new_pids]
+    seen = {(ref["m_FileID"], ref["m_PathID"]) for ref in preload}
+    for ref in external_preloads:
+        key = ref["m_FileID"], ref["m_PathID"]
+        if key not in seen:
+            added_preloads.append(ref)
+            seen.add(key)
+    preload.extend(added_preloads)
+    for entry in abv["m_Container"]:
+        entry["second"]["preloadSize"] += len(added_preloads)
     replaced[ab.pid] = F.write(ab, abv)
     new_cab = F.rebuild(replaced=replaced, appended=appended)
     write_bundle(dst, B, [(F1, N1, new_cab), (F2, N2, RESS + bytes(res_extra))])
@@ -1080,7 +1558,7 @@ LIMITS
     g_abil.add_argument("--jump-cooldown", type=int, default=5, help="--mini-jump: cooldown in turns (default 5)")
     g_abil.add_argument("--jump-delay", type=int, default=50, help="--mini-jump: delay before the jump in ticks (default 50 = Argos)")
     g_abil.add_argument("--jump-duration", type=int, default=3, help="--mini-jump: jump duration (default 3 = Argos)")
-    g_abil.add_argument("--ability-submenu", action="store_true", help="put the abilities added by --mini-jump / --augury / --stealth into their own 'Abilities' submenu (one button in the Actions radial) instead of using up Actions positions")
+    g_abil.add_argument("--ability-submenu", action="store_true", help="group the added Actions-menu abilities under one Abilities button (requires a Fighters menu as a template)")
     g_abil.add_argument("--stealth-mesh", choices=["ship", "orion"], default="ship", help="mesh for the stealth projection effect: the ship's own hull (default) or the Orion-shaped mesh copied from the donor")
     g_slot.add_argument("--squadron-groups", help="split the squadron launch buttons into submenus inside the Fighters menu, e.g. 4,2 (slot counts per submenu, in slot order; must add up to FighterSlots+UtilityFighterSlots)")
     g_slot.add_argument("--split-squadrons", action="store_true", help="shorthand: one submenu for the fighter slots and one for the support (utility) slots")
@@ -1088,9 +1566,26 @@ LIMITS
     g_abil.add_argument("--augury", action="store_true", help="give the ship the Cylon guardian basestar's Predictive Augury ability (module + button in the Actions radial menu)")
     g_abil.add_argument("--augury-uses", default="1", help="--augury: number of uses per battle (maxAmmunition, default 1 = the guardian basestar). The game has no true unlimited setting: 'unlimited' = 999, which the button shows as 999/999")
     g_abil.add_argument("--stealth", metavar="ORION_BUNDLE", help="give the ship the Colonial Orion's stealth ability: path to the Orion bundle (encrypted game file or decrypted .dec). Adds the Stealth module, the button in the Actions radial menu and the two stealth effect objects")
-    g_abil.add_argument("--stealth-battery", type=float, default=100.0, help="--stealth: stealth battery capacity (Orion: 100)")
-    g_abil.add_argument("--stealth-start", choices=["on", "off"], default="on", help="--stealth: start battles stealthed (Orion: on)")
+    g_abil.add_argument("--stealth-battery", type=float, help="stealth battery capacity (Orion: 100)")
+    g_abil.add_argument("--stealth-start", choices=["on", "off"], help="start battles stealthed (Orion: on)")
+    g_abil.add_argument("--turnaround-repair-bay", action="store_true", help="add Defender emergency squadron repair to the Fighters menu (requires an existing docking bay)")
+    g_abil.add_argument("--targeted-resupply", action="store_true", help="add the Celestra Restock Munitions submenu and targeted resupply module")
+    g_abil.add_argument("--deploy-plating", action="store_true", help="add Celestra armour plating drones (requires the matching shared asset reference)")
+    for options in SUPPORT_SETTINGS.values():
+        for option, (field, value_type) in options.items():
+            description = PLATING_OPTIONS.get(option, (field, f"the {field} setting"))[1]
+            choices = ("on", "off") if field == "unlimitedSpareParts" else None
+            metavar = {"fullRepairPercent": "0..1", "moveOnLaunchSquadronOffset": "X,Y,Z"}.get(field)
+            g_abil.add_argument("--" + option.replace("_", "-"), type=value_type, choices=choices,
+                                metavar=metavar, help=f"set {description}; blank keeps the source value")
+    g_abil.add_argument("--technical-support", action="store_true", help="add Defender subsystem support (requires a Raptor-compatible launch bay and a Raptor in battle)")
+    g_abil.add_argument("--marine-reinforcement", action="store_true", help="add Defender friendly marine reinforcement (requires a Raptor-compatible launch bay and a Raptor in battle)")
+    g_abil.add_argument("--defender-donor", help="Defender bundle path or name (default colonialdefender)")
+    g_abil.add_argument("--celestra-donor", help="Celestra bundle path or name (default colonialcelestra)")
+    g_slot.add_argument("--align-launch-bays", action="store_true", help="match launch bay compatibility to the requested fighter and utility slot counts")
+    g_slot.add_argument("--bay-icon", action="append", default=[], metavar="SLOT=X,Y,Z", help="set the local icon marker position for an existing or newly cloned bay (repeatable; use --inspect to see current coordinates)")
     g_slot.add_argument("--slot-parts", default="buttons,bays,icons", help="(for testing) which parts --fighter-slots adds: any of buttons, bays, icons")
+    g_out.add_argument("--inspect", action="store_true", help="report weapon mounts and current prefab settings")
     g_out.add_argument("--no-encrypt", action="store_true", help="write the decrypted bundle (out/bundles/<name>.dec) instead of a game-ready encrypted one")
     g_out.add_argument("--encrypt", action="store_true", help=argparse.SUPPRESS)      # the default now; kept so old commands still work
     config.add_path_args(g_out, "out", "bundles")
@@ -1105,14 +1600,50 @@ def main():
     if a.stealth: a.stealth = find_bundle(a.stealth, a.bundles)
     stem = os.path.basename(a.src)[:-4] if a.src.endswith(".dec") else os.path.basename(a.src)
     a.encrypt = not a.no_encrypt
-    if a.list_mounts: a.dst = os.devnull
+    if a.list_mounts or a.inspect: a.dst = os.devnull
     elif not a.dst: a.dst = os.path.join(config.out_dir("bundles", a.out), stem if a.encrypt else stem + ".dec")
     for f in (original, a.src):
         if os.path.exists(a.dst) and config.same_file(a.dst, f): raise SystemExit("refusing to overwrite the input %s" % f)
     os.makedirs(os.path.dirname(os.path.abspath(a.dst)), exist_ok=True)
-    tmp = a.dst + ".tmp" if a.encrypt and not a.list_mounts else a.dst
-    double_weapons(a.src, tmp, off, a.copies, a.munition_slots, a.fighter_slots, a.utility_slots, tuple(float(x) for x in a.bay_offset.split(',')), a.hull_regen, a.armour_regen, [(c.rsplit('=', 1)[0], int(c.rsplit('=', 1)[1])) for c in a.clone], a.list_mounts, a.clone_scale, [(c.rsplit('=', 1)[0], float(c.rsplit('=', 1)[1])) for c in a.scale], a.layout, a.gap, not a.no_mirror, a.munition_factory, a.squadron_revive, not a.no_hull_follow, a.min_gap, ({"delay": a.jump_delay, "duration": a.jump_duration, "range": tuple(float(x) for x in a.jump_range.split(',')), "cooldown": a.jump_cooldown} if a.mini_jump else None), ({"uses": 999 if a.augury_uses.lower() in ("unlimited", "inf", "infinite") else int(a.augury_uses)} if a.augury else None), ({"donor": a.stealth, "battery": a.stealth_battery, "start_on": a.stealth_start == "on"} if a.stealth else None), a.slot_parts, a.ability_submenu, a.stealth_mesh, ([int(x) for x in a.squadron_groups.split(",")] if a.squadron_groups else ([a.fighter_slots, a.utility_slots] if a.split_squadrons else None)), tuple(float(x) for x in a.icon_offset.split(",")))
-    if a.list_mounts: return
+    tmp = a.dst + ".tmp" if a.encrypt and not (a.list_mounts or a.inspect) else a.dst
+    support_abilities = {}
+    if not (a.list_mounts or a.inspect):
+        for ability, (_, _, donor) in SUPPORT_ABILITIES.items():
+            if getattr(a, ability):
+                name = getattr(a, donor + "_donor") or "colonial" + donor
+                support_abilities[ability] = decrypted(find_bundle(name, a.bundles))
+    try:
+        double_weapons(
+            a.src, tmp,
+            offset=off, copies=a.copies,
+            munition_slots=a.munition_slots, fighter_slots=a.fighter_slots, utility_slots=a.utility_slots,
+            bay_offset=tuple(map(float, a.bay_offset.split(","))),
+            hull_regen=a.hull_regen, armour_regen=a.armour_regen,
+            clones=[(selector, int(count)) for selector, count in (item.rsplit("=", 1) for item in a.clone)],
+            list_mounts=a.list_mounts, clone_scale=a.clone_scale,
+            scales=[(selector, float(scale)) for selector, scale in (item.rsplit("=", 1) for item in a.scale)],
+            layout=a.layout, gap=a.gap, mirror=not a.no_mirror,
+            munition_factory=a.munition_factory, squadron_revive=a.squadron_revive,
+            hull_follow=not a.no_hull_follow, min_gap=a.min_gap,
+            mini_jump={"delay": a.jump_delay, "duration": a.jump_duration,
+                       "range": tuple(map(float, a.jump_range.split(","))),
+                       "cooldown": a.jump_cooldown} if a.mini_jump else None,
+            augury={"uses": 999 if a.augury_uses.lower() in ("unlimited", "inf", "infinite")
+                    else int(a.augury_uses)} if a.augury else None,
+            stealth={"donor": a.stealth, "battery": a.stealth_battery,
+                     "start_on": None if a.stealth_start is None else a.stealth_start == "on"}
+                    if a.stealth or a.stealth_battery is not None or a.stealth_start is not None else None,
+            slot_parts=a.slot_parts, ability_submenu=a.ability_submenu, stealth_mesh=a.stealth_mesh,
+            squadron_groups=[int(value) for value in a.squadron_groups.split(",")] if a.squadron_groups
+                            else ([a.fighter_slots, a.utility_slots] if a.split_squadrons else None),
+            icon_offset=tuple(map(float, a.icon_offset.split(","))),
+            inspect=a.inspect, support_abilities=support_abilities,
+            align_launch_bays=a.align_launch_bays, bay_icons=parse_bay_icons(a.bay_icon),
+            support_settings=configured_support_settings(a) if not (a.list_mounts or a.inspect) else {},
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    if a.list_mounts or a.inspect: return
     if a.encrypt:
         open(a.dst, "wb").write(xor_bytes(open(tmp, "rb").read())); os.remove(tmp)
         print("encrypted ->", a.dst)
