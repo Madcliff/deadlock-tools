@@ -223,7 +223,19 @@ def _lz4_block(src, usize):
 
 def _decompress(raw, usize, mode):
     if mode == 0: return raw
-    if mode == 1: return _lzma.LZMADecompressor(format=_lzma.FORMAT_ALONE).decompress(raw[:5] + struct.pack("<Q", usize) + raw[5:])
+    if mode == 1:
+        properties, payload = raw[:5], raw[5:]
+        decoder = _lzma.LZMADecompressor(format=_lzma.FORMAT_ALONE)
+        try:
+            result = decoder.decompress(properties + struct.pack("<Q", usize) + payload, max_length=usize + 1)
+        except _lzma.LZMAError:
+            # The Windows runtime can reject a size-bearing header on streams
+            # that carry their own end marker. Retry using that marker.
+            decoder = _lzma.LZMADecompressor(format=_lzma.FORMAT_ALONE)
+            result = decoder.decompress(properties + b"\xff" * 8 + payload, max_length=usize + 1)
+        if not decoder.eof or len(result) != usize:
+            raise _lzma.LZMAError("incomplete UnityFS LZMA block or incorrect declared size")
+        return result
     if mode in (2, 3): return _lz4_block(raw, usize)
     raise AssertionError("unknown bundle compression %d" % mode)
 

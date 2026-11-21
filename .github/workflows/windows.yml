@@ -11,6 +11,7 @@ on:
       - deadlock_tools/**
       - scripts/windows_entry.py
       - scripts/smoke_windows.py
+      - tests/test_bundle_compression.py
       - LICENSE
 
 permissions:
@@ -29,6 +30,8 @@ jobs:
         run: |
           python -m pip install PyInstaller==6.16.0
           python -m PyInstaller --clean --noconfirm --onefile --name DeadlockTools --paths . --collect-submodules deadlock_tools scripts/windows_entry.py
+      - name: Test bundle compression
+        run: python -m unittest tests.test_bundle_compression
       - name: Test executable
         run: python scripts/smoke_windows.py dist/DeadlockTools.exe
       - name: Package Windows download
