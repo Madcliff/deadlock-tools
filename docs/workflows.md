@@ -13,7 +13,7 @@
 | Rebuild destroyed squadrons | | Add or use Munition Factory and enable squadron revive | Apply the squadron revive patch |
 | Increase commander ranks | Extend the rank and XP tables | | Raise the rank cap and configure command nodes as needed |
 
-The ship editor's **Hull & armour** fields update the ship database. **Armour regen** under **Ship systems** enables a separate passive behaviour on the prefab. The bundle's **Inspect current bundle** command reports stored prefab settings. Use the ship fields for current database values and the DLL page for active patch settings.
+The ship editor's **Hull & armour** fields come from the level ship database, while **Bundle hull & armour** comes from the ship prefab. Corresponding hull and armour values sync 1:1. If they disagree, the editor offers **Use level data as source** and **Use bundle as source**; choose which file has the values you want to keep. Click **Apply** in the top bar to save the correction to the work tree. **Armour regen** under **Ship systems** is a separate passive behaviour on the prefab.
 
 ## Edit a ship in the browser
 
@@ -22,6 +22,19 @@ The ship editor's **Hull & armour** fields update the ship database. **Armour re
 3. Check **Bundle file** when editing a prefab. The editor selects a matching work copy first, then a matching file in the configured bundle folder. Use **Load bundle…** to import a chosen file into the work tree. **Inspect current bundle** displays mounts, launch action counts, and available module settings.
 4. Set the relevant bundle fields on the ship page and click **Save bundle edits**. The edited prefab goes to `BSG_Data/StreamingAssets/` in the work folder. **Overwrite opened bundle** replaces that work copy after confirmation and keeps a backup beside it.
 5. Check the status and output log after each save. **Database** groups the other table tools by subject. Its write forms display current values from staged files where available, and **Start from the originals** previews source values.
+
+## Copy and add a ship
+
+1. On the **Ships** page, choose **Copy and add a ship…**.
+2. Select a donor ship and its bundle, then enter a unique database name, in-game display name, new bundle filename, and blueprint text. Choose the capital-ship or battlestar research list.
+3. Create the ship. The editor copies the donor's full ship record into each ship table, allocates a new ID, adds the ship to campaign research, creates fresh localization entries, and copies the bundle into `work/BSG_Data/StreamingAssets/`.
+
+## Commander trees
+
+The **Commanders** page loads every ability definition and bonus found in the configured level data. Edit subsystem choices, each ability's bonus/display settings, and its unlock rank. The tree preview, subsystem choice editor, and ability list have separate scroll areas. **Restore loaded tree mapping** returns to the exact mapping from the loaded files. New custom abilities support flat and percentage ship-stat modifiers; saving writes the ability and bonus records, localization, and required work-tree DLL changes.
+4. Select the new ship and edit its fields and copied bundle as needed. The donor preview art and its `PreviewAssetBundle` reference are retained. The clone is a starting point; check its mounts, abilities, shared assets, and game presentation before using it in a campaign.
+
+Creation is additive and writes to the work tree. It uses the effective ship records (including prior work-tree edits), and rejects duplicate ship names and bundle filenames.
 
 ## Add munition slots to Colonial Mercury
 
@@ -71,8 +84,12 @@ Select a ship, choose its bundle, and enable the desired controls under **Abilit
 
 Use **Ability submenu** when adding several Actions-menu abilities to a carrier. Turnaround repair stays in the Fighters menu. Save the bundle, install it, and test each action in a skirmish with a suitable target or squadron.
 
+Experimental EMP queues when activated and emits its pulse at the start of the next turn; configure the extra tick delay and fighter stun duration in the ship editor. The pulse immediately destroys in-range enemy missiles. Instant Plating queues at activation and applies at turn start; its optional tick delay is configured independently. Activate either queued action again before turn start to cancel it. Once the start event fires, cancellation is no longer available. A delay of 0 means the effect occurs at the turn boundary. There are 10 simulation ticks per second and 120 ticks per turn.
+
+Targeted EMP uses the native PCM 3D point selector separately for every burst. Its **Map points per cooldown** field defaults to four: choose a point, adjust its height, then repeat for the second, third, and fourth points. Every point has an independent position and height; the salvo queues only after all configured points are selected. Cancelling a point selection discards the incomplete salvo. At turn start, each selected point gets its own EMP burst using the configured delay. **Targeting range** controls how far away the points can be, and **EMP blast radius** controls the area around each point. The salvo shares one cooldown, which begins when it detonates. The ship editor exposes these values alongside subsystem damage, recovery, fighter stun duration, and fighter evade debuff duration. The evade debuff uses the game's normal jamming flag and configured evade penalty. You can add it to a bundle with `--custom-targeted-emp`. Both EMP modules query capital ships as well as smaller ships, so their subsystem effect can reach battleships.
+
 ```bash
-python -m deadlock_tools weapons colonialmercury --turnaround-repair-bay --targeted-resupply --deploy-plating --technical-support --marine-reinforcement --ability-submenu
+python -m deadlock_tools weapons colonialmercury --turnaround-repair-bay --targeted-resupply --deploy-plating --technical-support --marine-reinforcement --custom-emp-pulse --ability-submenu
 ```
 
 ### Tune Mercury's plating

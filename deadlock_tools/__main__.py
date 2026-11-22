@@ -6,6 +6,7 @@ tools:
   weapons   edit a ship bundle: turrets, carrier/munition slots, systems, abilities
   shipdb    read and edit the ship / munition / research / commander tables in the level files
   dll       patch Assembly-CSharp.dll (armour regen, squadron revive, max rank, command nodes, munition load)
+  ui        adjust game UI assets for ships with expanded slot lists
   gui       the graphical editor in your web browser (all of the above as forms)
 
 Results continue in the configured work folder's BSG_Data tree; edits stack until you pass --fresh.
@@ -19,6 +20,7 @@ TOOLS = {
     "weapons": ("deadlock_tools.weapons", "main"),
     "shipdb": ("deadlock_tools.shipdb", "main"),
     "dll": ("deadlock_tools.dll", "main"),
+    "ui": ("deadlock_tools.ui", "main"),
     "gui": ("deadlock_tools.editor", "main"),
 }
 

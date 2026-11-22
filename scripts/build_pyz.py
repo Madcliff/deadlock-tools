@@ -17,6 +17,12 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         shutil.copytree(os.path.join(ROOT, "deadlock_tools"), os.path.join(tmp, "deadlock_tools"),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        os.makedirs(os.path.join(tmp, "scripts"))
+        for name in ("build_custom_modules.sh", "build_commander_modifiers.sh",
+                     "build_commander_ability_levels.sh", "merge_custom_modules.cs"):
+            shutil.copyfile(os.path.join(ROOT, "scripts", name), os.path.join(tmp, "scripts", name))
+        shutil.copytree(os.path.join(ROOT, "dll_modules"), os.path.join(tmp, "dll_modules"),
+                        ignore=shutil.ignore_patterns("*.md"))
         shutil.copyfile(os.path.join(ROOT, "LICENSE"), os.path.join(tmp, "LICENSE"))
         zipapp.create_archive(tmp, target, interpreter="/usr/bin/env python3", main="deadlock_tools.__main__:main", compressed=True)
     print("wrote", target, "(%d KB)" % (os.path.getsize(target) // 1024))

@@ -9,8 +9,10 @@ on:
     paths:
       - .github/workflows/windows.yml
       - deadlock_tools/**
+      - pyproject.toml
       - scripts/windows_entry.py
       - scripts/smoke_windows.py
+      - tests/test_bundle_compression.py
       - LICENSE
 
 permissions:
@@ -27,8 +29,12 @@ jobs:
           architecture: x64
       - name: Build executable
         run: |
-          python -m pip install PyInstaller==6.16.0
-          python -m PyInstaller --clean --noconfirm --onefile --name DeadlockTools --paths . --collect-submodules deadlock_tools scripts/windows_entry.py
+          python -m pip install PyInstaller==6.16.0 ".[ui-assets]"
+          python -m PyInstaller --clean --noconfirm --onefile --name DeadlockTools --paths . --collect-submodules deadlock_tools --collect-all UnityPy --collect-all TypeTreeGeneratorAPI scripts/windows_entry.py
+      - name: Build combined editor
+        run: python scripts/build_pyz.py
+      - name: Test bundle compression
+        run: python -m unittest tests.test_bundle_compression
       - name: Test executable
         run: python scripts/smoke_windows.py dist/DeadlockTools.exe
       - name: Package Windows download
@@ -37,6 +43,11 @@ jobs:
         with:
           name: DeadlockTools-Windows-x64
           path: dist/DeadlockTools-Windows-x64.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeadlockTools-Combined-Editor
+          path: dist/deadlock.pyz
           if-no-files-found: error
 
 
@@ -51,8 +62,12 @@ jobs:
         with:
           name: DeadlockTools-Windows-x64
           path: dist
-      - name: Attach the tested Windows archive
+      - uses: actions/download-artifact@v4
+        with:
+          name: DeadlockTools-Combined-Editor
+          path: dist
+      - name: Attach release downloads
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/DeadlockTools-Windows-x64.zip --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$RELEASE_TAG" dist/DeadlockTools-Windows-x64.zip dist/deadlock.pyz --repo "$GITHUB_REPOSITORY"

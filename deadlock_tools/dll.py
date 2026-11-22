@@ -2,11 +2,11 @@
 """
 dll - every Assembly-CSharp.dll patch for the Deadlock tools, in one place.
 
-  python -m deadlock_tools dll patch  [DLL] [--armour-factor F] [--revive-turns N] [--max-rank N] [--munition-load]
+  python -m deadlock_tools dll patch  [DLL] [--armour-factor F] [--revive-turns N] [--max-rank N] [--munition-load] [--repair-bay-key]
                                             [--command-nodes N [--command-step S] [--command-first-rank R]] [--fresh]
   python -m deadlock_tools dll check  [DLL]
   python -m deadlock_tools dll revert [DLL] [--armour] [--revive] [--max-rank] [--command-nodes] [--munition-load]
-                                            (no option = revert all five)
+                                            (no option = revert all patches)
 
 DLL defaults to the 'dll' path in deadlock.json. The result is written to the work tree at BSG_Data/Managed/Assembly-CSharp.dll
 (the original is never touched) and later runs continue from that file, so patches given in separate runs add up; --fresh
@@ -21,6 +21,7 @@ PATCHES (each is only applied when its option is given; re-running on a patched 
                       --command-step S (default 1 = one node per rank: N=10 gives ranks 1-10). The node count is hard-coded in the
                       DLL, so setcommanders alone cannot change it.
   --munition-load     let existing saves pick up a raised MunitionSlots count in battle (see 'dll munition -h')
+  --repair-bay-actions N  assign indexed shortcuts and key mappings to repair actions (1-16)
 Back up the game's DLL, then merge the work-tree copy into BSG_Data/Managed/.
 The single patches can also be run on their own: dll armour ... / dll revive ... / dll munition ... (options --factor/--turns/--check/--revert).
 """
@@ -255,6 +256,71 @@ NOTES
     print("%s the munition load check (17 bytes at file offset 0x%x) -> %s" % ("restored" if a.revert else "patched", i, dst))
 
 
+def _dll_repair_bay_key(argv=None):
+    """Give each turnaround repair action a unique indexed battle shortcut."""
+    # Exact Assembly-CSharp build signature: TurnaroundRepairBayAction.get_ShortcutKey.
+    RVA_FIELD = 0x5DB85E
+    BODY_OFFSET = 0xA6AD0
+    ORIGINAL_RVA = 0x0A88D0
+    PATCHED_RVA = 0x00937910
+    ORIGINAL_BODY = bytes.fromhex("0e 1f 2f 2a")  # SpecialAttack3
+    # Keep these out of the generic ability stack. The correct launch controls
+    # live in the dedicated RepairBaySlotButton area beside squadron/munition
+    # slots; the existing panel code currently serializes only one such widget.
+    PANEL_VISIBLE_OFFSET = 0xA6761  # get_VisibleInShipInfoPanel body (after tiny header)
+    PANEL_HIDDEN = 0x16             # ldc.i4.0
+    # This is an unused zero-filled run near the end of the managed .text section.
+    # Keep it separate from ArmourInfo's helper body used by the armour-regeneration patch.
+    CAVE_OFFSET = 0x935B10
+    CAVE_SIZE = 14
+    # Return RepairBayShortcutBase + (RadialMenuPosition - first repair position).
+    HELPER = bytes.fromhex("36 02 28 9e 23 00 06 1f 04 59 1f 3c 58 2a")
+    assert len(HELPER) == CAVE_SIZE
+
+    ap = argparse.ArgumentParser(description=_dll_repair_bay_key.__doc__)
+    ap.add_argument("dll", nargs="?"); _sub_args(ap)
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--actions", type=int, default=1, help="number of indexed repair actions (1-16)")
+    a = ap.parse_args(argv); _sub_input(a)
+    if not 1 <= a.actions <= 16:
+        sys.exit("--actions must be between 1 and 16")
+    data = bytearray(open(a.dll, "rb").read())
+    rva = struct.unpack_from("<I", data, RVA_FIELD)[0]
+    cave = bytes(data[CAVE_OFFSET:CAVE_OFFSET + CAVE_SIZE])
+    shortcut_original = (rva == ORIGINAL_RVA and
+                         bytes(data[BODY_OFFSET:BODY_OFFSET + 4]) == ORIGINAL_BODY and
+                         cave == bytes(CAVE_SIZE))
+    shortcut_patched = rva == PATCHED_RVA and cave == HELPER
+    panel_byte = data[PANEL_VISIBLE_OFFSET]
+    if not (shortcut_original or shortcut_patched) or panel_byte not in (PANEL_HIDDEN, 0x17):
+        sys.exit("this DLL is not the expected build or the repair shortcut region was modified; refusing to change it")
+    # Also recognize the earlier, misplaced UI experiment so this patch can
+    # repair it without losing the independent indexed-shortcut change.
+    misplaced_visible = panel_byte == 0x17
+    patched = shortcut_patched and not misplaced_visible
+    if a.check:
+        print("indexed repair-bay shortcut patch: %s" % ("INSTALLED" if patched else "not installed"))
+        return
+    if (a.revert and not shortcut_patched and not misplaced_visible) or (
+            not a.revert and shortcut_patched and not misplaced_visible):
+        sys.exit("already %s: nothing to do" % ("original" if a.revert else "patched"))
+    if a.revert:
+        if shortcut_patched:
+            struct.pack_into("<I", data, RVA_FIELD, ORIGINAL_RVA)
+            data[CAVE_OFFSET:CAVE_OFFSET + CAVE_SIZE] = bytes(CAVE_SIZE)
+        data[PANEL_VISIBLE_OFFSET] = PANEL_HIDDEN
+        action = "restored the shared repair shortcut and kept repair actions out of the ability stack"
+    else:
+        if shortcut_original:
+            struct.pack_into("<I", data, RVA_FIELD, PATCHED_RVA)
+            data[CAVE_OFFSET:CAVE_OFFSET + CAVE_SIZE] = HELPER
+        data[PANEL_VISIBLE_OFFSET] = PANEL_HIDDEN
+        action = "enabled indexed repair shortcuts (IDs 60 onward); panel slots remain dedicated UI work"
+    dst = a.dst or os.path.join(config.out_dir("dll", a.out), os.path.basename(a.dll))
+    config.write(dst, bytes(data), a.original)
+    print(action, "->", dst)
+
+
 MAXRANK_PATS = [re.compile(rb"\x02\x7b(....)\x1f(.)\x2f\x12\x02\x7b(....)", re.S), re.compile(rb"\x02\x7b(....)\x1f(.)\xfe\x04\x16\xfe\x01\x2a", re.S)]
 
 
@@ -330,7 +396,7 @@ def check(dll):
         else:
             n_, (st_, b_) = v["tree-bound"], v["tree-elem"]
             print("command skill nodes: %d, one every %d rank(s) from rank %d (last at rank %d)" % (n_, st_, b_ - 1, b_ - 1 + (n_ - 1) * st_))
-    for fn in (_dll_armour, _dll_revive, _dll_munition):
+    for fn in (_dll_armour, _dll_revive, _dll_munition, _dll_repair_bay_key):
         try: fn([dll, "--check", "--dst", "-"])
         except SystemExit as e:
             if e.code not in (0, None): print(e)
@@ -342,12 +408,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["patch", "check", "revert"]); ap.add_argument("dll", nargs="?", metavar="DLL", help="default: 'dll' in deadlock.json")
     ap.add_argument("--dll", dest="dll_opt", metavar="PATH", help="same as giving DLL")
-    config.add_path_args(ap, "out")
+    config.add_path_args(ap, "out", "levels")
     ap.add_argument("--fresh", action="store_true", help="start from the original DLL, not the work-tree copy (earlier patches are dropped)")
     ap.add_argument("--armour-factor", type=float); ap.add_argument("--revive-turns", type=float)
     ap.add_argument("--max-rank", type=int, nargs="?", const=10, help="patch: new max rank; revert: give the flag alone")
     ap.add_argument("--command-nodes", type=int, nargs="?", const=0, help="patch: node count; revert: give the flag alone"); ap.add_argument("--command-step", type=int, default=1); ap.add_argument("--command-first-rank", type=int, default=1)
     ap.add_argument("--munition-load", action="store_true", help="patch/revert the munition load check")
+    ap.add_argument("--repair-bay-actions", type=int, help="assign indexed shortcuts and key mappings to repair actions (1-16)")
+    ap.add_argument("--repair-bay-shortcuts", action="store_true", help="revert indexed repair-bay shortcut support and its staged key mappings")
     ap.add_argument("--armour", action="store_true"); ap.add_argument("--revive", action="store_true")
     a = ap.parse_args(); a.dll = a.dll or a.dll_opt
     original = config.setting("dll", a.dll)
@@ -361,26 +429,39 @@ def main():
     def step(fn, args, name):
         nonlocal cur
         nxt = os.path.join(tmp, name)
-        try: fn([cur] + args + ["--dst", nxt])
+        try: fn([cur] + args + ["--fresh", "--dst", nxt])
         except SystemExit as e:
             if "nothing to do" not in str(e.code): raise      # e.g. reverting a patch that is not installed: skip it
             print(e.code); return
         cur = nxt
     if a.cmd == "patch":
-        if a.armour_factor is None and a.revive_turns is None and a.max_rank is None and not a.command_nodes and not a.munition_load:
-            ap.error("give at least one of --armour-factor / --revive-turns / --max-rank / --command-nodes N / --munition-load")
+        if a.armour_factor is None and a.revive_turns is None and a.max_rank is None and not a.command_nodes and not a.munition_load and a.repair_bay_actions is None:
+            ap.error("give at least one patch option")
+        if a.repair_bay_actions is not None and not 1 <= a.repair_bay_actions <= 16:
+            ap.error("--repair-bay-actions must be between 1 and 16")
         if a.armour_factor is not None: step(_dll_armour, ["--factor", str(a.armour_factor)], "a.dll")
         if a.revive_turns is not None: step(_dll_revive, ["--turns", str(a.revive_turns)], "b.dll")
         if a.max_rank is not None: nxt = os.path.join(tmp, "c.dll"); set_max_rank(cur, a.max_rank, nxt); cur = nxt
         if a.command_nodes: nxt = os.path.join(tmp, "d.dll"); set_command_nodes(cur, a.command_nodes, a.command_step, nxt, a.command_first_rank); cur = nxt
         if a.munition_load: step(_dll_munition, [], "e.dll")
+        if a.repair_bay_actions is not None:
+            step(_dll_repair_bay_key, ["--actions", str(a.repair_bay_actions)], "f.dll")
+            from deadlock_tools.repair_shortcuts import update_key_assets
+            update_key_assets(config.setting("levels", a.levels), config.out_dir("levels", a.out), a.repair_bay_actions)
     else:
-        every = not (a.armour or a.revive or a.max_rank is not None or a.command_nodes is not None or a.munition_load)
+        every = not (a.armour or a.revive or a.max_rank is not None or a.command_nodes is not None or a.munition_load or a.repair_bay_actions is not None or a.repair_bay_shortcuts)
         if a.armour or every: step(_dll_armour, ["--revert"], "a.dll")
         if a.revive or every: step(_dll_revive, ["--revert"], "b.dll")
         if a.max_rank is not None or every: nxt = os.path.join(tmp, "c.dll"); set_max_rank(cur, 10, nxt); cur = nxt
         if a.command_nodes is not None or every: nxt = os.path.join(tmp, "d.dll"); set_command_nodes(cur, None, 1, nxt); cur = nxt
         if a.munition_load or every: step(_dll_munition, ["--revert"], "e.dll")
+        with open(cur, "rb") as stream:
+            repair_patch_was_installed = struct.unpack_from("<I", stream.read(0x5DB85E + 4), 0x5DB85E)[0] == 0x00937910
+        if a.repair_bay_shortcuts or every:
+            step(_dll_repair_bay_key, ["--revert"], "f.dll")
+            if a.repair_bay_shortcuts or repair_patch_was_installed:
+                from deadlock_tools.repair_shortcuts import update_key_assets
+                update_key_assets(config.setting("levels", a.levels), config.out_dir("levels", a.out), 0)
     if config.same_file(cur, out): print("nothing changed ->", out)
     else: shutil.copyfile(cur, out); print("done ->", out)
     shutil.rmtree(tmp, ignore_errors=True)

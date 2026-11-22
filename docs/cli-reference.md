@@ -57,6 +57,7 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 | Add carrier and munition controls | `--fighter-slots`, `--utility-slots`, `--munition-slots`, `--bay-offset`, `--icon-offset`, `--slot-parts`, `--split-squadrons`, `--squadron-groups` |
 | Align bay types with database slot order or move a marker | `--align-launch-bays` with both slot totals, `--bay-icon SLOT=X,Y,Z` (repeatable) |
 | Passive ship systems | `--hull-regen`, `--armour-regen`, `--munition-factory`, `--squadron-revive` |
+| Custom ship modules | `--custom-armour-repair`, `--custom-squadron-replacement`, `--custom-drone-resupply`, `--custom-magazine-capacity`, `--custom-emp-pulse`, `--custom-targeted-emp` |
 | Micro-FTL | `--mini-jump`, `--jump-range`, `--jump-delay`, `--jump-duration`, `--jump-cooldown` |
 | Predictive Augury | `--augury`, `--augury-uses` |
 | Stealth | `--stealth ORION_BUNDLE`, `--stealth-battery`, `--stealth-start`, `--stealth-mesh` |
@@ -69,6 +70,7 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 python -m deadlock_tools weapons colonialmercury --inspect
 python -m deadlock_tools weapons colonialmercury --clone fore=1 --clone-scale 0.7 --mini-jump
 python -m deadlock_tools weapons colonialmercury --hull-regen 0.2 --armour-regen
+python -m deadlock_tools weapons colonialmercury --custom-targeted-emp --ability-submenu
 python -m deadlock_tools dll patch --armour-factor 1
 ```
 
@@ -86,6 +88,25 @@ The last two commands are a separate recipe. Combine the desired prefab options 
 
 Supply only the options you want to change. When adding an ability to a new bundle, include its ability flag. Use `--inspect` to read the settings back.
 
+Custom module flags append the matching MonoScript and MonoBehaviour records to the ship bundle. Armour repair clears Hull Resin's negative-rate armour flag and preserves positive hull repair. Squadron replacement clears the `ShipInfo` flag used by the legacy Munition Factory revive patch while keeping the Munition Factory itself for ordinary resupply. The matching custom-module DLL must be installed before launching the game. Drone resupply defaults to 1 plating per battle tick (120 per 120-tick turn at the base rate); ships can configure their own rate in the editor.
+
+Experimental EMP adds a battle action and configurable ship module. Activating it queues the pulse for the start of the next turn; `detonationDelayTicks` adds a configurable delay after that event (default 0). The default range is 1,000 units and cooldown is one turn. It reduces enemy subsystem maximum health by 8 for 240 ticks, stuns enemy squadrons for 360 ticks (`disableSquadronTicks`), applies the game's native jamming evade penalty for 360 ticks (`fighterEvadeDebuffTicks`), and immediately destroys hostile missiles in range. The 360-tick duration matches the vanilla Cylon Virus Mine's default jamming field; durations remain independently configurable. Team and faction checks exclude friendly ships and missiles. It does not alter munition capacity or stockpiles.
+
+Instant Plating also queues its effect: activation applies the configured extra armour at the start of the next turn, with `activationDelayTicks` as an optional additional delay (default 0). Both abilities can be cancelled by activating the queued action again before the turn starts; once the start event occurs, the delay/effect cannot be cancelled. Both delay settings are simulation ticks: 10 ticks per second and 120 ticks per 12-second turn. The EMP fighter-stun duration remains independently configurable.
+
+Use `--turnaround-repair-actions N` to add or reconcile 1–8 independent turnaround repair bays. The tool writes one
+repair module and one Fighters action per bay; the matching DLL creates a launch-slot button per module and assigns
+indexed shortcuts. To install the ability on a new bundle, also pass `--turnaround-repair-bay --defender-donor PATH`.
+
+## UI layout
+
+Run `python -m deadlock_tools ui fix-overflows` to stage Unity UI layout fixes in the configured work tree. The command
+sets ship slot lists to resize vertically as their contents gain rows, wraps ship-card icons into two rows, and makes
+the battle ship squadron panel tall enough for two rows. It edits `level5`, `level85`, `level9`, and
+`sharedassets5.assets` under `work/BSG_Data/`.
+Python users need the optional UnityPy support: `python -m pip install '.[ui-assets]'`. The Windows standalone archive
+includes this support.
+
 ## DLL patches
 
 Run `python -m deadlock_tools dll check` to inspect the staged DLL or configured source. An explicit DLL path inspects that file directly.
@@ -97,14 +118,17 @@ Run `python -m deadlock_tools dll check` to inspect the staged DLL or configured
 | `--max-rank N` | Set the commander cap. | `--max-rank` |
 | `--command-nodes N` | Set the number of command nodes. Optionally set `--command-step` and `--command-first-rank`. | `--command-nodes` |
 | `--munition-load` | Rebuild an existing save's munition list when it is shorter than the ship's new slot count. | `--munition-load` |
+| `--repair-bay-actions N` | Assign indexed shortcuts and stage matching keyboard/localization rows in `level3` and `resources.assets` (1–16). The custom-module DLL adds the matching launch-slot widgets. | `--repair-bay-shortcuts` |
 
 ```bash
 python -m deadlock_tools dll patch --armour-factor 1 --revive-turns 0
+python -m deadlock_tools dll patch --repair-bay-actions 2 --levels /path/to/BSG_Data
 python -m deadlock_tools dll check
 python -m deadlock_tools dll revert --revive
+python -m deadlock_tools dll revert --repair-bay-shortcuts --levels /path/to/BSG_Data
 ```
 
-`dll revert` with no patch flags reverts all supported patches. The `dll armour`, `dll revive`, and `dll munition` subcommands also provide single-patch operations with `--check` and `--revert`. The tool checks for expected code patterns before patching.
+`dll revert` with no patch flags reverts all supported patches. The `dll armour`, `dll revive`, and `dll munition` subcommands also provide single-patch operations with `--check` and `--revert`. Repair shortcut changes also stage the relevant key mappings and descriptions. The tool checks for expected code patterns before patching.
 
 ## Bundle conversion
 

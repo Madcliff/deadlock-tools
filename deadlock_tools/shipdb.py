@@ -436,7 +436,7 @@ class Reader:
 
 
 # ----------------------------------------------------------------------------- CLI
-def read_objects(d):
+def read_objects(d, *, with_count_offset=False):
     meta, fsize, ver, doff = struct.unpack(">IIII", d[:16]); o = 20
     j = d.index(b"\0", o); o = j + 1 + 4
     tt = d[o]; o += 1
@@ -447,13 +447,14 @@ def read_objects(d):
         cid = struct.unpack("<i", d[o:o + 4])[0]; o += 4 + 1 + 2
         if cid == 114: o += 16
         o += 16; types.append(cid)
+    count_offset = o
     n = struct.unpack("<i", d[o:o + 4])[0]; o += 4
     out = []
     for _ in range(n):
         o = (o + 3) & ~3
         pid, off, size, ti = struct.unpack("<qIIi", d[o:o + 20])
         out.append((pid, doff + off, size, types[ti], o)); o += 20
-    return out
+    return (out, count_offset) if with_count_offset else out
 
 
 def enum_names(S, ti):

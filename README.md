@@ -1,16 +1,19 @@
 # Deadlock Tools
 
 Modding tools for **Battlestar Galactica: Deadlock**: edit ship bundles (turrets, carrier and munition slots, systems,
-abilities), the ship / munition / research / commander tables in the level files, and patch `Assembly-CSharp.dll`.
+abilities), the ship / munition / research / commander tables in the level files, patch `Assembly-CSharp.dll`, and adjust
+the game UI layouts for ships with expanded slot lists.
 Everything is also available as a browser GUI. Uses Python and the standard library. Python 3.10 or newer is recommended for the editor.
 
 Select a ship to edit its database values and bundle settings on the same page, or use **Load bundle…** to edit a bundle directly without loading a similarly named ship. **Compare with bundle…** shows the editable prefab settings and installed abilities side by side. In the editor, **Overwrite opened bundle** replaces the work copy after confirmation and leaves a `.bak` copy; **Save bundle edits** writes to that same work copy.
+
+Saving a bundle containing custom modules or turnaround repair actions also rebuilds the matching custom-module DLL and indexed repair shortcut assets into the work tree. The combined update starts from a clean DLL base kept in `work/.deadlock-tools/base/`; it backs up and stages the DLL and any affected level assets, and does not install them into the game. A configured level-data folder with its matching `Managed/` references is required for this build.
 
 The editor keeps changes in the configured work folder, mirroring `BSG_Data/`: level files at its root, ship bundles in `StreamingAssets/`, and the edited DLL in `Managed/`. A matching work copy takes priority over its configured source. Loading a bundle imports it into this tree.
 
 ## Standalone Windows build
 
-Download `DeadlockTools-Windows-x64.zip` from the [GitHub releases](https://github.com/Madcliff/deadlock-tools/releases). Extract it to a writable folder and double-click `DeadlockTools.exe`. It opens the editor in your default browser and keeps its console open while the editor is running. Settings and staged outputs live beside the executable. For CLI use, run `DeadlockTools.exe --help` from PowerShell.
+Download `DeadlockTools-Windows-x64.zip` from the [GitHub releases](https://github.com/Madcliff/deadlock-tools/releases). Extract it to a writable folder and double-click `DeadlockTools.exe`. It opens the editor in your default browser and keeps its console open while the editor is running. Settings and staged outputs live beside the executable. For CLI use, run `DeadlockTools.exe --help` from PowerShell. The same release also includes `deadlock.pyz`, the rebuilt combined editor for systems with Python installed.
 
 ## Quick start
 
@@ -28,10 +31,11 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
 
 ## Guides
 
-- [Release notes](docs/release-notes-0.3.3.md) lists the latest changes.
+- [Unreleased changes](docs/release-notes-unreleased.md) lists the current working-tree additions; [release notes](docs/release-notes-0.4.0.md) cover the latest tagged release.
 - [Editing and installing a mod](docs/workflows.md) covers the browser editor, file types, slot changes, DLL prompts, testing in game, and rollback.
 - [Command-line reference](docs/cli-reference.md) covers all command families, common flags, and examples.
 - [Technical findings](docs/technical-findings.md) records the DLL patches, bundle dependencies, carrier UI findings, and verification limits.
+- [Custom ship modules](dll_modules/README.md) documents the experimental module DLL build and current bundle-serialization limitation.
 
 ## Tools
 
@@ -40,8 +44,9 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
 | `config` | show / save the paths every tool uses | `deadlock.json` |
 | `gui` | ship, bundle, DLL, and database editing in your browser (127.0.0.1 only) | configured work folder, mirroring `BSG_Data/` |
 | `shipdb` | ship stats, veterancy, XP, munitions, research/blueprints, fleet limits, fleet icons, commanders, squadron hull | `work/BSG_Data/` |
-| `weapons` | edit a ship bundle: clone/resize turrets, slots, hull/armour regen, munition factory, squadron revive, micro-FTL, augury, stealth | `work/BSG_Data/StreamingAssets/` |
-| `dll` | patch `Assembly-CSharp.dll`: armour regen, squadron revive, commander max rank, command-tree nodes, munition load; `check` / `revert` | `work/BSG_Data/Managed/` |
+| `weapons` | edit a ship bundle: clone/resize turrets, slots, vanilla systems, custom modules, abilities, and configurable turnaround repair actions | `work/BSG_Data/StreamingAssets/` |
+| `dll` | patch `Assembly-CSharp.dll`: armour regen, squadron revive, commander max rank, command-tree nodes, munition load, indexed repair-bay shortcuts; `check` / `revert` | `work/BSG_Data/Managed/` and `work/BSG_Data/` assets |
+| `ui fix-overflows` | make expanded ship slot lists size themselves for extra rows in construction, research, and battle panels | `work/BSG_Data/` |
 | `xor` | decrypt / encrypt / check ship bundles | `work/.deadlock-tools/decrypted/`, `work/BSG_Data/StreamingAssets/` |
 
 ## Command-line inputs and outputs
@@ -62,6 +67,8 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
   `--fresh` starts again from the configured source. `weapons` starts from the selected bundle each time. Include all desired prefab options when rebuilding from the same source.
 
 The configured work folder is the single continuing edit location. Merge its `BSG_Data/` tree into the game installation when ready. The settings let you choose level data, ship bundles, the DLL, and work folder independently. See [Editing and installing a mod](docs/workflows.md).
+
+The UI asset command uses UnityPy. Install the optional support with `python -m pip install '.[ui-assets]'`; the Windows standalone build includes it. Run `python -m deadlock_tools ui fix-overflows` to stage construction, research, battle, deployment, and ship-card layout corrections in `work/BSG_Data/`.
 
 Back up the game's files before copying command-line results over them.
 
@@ -89,7 +96,7 @@ skipped otherwise).
 
 ## Single-file version
 
-`python scripts/build_pyz.py` writes `dist/deadlock.pyz`. Copy it anywhere and run `python deadlock.pyz gui` (or any
+`python scripts/build_pyz.py` writes `dist/deadlock.pyz`. Rebuild it after changing editor or tool sources so the combined editor stays current. Copy it anywhere and run `python deadlock.pyz gui` (or any
 tool). Its `deadlock.json` and `work/` are kept next to the `.pyz`.
 
 ## Changes from the old scripts
