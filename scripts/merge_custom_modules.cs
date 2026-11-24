@@ -318,6 +318,46 @@ static class MergePrototype
         Console.WriteLine("Injected custom commander stat modifiers into native commander bonus calculations");
     }
 
+    static void InjectSubsystemModifierHooks(ModuleDefinition module, TypeDefinition helper)
+    {
+        // ShipDataTable.GetCrewVeterancyBonus(ship, stat, battle) is the funnel for every
+        // crew-veterancy consumer (percentage, fixed and the SubSystemBase tooltip helper).
+        // Each return becomes: result -> CustomSubsystemModifiers.Apply(ship, stat, result).
+        var table = module.Types.Single(t => t.Name == "ShipDataTable");
+        var apply = helper.Methods.Single(m => m.Name == "Apply" && m.Parameters.Count == 3);
+        var method = table.Methods.Single(m => m.Name == "GetCrewVeterancyBonus" && m.Parameters.Count == 3 &&
+            m.Parameters[0].ParameterType.Name == "ShipInfo" && m.Parameters[1].ParameterType.Name == "FEDNAJLFKEF" &&
+            m.ReturnType.FullName == "System.Single");
+        if (method.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference mr &&
+                                              mr.DeclaringType.FullName == helper.FullName && mr.Name == apply.Name))
+            return;
+        var result = new VariableDefinition(module.TypeSystem.Single);
+        method.Body.Variables.Add(result);
+        method.Body.InitLocals = true;
+        var il = method.Body.GetILProcessor();
+        var returns = method.Body.Instructions.Where(i => i.OpCode == OpCodes.Ret).ToArray();
+        if (returns.Length == 0) throw new InvalidOperationException("GetCrewVeterancyBonus has no return site");
+        foreach (var ret in returns)
+        {
+            // Re-purpose the return itself so branches aimed at it still pass the hook.
+            ret.OpCode = OpCodes.Stloc;
+            ret.Operand = result;
+            Instruction cursor = ret;
+            foreach (var instruction in new[] {
+                Instruction.Create(OpCodes.Ldarg_1),
+                Instruction.Create(OpCodes.Ldarg_2),
+                Instruction.Create(OpCodes.Ldloc, result),
+                Instruction.Create(OpCodes.Call, apply),
+                Instruction.Create(OpCodes.Ret)
+            }) {
+                il.InsertAfter(cursor, instruction);
+                cursor = instruction;
+            }
+        }
+        method.Body.MaxStackSize = Math.Max(method.Body.MaxStackSize, 3);
+        Console.WriteLine("Injected subsystem crew modifiers into ShipDataTable.GetCrewVeterancyBonus (" + returns.Length + " returns)");
+    }
+
     static void ReplaceCommanderRankLookup(TypeDefinition tree, TypeDefinition helper, FieldDefinition ranks,
                                            MethodReference getRank, MethodDefinition method, int abilityLocal,
                                            int indexLocal, bool readAbilityFromChoiceArray)
@@ -572,6 +612,8 @@ static class MergePrototype
             InjectSkirmishFleetCap(mod, destType);
         if (srcType.Name == "CustomCommanderStatModifiers" && !updating)
             InjectCommanderStatModifierHooks(mod, destType);
+        if (srcType.Name == "CustomSubsystemModifiers")
+            InjectSubsystemModifierHooks(mod, destType);
         if (srcType.Name == "CustomCommanderAbilityLevels")
             InjectCommanderAbilityLevelHooks(mod, destType);
         target.Write(args[2]);
