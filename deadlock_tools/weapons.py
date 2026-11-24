@@ -3124,6 +3124,7 @@ LIMITS
     g_abil.add_argument("--defender-donor", help="bundle path or name to copy Defender abilities from (default: colonialdefender in the configured bundle folder)")
     g_abil.add_argument("--celestra-donor", help="bundle path or name to copy Celestra abilities from (default: colonialcelestra in the configured bundle folder)")
     g_slot.add_argument("--bay-layout", metavar="FILE.json", help="edit launch bays, munition launchers and slot buttons from a JSON spec: {bays: [{id, position, slot, canLaunch, canDock, dockRange, compat}], launchers: [{id, position, launchPoints}], removeSlots: [slot], removeMunitions: [button id], removeLaunchers: [id], revision?}. Ids come from --list-bays. Removing slots does not change the level files: lower FighterSlots / UtilityFighterSlots / MunitionSlots to match. See docs/game/launch-bays.md")
+    g_slot.add_argument("--realign-bays", action="store_true", help="lay the cloned launch bays (and the launch+dock bays they were copied from, Mercury: PortRear / StarboardRear) out as mirrored port/starboard pairs in slot order, in a grid starting at the stock bay; each takes its side's rotation, launch path and icon offset. Runs after the other options; --bay-layout entries for the same bay win. See docs/game/launch-bays.md")
     g_slot.add_argument("--list-bays", action="store_true", help="print the launch bays, launch and munition buttons and munition launchers with the ids --bay-layout uses, then exit")
     g_slot.add_argument("--align-launch-bays", action="store_true", help="match launch bay compatibility to the requested fighter and utility slot counts")
     g_slot.add_argument("--mirror-launch-bays", action="store_true", help="mirror adjacent fighter launch bays across the ship in port/starboard pairs")
@@ -3231,6 +3232,13 @@ def main():
             support_settings=configured_support_settings(a) if not (a.list_mounts or a.inspect) else {},
             turnaround_repair_actions=a.turnaround_repair_actions, mount_layout=mount_layout,
         )
+        if a.realign_bays and not (a.list_mounts or a.inspect):
+            from deadlock_tools import bays as bay_mod
+            rows, notes = bay_mod.realign_spec(bay_mod.read_layout(tmp))
+            for line in notes: print("realign bays: " + line)
+            own = {str(row["id"]): row for row in (bay_spec or {}).get("bays") or []}
+            merged = [dict(row, **own.pop(str(row["id"]), {})) for row in rows] + list(own.values())
+            bay_spec = dict(bay_spec or {}, bays=merged)
         if bay_spec:
             from deadlock_tools import bays as bay_mod
             spec = {key: value for key, value in bay_spec.items() if key != "revision"}   # checked against the source above

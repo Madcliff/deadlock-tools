@@ -39,8 +39,9 @@ Without it, the save goes into the work tree. **Discard changes** throws away le
 | Ship localisation | opens the Localisation tab filtered to the ship | |
 | Weapon layout view | **Edit** layer (Turrets / Launch bays / Munition launchers), projection, drag the selected layer's objects, **Reload** | `/api/bundle/layout` (read, includes `bays.read_layout`); staged for Save ship |
 | — Turrets | add/clone/reset turrets, weapon, quadrant, angles, mesh scale | `weapons --mount-layout` |
-| — Launch bays | slot, can launch / can dock, dock range, position, squadron types (named from the SquadronDataTable), launch path drawn dashed | `weapons --bay-layout` (`bays`) |
+| — Launch bays | name, slot, can launch / can dock, dock range, position, squadron types (named from the SquadronDataTable), launch path drawn dashed | `weapons --bay-layout` (`bays`) |
 | — Munition launchers | position, launch points (add/remove), **Remove launcher** (the last one stays while the ship has munition slots) | `weapons --bay-layout` (`launchers`, `removeLaunchers`) |
+| — Realign launch bays | lays the cloned bays out as mirrored pairs in slot order and renames them (staged; review, then Save ship) | `/api/bays/realign` → `bays.realign_spec`; saved as `weapons --bay-layout` |
 | — Squadron slots / Munition slots tables | **Remove slot** / **Remove** per row (toggle back with **Keep**); lowers FighterSlots / UtilityFighterSlots / MunitionSlots as level edits | `weapons --bay-layout` (`removeSlots`, `removeMunitions`) |
 
 ## DLL

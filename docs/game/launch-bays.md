@@ -42,12 +42,37 @@ level `MunitionSlots` to match (the GUI does).
 collects `GetComponentsInChildren<MissileLauncher>()` from the ship root and logs an error, leaving the button dead,
 when there are none. So a ship with munition slots must keep at least one launcher; `bays.apply` refuses otherwise.
 
+## Realigning cloned bays
+
+`--fighter-slots` / `--utility-slots` clone a launch bay for every added slot and shift each clone by `--bay-offset`
+(default 0, 3, 4: up and forward). On the Mercury Mk II that stacked the clones upwards out of the flight pod (the pod
+spans y −14 to −2 and z −49 to 37 in the bays' frame) and, after several rounds of edits, left 9 of the 12 rear bays
+on the port side, four pairs of them on the same spot.
+
+`weapons --realign-bays` (GUI: **Realign launch bays** in the Weapon layout view) rebuilds that group:
+
+* The templates are the launch+dock bays without `_slot` in the name (Mercury: `PortRear` / `StarboardRear`). Every
+  launch bay whose name starts with a template name takes part.
+* Sorted by slot, consecutive slots pair up: the lower slot on the port side, the higher one mirrored to starboard.
+* Pair *k* goes to a grid starting at the stock bay: column *k* mod *c* steps 4 units along the ship, row *k* div *c*
+  steps 3 units up, with one row for up to three pairs and two rows above that (Mk II: z −39.29 / −35.29 / −31.29 at
+  y −7.09 and −4.09, all inside the pod).
+* Each bay takes its side's template rotation, launch path (`LaunchPoints`) and icon offset. The build-screen icon
+  marker (`Icon`) is a child of its bay, so it moves with it.
+* Bays are renamed after their side and slot (`StarboardRear_slot7`); the stock bays keep their names. The game
+  finds bays by component and slot number, not by name.
+
+Mercury Mk II result (2026-11-24): slots 2–13 as six mirrored pairs, 8 bays per side, closest moved pair 3.0 units
+apart; vipers bays and the fore docking bays unchanged.
+
 ## The `--bay-layout` spec
 
 ```json
 {
   "revision": "sha256 of the bundle data, from --list-bays' source or the GUI (optional)",
-  "bays": [{"id": "...", "position": {"x": 0, "y": 0, "z": 0}, "slot": 2, "canLaunch": true, "canDock": true,
+  "bays": [{"id": "...", "name": "PortRear_slot4", "position": {"x": 0, "y": 0, "z": 0},
+            "rotation": {"x": 0, "y": 1, "z": 0, "w": 0}, "launchPath": [{"x": -1, "y": 0, "z": -3}],
+            "icon": {"x": 0.5, "y": 4.28, "z": 5.0}, "slot": 2, "canLaunch": true, "canDock": true,
             "dockRange": 3.0, "compat": [0, 1, 5, 113]}],
   "launchers": [{"id": "...", "position": {"x": 0, "y": 0, "z": 0}, "launchPoints": [{"x": 0, "y": 0, "z": 1}]}],
   "removeSlots": [13],

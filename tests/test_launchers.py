@@ -86,6 +86,21 @@ class Launchers(unittest.TestCase):
         self.assertNotEqual(stale.returncode, 0)
         self.assertFalse(os.path.exists(self.out("stale")))
 
+    def test_realign_mirrors_pairs_without_overlaps(self):
+        rows, _notes = bays.realign_spec(self.layout)
+        bays.apply(BUNDLE, self.out("realign"), {"bays": rows})
+        after = bays.read_layout(self.out("realign"))
+        moved = {b["id"]: b for b in after["bays"] if b["id"] in {row["id"] for row in rows}}
+        spots = [tuple(round(b["position"][a], 3) for a in "xyz") for b in after["bays"]]
+        self.assertEqual(len(spots), len(set(spots)))                          # no two bays on one spot
+        by_slot = sorted(moved.values(), key=lambda b: b["slot"])
+        for port, starboard in zip(by_slot[0::2], by_slot[1::2]):              # consecutive slots mirror each other
+            self.assertLess(port["position"]["x"], 0); self.assertGreater(starboard["position"]["x"], 0)
+            self.assertAlmostEqual(port["position"]["x"], -starboard["position"]["x"], 4)
+            self.assertAlmostEqual(port["position"]["z"], starboard["position"]["z"], 4)
+            self.assertTrue(starboard["name"].startswith("Starboard") and port["name"].startswith("Port"))
+        self.assertEqual(after["slots"], self.layout["slots"])                  # nothing removed or renumbered
+
 
 if __name__ == "__main__":
     unittest.main()

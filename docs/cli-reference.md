@@ -59,7 +59,7 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 | Scale the whole ship | `--ship-scale S` (absolute, 1 = stock; turrets keep their size). See [docs/game/ship-scale.md](game/ship-scale.md) |
 | Control turret placement | `--layout offset\|mid\|free`, `--offset`, `--gap`, `--min-gap`, `--no-mirror`, `--no-hull-follow` |
 | Add carrier and munition controls | `--fighter-slots`, `--utility-slots`, `--munition-slots`, `--bay-offset`, `--icon-offset`, `--slot-parts`, `--split-squadrons`, `--squadron-groups` (submenu sizes in slot order, any number of groups; they must add up to FighterSlots + UtilityFighterSlots and never change those counts) |
-| Edit launch bays, munition launchers, remove slots | `--list-bays` (ids), `--bay-layout FILE.json`. See [docs/game/launch-bays.md](game/launch-bays.md) |
+| Edit launch bays, munition launchers, remove slots | `--list-bays` (ids), `--bay-layout FILE.json`, `--realign-bays` (cloned bays as mirrored port/starboard pairs). See [docs/game/launch-bays.md](game/launch-bays.md) |
 | Align bay types with database slot order or move a marker | `--align-launch-bays` with both slot totals, `--bay-icon SLOT=X,Y,Z` (repeatable) |
 | Passive ship systems | `--hull-regen` (positive, hull only), `--munition-factory` |
 | Custom ship modules | `--custom-armour-repair`, `--custom-squadron-replacement`, `--custom-drone-resupply`, `--custom-magazine-capacity`, `--custom-emp-pulse`, `--custom-targeted-emp` |

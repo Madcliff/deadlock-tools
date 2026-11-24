@@ -980,7 +980,7 @@ class Project:
         for g in ap._action_groups:
             if g.title in ("positional arguments", "options"): continue
             for a in g._group_actions:
-                if not a.option_strings or a.dest in ("help", "out", "bundles", "inspect", "bay_layout", "list_bays") or a.help == argparse.SUPPRESS: continue   # bays: Weapon layout view
+                if not a.option_strings or a.dest in ("help", "out", "bundles", "inspect", "bay_layout", "list_bays", "realign_bays") or a.help == argparse.SUPPRESS: continue   # bays: Weapon layout view
                 donor_choice = a.dest in ("defender_donor", "celestra_donor", "stealth")
                 choices = self.bundle_files() if donor_choice else (list(a.choices) if a.choices else None)
                 kind = "choice" if donor_choice else "bool" if isinstance(a, argparse._StoreTrueAction) else "choice" if a.choices else "list" if isinstance(a, argparse._AppendAction) else "text"
@@ -1759,6 +1759,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/squadrons/save": return self.send(P.save_squadrons(body))
             if self.path == "/api/allocations/save": return self.send(P.save_allocations(body))
             if self.path == "/api/bays": return self.send(P.bays(body["path"]))
+            if self.path == "/api/bays/realign":
+                from deadlock_tools import bays as bymod
+                path, _ = P.bundle_src(body["bundle"])
+                with P.lock:
+                    rows, notes = bymod.realign_spec(bymod.read_layout(path))
+                return self.send({"bays": rows, "notes": notes})
             if self.path == "/api/bays/save": return self.send(P.save_bays(body))
             if self.path == "/api/armaments": return self.send(P.armaments(body))
             if self.path == "/api/localisation": return self.send(P.localisation(body))
@@ -2228,7 +2234,8 @@ function weaponLayout(bundle){
  let source='', loaded='', revision='', rows=[], original=[], hull=[], weapons={}, quadrants=[], active=0, request=0, busy=false, drag, clipboard, placing=false;
  let layer='mounts', bayInfo=null, bays=[], bayOriginal=[], launchers=[], launcherOriginal=[], sel={bays:0,launchers:0};
  let removedSlots=new Set(), removedMunitions=new Set(), removedLaunchers=new Set(), levelBase=null;
- const bayEditable=bay=>({id:bay.id,position:bay.position,slot:bay.slot,canLaunch:bay.canLaunch,canDock:bay.canDock,dockRange:bay.dockRange,compat:[...bay.compat].sort((a,b)=>a-b)});
+ const bayEditable=bay=>({id:bay.id,name:bay.name,position:bay.position,rotation:bay.rotation,launchPath:bay.launchPath,...(bay.icon?{icon:bay.icon}:{}),
+   slot:bay.slot,canLaunch:bay.canLaunch,canDock:bay.canDock,dockRange:bay.dockRange,compat:[...bay.compat].sort((a,b)=>a-b)});
  const launcherEditable=item=>({id:item.id,position:item.position,launchPoints:item.launchPoints});
  const bayGone=bay=>removedSlots.has(bay.slot);
  const bayChanges=()=>bays.filter((bay,index)=>!bayGone(bay)&&JSON.stringify(bayEditable(bay))!==JSON.stringify(bayEditable(bayOriginal[index]))).map(bayEditable);
@@ -2402,7 +2409,8 @@ function weaponLayout(bundle){
        ...known.map(code=>el('label',{class:'f chk'},el('input',{type:'checkbox',checked:item.compat.includes(code),disabled:busy||gone,onchange:event=>{
          item.compat=event.target.checked?[...item.compat,code]:item.compat.filter(value=>value!==code);edit()}}),
          (names[code]||'type '+code)+' ('+code+(fighterTypes.has(code)?', fighter':', support')+')')));
-     fields.append(el('strong',{},item.name),el('span',{class:'hint'},item.path),
+     fields.append(label('Name',el('input',{value:item.name,disabled:busy||gone,required:true,maxlength:64,
+         oninput:event=>{if(event.target.value.trim()){item.name=event.target.value.trim();changed();renderSlots()}}})),el('span',{class:'hint'},item.path),
        label('Slot (launches this squadron slot)',number(item.slot,value=>{item.slot=Math.round(value)},{step:1,min:0})),
        el('div',{class:'row'},check('Can launch','canLaunch','Squadrons leave from here'),check('Can dock','canDock','Squadrons return here')),
        label('Dock range',number(item.dockRange,value=>{item.dockRange=value},{min:0})),
@@ -2444,7 +2452,21 @@ function weaponLayout(bundle){
      return el('tr',{class:gone?'removed':''},el('td',{},String(index)),el('td',{},button.menu),el('td',{},'position '+button.radial),
        el('td',{},el('button',{class:'sec',type:'button',disabled:busy,onclick:()=>toggle(removedMunitions,button.id)},gone?'Keep':'Remove')));
    });
-   slotPanel.append(el('h4',{},'Squadron slots'),
+   const realign=el('button',{class:'sec',type:'button',disabled:busy||!bays.length,onclick:async()=>{
+     realign.disabled=true;
+     try{
+       const result=await api('/api/bays/realign',{bundle:source});
+       for(const row of result.bays){
+         const bay=bays.find(item=>item.id===row.id);if(!bay)continue;
+         Object.assign(bay,structuredClone({name:row.name,position:row.position,rotation:row.rotation,launchPath:row.launchPath,...(row.icon?{icon:row.icon}:{})}));
+       }
+       layer='bays';layerSelect.value='bays';render();
+       status.textContent='Realigned '+result.bays.length+' launch bays into mirrored pairs (not saved yet). '+(result.notes.at(-1)||'');
+     }catch(error){status.textContent=error.message}
+     finally{realign.disabled=false}
+   }},'Realign launch bays');
+   slotPanel.append(el('div',{class:'row'},realign,el('span',{class:'hint'},'Lays the cloned launch bays out as mirrored port/starboard pairs in slot order, next to the stock rear bays. Review in the Launch bays layer, then Save ship.')),
+     el('h4',{},'Squadron slots'),
      el('p',{class:'hint'},'Slot i is launched by button i and leaves from the bays numbered i. Removing a slot removes its bays and button, renumbers the slots above it and lowers FighterSlots or UtilityFighterSlots (fighter slots come first).'),
      el('table',{class:'agreement-table'},el('tr',{},...['Slot','Kind','Bays','Button menu',''].map(text=>el('th',{},text))),...slotRows),
      el('h4',{},'Munition slots'),

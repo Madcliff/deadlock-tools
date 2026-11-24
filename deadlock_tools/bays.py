@@ -87,7 +87,8 @@ def read_layout(path):
         bays.append({"id": str(pid), "name": view.v(go)["m_Name"], "path": view.path(go), "slot": lp["SlotNo"],
                      "canLaunch": bool(lp["CanLaunch"]), "canDock": bool(lp["CanDock"]), "dockRange": lp["DockRange"],
                      "compat": list(lp["LaunchCompatibility"]), "launchPath": lp["LaunchPoints"],
-                     "position": tr["m_LocalPosition"], "matrix": w.transform_matrix(tr["m_Father"]["m_PathID"], view.v),
+                     "position": tr["m_LocalPosition"], "rotation": tr["m_LocalRotation"],
+                     "matrix": w.transform_matrix(tr["m_Father"]["m_PathID"], view.v),
                      "icon": view.v(icon)["m_LocalPosition"] if icon and icon in prefab.by_pid and prefab.by_pid[icon].classid == 4 else None})
     def buttons(script):
         return [{"id": str(pid), "menu": view.path(view.v(pid)["m_GameObject"]["m_PathID"]), "radial": view.v(pid)["radialMenuPosition"]}
@@ -104,6 +105,51 @@ def read_layout(path):
             "slots": sorted({b["slot"] for b in bays if b["canLaunch"]})}
 
 
+def realign_spec(layout, rows=None, step_y=3.0, step_z=4.0):
+    """Bay edits that lay a ship's cloned launch bays out as mirrored port/starboard pairs.
+
+    The templates are the launch+dock bays without "_slot" in their name (Mercury: PortRear / StarboardRear). Every
+    launch bay named after a template (the template and its clones, PortRear_slot4, ...) takes part. Sorted by slot,
+    consecutive slots form pairs: the lower slot on the port side (x < 0), the higher one mirrored to starboard. Pair k
+    goes to a grid that starts at the port template: column k % columns moves step_z along the ship, row k // columns
+    moves step_y up (local units of the bays' parent). Each bay takes its side's template rotation, launch path and
+    icon offset (the icon marker is a child of the bay, so it moves with it). Returns (bay rows, notes)."""
+    bays = layout["bays"]
+    templates = [b for b in bays if b["canLaunch"] and b["canDock"] and "_slot" not in b["name"]]
+    port = next((b for b in templates if b["position"]["x"] < 0), None)
+    starboard = next((b for b in templates if b["position"]["x"] > 0), None)
+    if not port or not starboard:
+        raise ValueError("realigning needs a port and a starboard launch+dock bay to copy (Mercury: PortRear / StarboardRear)")
+    names = tuple(t["name"] for t in templates)
+    group = sorted((b for b in bays if b["canLaunch"] and b["name"].startswith(names)), key=lambda b: (b["slot"], b["name"]))
+    if len({b["slot"] for b in group}) != len(group):
+        raise ValueError("two realigned bays share a slot; give each slot one launch bay first")
+    pairs = [group[i:i + 2] for i in range(0, len(group), 2)]
+    rows = rows or (1 if len(pairs) <= 3 else 2)
+    columns = -(-len(pairs) // rows)
+    base = port["position"]
+    out, notes = [], []
+    for k, pair in enumerate(pairs):
+        y, z = base["y"] + step_y * (k // columns), base["z"] + step_z * (k % columns)
+        for bay, template, sign in zip(pair, (port, starboard), (-1, 1)):
+            row = {"id": bay["id"], "position": {"x": sign * abs(template["position"]["x"]), "y": y, "z": z},
+                   "rotation": template["rotation"], "launchPath": template["launchPath"],
+                   # name it after its side and slot (StarboardRear_slot7); the stock bays keep their names
+                   "name": template["name"] if bay["id"] == template["id"] else "%s_slot%d" % (template["name"], bay["slot"])}
+            if template["icon"] is not None and bay["icon"] is not None:
+                row["icon"] = template["icon"]
+            out.append(row)
+            notes.append("slot %d: %s, %s at y %.2f, z %.2f" % (bay["slot"], row["name"], "port" if sign < 0 else "starboard", y, z))
+    moved = {row["id"]: row["position"] for row in out}
+    spots = [(b["name"], moved.get(b["id"], b["position"])) for b in bays]
+    closest = min(((sum((p[a] - q[a]) ** 2 for a in "xyz") ** 0.5, n, m) for i, (n, p) in enumerate(spots) for m, q in spots[i + 1:]
+                   if not (moved.get(next(b["id"] for b in bays if b["name"] == n)) is None and
+                           moved.get(next(b["id"] for b in bays if b["name"] == m)) is None)), default=None)
+    if closest:
+        notes.append("closest pair involving a moved bay: %s / %s, %.2f units apart" % (closest[1], closest[2], closest[0]))
+    return out, notes
+
+
 def _pptrs(value, out):
     """every local PPtr path id inside a parsed object"""
     if isinstance(value, dict):
@@ -118,7 +164,7 @@ def _pptrs(value, out):
 
 
 def apply(src, dst, spec, encrypt=True):
-    """spec = {revision, bays: [{id, position?, slot?, canLaunch?, canDock?, dockRange?, compat?}],
+    """spec = {revision, bays: [{id, position?, rotation?, launchPath?, icon?, slot?, canLaunch?, canDock?, dockRange?, compat?}],
                removeSlots: [slot numbers], removeMunitions: [FireMissileAction ids]}
     Writes dst and returns {log, removedSlots, removedMunitions} so the caller can lower the ship's slot counts."""
     bundle, prefab = _open(src)
@@ -150,11 +196,33 @@ def apply(src, dst, spec, encrypt=True):
             compat = sorted({int(x) for x in row["compat"]})
             if compat != sorted(lp["LaunchCompatibility"]):
                 log.append("%s: launch types %s -> %s" % (name, lp["LaunchCompatibility"], compat)); lp["LaunchCompatibility"] = compat
-        if "position" in row:
+        if "position" in row or "rotation" in row:
             t_pid = view.transform_of(lp["m_GameObject"]["m_PathID"]); tr = fields(t_pid)
-            new = {axis: float(row["position"][axis]) for axis in "xyz"}
-            if any(abs(new[a] - tr["m_LocalPosition"][a]) > 1e-6 for a in "xyz"):
-                log.append("%s: moved to %.2f, %.2f, %.2f" % (name, new["x"], new["y"], new["z"])); tr["m_LocalPosition"] = new
+            if "position" in row:
+                new = {axis: float(row["position"][axis]) for axis in "xyz"}
+                if any(abs(new[a] - tr["m_LocalPosition"][a]) > 1e-6 for a in "xyz"):
+                    log.append("%s: moved to %.2f, %.2f, %.2f" % (name, new["x"], new["y"], new["z"])); tr["m_LocalPosition"] = new
+            if "rotation" in row:
+                new = {axis: float(row["rotation"][axis]) for axis in "xyzw"}
+                if any(abs(new[a] - tr["m_LocalRotation"][a]) > 1e-6 for a in "xyzw"):
+                    log.append("%s: rotation set" % name); tr["m_LocalRotation"] = new
+        if row.get("name"):
+            go = lp["m_GameObject"]["m_PathID"]; gf = fields(go)
+            if gf["m_Name"] != row["name"]:
+                log.append("%s: renamed to %s" % (gf["m_Name"], row["name"])); gf["m_Name"] = str(row["name"]); name = gf["m_Name"]
+        if "launchPath" in row:
+            path = [{axis: float(p[axis]) for axis in "xyz"} for p in row["launchPath"]]
+            if not path:
+                raise ValueError("%s needs at least one launch path point" % name)
+            if path != lp["LaunchPoints"]:
+                log.append("%s: launch path set (%d point(s))" % (name, len(path))); lp["LaunchPoints"] = path
+        if row.get("icon") is not None:
+            icon = lp["iconPosition"]["m_PathID"]
+            if not icon or icon not in prefab.by_pid or prefab.by_pid[icon].classid != 4:
+                raise ValueError("%s has no icon marker to move" % name)
+            it = fields(icon); new = {axis: float(row["icon"][axis]) for axis in "xyz"}
+            if any(abs(new[a] - it["m_LocalPosition"][a]) > 1e-6 for a in "xyz"):
+                log.append("%s: icon marker at %.2f, %.2f, %.2f" % (name, new["x"], new["y"], new["z"])); it["m_LocalPosition"] = new
 
     launchers = {pid: view.v(pid) for pid in view.ordered("MissileLauncher", root)}
     for row in spec.get("launchers") or []:
