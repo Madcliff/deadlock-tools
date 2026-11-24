@@ -34,6 +34,7 @@ from deadlock_tools import config
 from deadlock_tools import commander_editor as cmod
 from deadlock_tools import localisation as loc
 from deadlock_tools import shipdb as sd
+from deadlock_tools import ship_types as stypes
 from deadlock_tools import weapon_db as wd
 from deadlock_tools import weapons as wmod
 
@@ -1279,6 +1280,38 @@ class Project:
                 "backup": backup, "cmd": " ".join(cmd[3:])}
 
     # ---- DLL patches (the work-tree copy is the continuing source) ----
+    def managed_dir(self):
+        """The game's Managed folder (Unity references for DLL builds)."""
+        levels = self.levels if os.path.isdir(self.levels) else os.path.dirname(self.levels)
+        candidates = [os.path.join(levels, "Managed"), os.path.dirname(self.dll)]
+        if self.bundles:
+            candidates.insert(1, os.path.join(os.path.dirname(self.bundles), "Managed"))
+        return next((path for path in candidates if os.path.isfile(os.path.join(path, "UnityEngine.CoreModule.dll"))), None)
+
+    def keep_ship_types(self, dll_path, previous, stage_dir):
+        """Put back ShipType enum members a rebuilt DLL lost.
+
+        Rebuilding from a clean base drops enum members added for copied
+        ships; without them, adding the ship to a fleet throws
+        KeyNotFoundException. Restores `previous` members (the replaced DLL)
+        and covers every ship ID in the work level tables. Edits dll_path.
+        """
+        current = stypes.members(dll_path)
+        level_ids = stypes.level_ship_ids(dll_path, [self.src_for(f) for f in self.table_files])
+        wanted = stypes.missing(current, previous, level_ids)
+        if not wanted:
+            return ""
+        managed = self.managed_dir()
+        if not managed:
+            raise ValueError("Could not find the game's Managed folder needed to keep custom ship types.")
+        output = dll_path + ".ship-types"
+        result = stypes.add(managed, dll_path, output, wanted, stage_dir)
+        if result.returncode or not os.path.isfile(output):
+            raise RuntimeError("could not keep custom ship types in the rebuilt DLL:\n" +
+                               (result.stdout + result.stderr)[-8000:])
+        os.replace(output, dll_path)
+        return result.stdout
+
     def dll_src(self, fresh=False):
         staged = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
         return self.dll if fresh or not os.path.isfile(staged) else staged
@@ -1298,9 +1331,15 @@ class Project:
         if o.get("munition_load") in (True, "true", 1, "1"): cmd.append("--munition-load")
         if str(o.get("repair_bay_actions", "")).strip(): cmd += ["--repair-bay-actions", str(o["repair_bay_actions"]).strip()]
         if not any(c.startswith("--") and c not in ("--command-step", "--command-first-rank") for c in cmd[base:]): raise ValueError("fill in at least one patch value")
-        if o.get("fresh") in (True, "true", 1, "1"): cmd.append("--fresh")
+        fresh = o.get("fresh") in (True, "true", 1, "1")
+        if fresh: cmd.append("--fresh")
+        previous = stypes.members(dst) if fresh and os.path.isfile(dst) else {}
         r = self.run_staged("dll", cmd, 300)
-        return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr).replace(self.stage_root, self.work), "dst": dst}
+        output = r.stdout + r.stderr
+        if r.returncode == 0 and fresh and os.path.isfile(dst):
+            with self.lock:
+                output += self.keep_ship_types(dst, previous, self.stage_dir("dll"))
+        return {"ok": r.returncode == 0, "output": output.replace(self.stage_root, self.work), "dst": dst}
 
     def editor_update(self, bundle_path, patches=None):
         """Keep bundle, custom-module DLL, and repair shortcut assets in sync in the work overlay."""
@@ -1432,11 +1471,15 @@ class Project:
         logs += run.stdout + run.stderr
         if run.returncode or not os.path.isfile(candidate):
             raise RuntimeError("custom-module DLL build failed:\n" + logs[-16000:])
+        # The build starts from the clean base, which has none of the ship
+        # types added for copied ships. Carry them over from the DLL being replaced.
+        previous_types = stypes.members(existing_dll) if os.path.isfile(existing_dll) else {}
+        logs += self.keep_ship_types(candidate, previous_types, transaction_root)
 
         asset_outputs = []
         if shortcut_count:
             from deadlock_tools.repair_shortcuts import update_key_assets
-            update_key_assets(self.levels, key_stage, shortcut_count)
+            update_key_assets(self.levels, key_stage, shortcut_count, managed)
             for name in ("level3", "resources.assets"):
                 path = os.path.join(key_stage, name)
                 if not os.path.isfile(path):

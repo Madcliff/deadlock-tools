@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 5 ]]; then
-  echo "Usage: $0 GAME_MANAGED INPUT_DLL OUTPUT_DLL SHIP_ID ENUM_NAME" >&2
+if [[ $# -lt 4 ]]; then
+  echo "Usage: $0 GAME_MANAGED INPUT_DLL OUTPUT_DLL ID=NAME [ID=NAME ...]" >&2
+  echo "       $0 GAME_MANAGED INPUT_DLL OUTPUT_DLL SHIP_ID ENUM_NAME" >&2
   exit 2
 fi
 
@@ -20,4 +21,4 @@ trap 'rm -rf "$work_dir"' EXIT
 
 mcs -out:"$work_dir/add_ship_type_enum.exe" -r:"$cecil" "$repo_dir/scripts/add_ship_type_enum.cs"
 BSG_MANAGED_DIR="$managed_dir" mono "$work_dir/add_ship_type_enum.exe" \
-  "$input_dll" "$output_dll" "$4" "$5"
+  "$input_dll" "$output_dll" "${@:4}"
