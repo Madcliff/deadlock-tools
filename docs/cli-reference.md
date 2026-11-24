@@ -58,15 +58,17 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 | Respace cloned mounts | `--respace SELECTOR=GAP` (move existing clones so every turret is at least GAP game units apart; originals stay put) |
 | Scale the whole ship | `--ship-scale S` (absolute, 1 = stock; turrets keep their size). See [docs/game/ship-scale.md](game/ship-scale.md) |
 | Control turret placement | `--layout offset\|mid\|free`, `--offset`, `--gap`, `--min-gap`, `--no-mirror`, `--no-hull-follow` |
-| Add carrier and munition controls | `--fighter-slots`, `--utility-slots`, `--munition-slots`, `--bay-offset`, `--icon-offset`, `--slot-parts`, `--split-squadrons`, `--squadron-groups` |
+| Add carrier and munition controls | `--fighter-slots`, `--utility-slots`, `--munition-slots`, `--bay-offset`, `--icon-offset`, `--slot-parts`, `--split-squadrons`, `--squadron-groups` (submenu sizes in slot order, any number of groups; they must add up to FighterSlots + UtilityFighterSlots and never change those counts) |
+| Edit launch bays, munition launchers, remove slots | `--list-bays` (ids), `--bay-layout FILE.json`. See [docs/game/launch-bays.md](game/launch-bays.md) |
 | Align bay types with database slot order or move a marker | `--align-launch-bays` with both slot totals, `--bay-icon SLOT=X,Y,Z` (repeatable) |
 | Passive ship systems | `--hull-regen` (positive, hull only), `--munition-factory` |
 | Custom ship modules | `--custom-armour-repair`, `--custom-squadron-replacement`, `--custom-drone-resupply`, `--custom-magazine-capacity`, `--custom-emp-pulse`, `--custom-targeted-emp` |
+| Subsystem crew modifiers | `--subsystem-modifier STAT:SOURCE:MIN:MAX` (repeatable; replaces the ship's list), `--clear-subsystem-modifiers`. `--inspect` lists them. See [docs/game/subsystems.md](game/subsystems.md) |
 | Micro-FTL | `--mini-jump`, `--jump-range`, `--jump-delay`, `--jump-duration`, `--jump-cooldown` |
 | Predictive Augury | `--augury`, `--augury-uses` |
 | Stealth | `--stealth ORION_BUNDLE`, `--stealth-battery`, `--stealth-start`, `--stealth-mesh` |
 | Defender and Celestra support abilities | `--turnaround-repair-bay`, `--targeted-resupply`, `--deploy-plating`, `--technical-support`, `--marine-reinforcement` |
-| Override support donor bundles | `--defender-donor PATH`, `--celestra-donor PATH` |
+| Override support donor bundles | `--defender-donor PATH`, `--celestra-donor PATH` (default: `colonialdefender` / `colonialcelestra` from the configured bundle folder, then the work folder) |
 | Tune Deploy Plating | `--plating-supply`, `--plating-drone-load`, `--plating-facing-cap`, `--plating-rate` |
 | Group abilities in the battle menu | `--ability-submenu` |
 
@@ -75,7 +77,12 @@ python -m deadlock_tools weapons colonialmercury --inspect
 python -m deadlock_tools weapons colonialmercury --clone fore=1 --clone-scale 0.7 --mini-jump
 python -m deadlock_tools weapons colonialmercury --hull-regen 0.2 --custom-armour-repair
 python -m deadlock_tools weapons colonialmercury --custom-targeted-emp --ability-submenu
+python -m deadlock_tools weapons colonialmercurymk2 --subsystem-modifier squadron_repair:hangar:0:0.5 --subsystem-modifier 201::1:2
 ```
+
+In `--subsystem-modifier`, STAT is a crew-stat number or name (`102`, `squadron_repair`) and SOURCE is `0`–`6` or a
+subsystem name (`hangar`, `Tech Bay`). An empty SOURCE means the stat's own subsystem (201 → Armoury). MIN is the bonus
+at 0 source health and MAX the bonus at full health, in veterancy `BonusAmount` units (0.5 = +50% for percentage stats).
 
 The last two commands are a separate recipe. Combine the desired prefab options in one `weapons` call to keep both sets of edits when using the same input. Micro-FTL needs a compatible prefab, including an FTL effect and Tech Lab. Stealth needs the Orion bundle as a donor. The tool reports missing components and radial-menu capacity errors.
 
@@ -99,7 +106,7 @@ Instant Plating also queues its effect: activation applies the configured extra 
 
 Use `--turnaround-repair-actions N` to add or reconcile 1–8 independent turnaround repair bays. The tool writes one
 repair module and one Fighters action per bay; the matching DLL creates a launch-slot button per module and assigns
-indexed shortcuts. To install the ability on a new bundle, also pass `--turnaround-repair-bay --defender-donor PATH`.
+indexed shortcuts. To install the ability on a new bundle, also pass `--turnaround-repair-bay` (the Defender donor is picked automatically).
 
 ## UI layout
 

@@ -162,9 +162,11 @@ class Regression(unittest.TestCase):
         donor_paths = {name: donor_folder / ("colonial" + name + ".dec")
                        for name in ("defender", "celestra")}
         if not all(path.is_file() for path in donor_paths.values()):
-            self.skipTest("Defender and Celestra donor bundles must be alongside the Mercury fixture")
+            # the donors are picked automatically from the bundle folder (--bundles below), no --*-donor flags
+            self.skipTest("colonialdefender.dec and colonialcelestra.dec must be alongside the Mercury fixture")
 
-        fields = {entry["dest"] for entry in Project.bundle_form(None)}
+        from types import SimpleNamespace
+        fields = {entry["dest"] for entry in Project.bundle_form(SimpleNamespace(bundle_files=list))}
         self.assertTrue(SUPPORT_ABILITIES.keys() <= fields)
         initial = os.path.join(self.out, "initial")
         self.run_tool("weapons", str(mercury), "-o", initial, "--no-encrypt",

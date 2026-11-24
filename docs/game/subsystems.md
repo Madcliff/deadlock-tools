@@ -126,5 +126,9 @@ stats it is an absolute amount added to the value. Because the hook is inside `G
   `bonusMax`). Later damage changes only the **live** stats.
 - Squadron evade (401) is read with the squadron's mothership, so an entry on a carrier affects its squadrons.
 
+Edit them with `weapons --subsystem-modifier STAT:SOURCE:MIN:MAX` (repeatable, replaces the list) or
+`--clear-subsystem-modifiers`, or in the GUI's **Subsystem crew modifiers** card on the Ships tab (saved by Save ship,
+which also rebuilds the custom-module DLL when a bundle carries the component).
+
 The Colonial Mercury Mk II round trip (add, edit, remove, re-add) is covered by `tests/test_subsystem_modifiers.py`.
 The patched DLL has been built and checked in IL, but it has not been tested in game yet.

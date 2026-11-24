@@ -701,6 +701,44 @@ SUPPORT_ABILITIES = {
 }
 
 
+def print_bay_layout(layout):
+    """--list-bays: everything a --bay-layout spec can refer to, with its id"""
+    fmt = lambda p: "%.2f, %.2f, %.2f" % (p["x"], p["y"], p["z"])
+    print("launch bays (LaunchPoint), in hierarchy order:")
+    for bay in layout["bays"]:
+        flags = "+".join(name for name, on in (("launch", bay["canLaunch"]), ("dock", bay["canDock"])) if on) or "neither"
+        print("  %s  slot %d  %-6s types %s  dock range %g  at %s  %s" % (
+            bay["id"], bay["slot"], flags, bay["compat"], bay["dockRange"], fmt(bay["position"]), bay["path"]))
+    print("launch buttons (LaunchFightersAction), button i launches slot i:")
+    for index, button in enumerate(layout["launchButtons"]):
+        print("  %d  %s  %s" % (index, button["id"], button["menu"]))
+    print("munition buttons (FireMissileAction), one per munition slot:")
+    for index, button in enumerate(layout["munitionButtons"]):
+        print("  %d  %s  %s" % (index, button["id"], button["menu"]))
+    print("munition launchers (MissileLauncher):")
+    for launcher in layout["launchers"]:
+        print("  %s  %d launch point(s)  at %s  %s" % (launcher["id"], len(launcher["launchPoints"]), fmt(launcher["position"]), launcher["path"]))
+
+
+def default_support_donor(donor, bundles=None, ability=None):
+    """The stock donor bundle (colonialdefender / colonialcelestra) for a support ability.
+
+    Looks in the configured ship-bundle folder first, so a modded work-tree copy of the donor is
+    only used when no stock one is configured; then falls back to find_bundle's search order."""
+    name = "colonial" + donor
+    folder = config.setting("bundles", bundles, required=False)
+    for candidate in (name, name + ".dec"):
+        if folder and os.path.isfile(os.path.join(folder, candidate)):
+            return os.path.join(folder, candidate)
+    try:
+        return find_bundle(name, bundles)
+    except SystemExit:
+        flag = "--" + (ability or donor).replace("_", "-")
+        raise SystemExit("%s copies its parts from the %s bundle, but %s(.dec) is not in the configured bundle folder "
+                         "(%s) or the work folder. Copy it there from the game's StreamingAssets or pass --%s-donor PATH."
+                         % (flag, donor.capitalize(), name, folder or "not set", donor)) from None
+
+
 def load_support_donor(path):
     bundle = read_bundle(path)
     offset, size, *_ = bundle["nodes"][0]
@@ -719,7 +757,6 @@ def load_support_donor(path):
 EDITABLE_ABILITY_MODULES = {
     "RegenerativeHullResinModule": "Hull and armour regeneration",
     "MunitionFactoryModule": "Munition Factory",
-    "Armory": "Armory munition work rate",
     "CustomArmourRepairModule": "Custom armour repair",
     "CustomInstantPlatingModule": "Instant plating",
     "CustomSquadronReplacementModule": "Custom squadron replacement",
@@ -3052,6 +3089,8 @@ LIMITS
     g_custom.add_argument("--custom-magazine-capacity", action="store_true", help="add the standalone magazine capacity multiplier module; requires the custom-module DLL")
     g_custom.add_argument("--custom-emp-pulse", action="store_true", help="add Experimental EMP: queue a start-of-turn pulse that disrupts enemy ships/fighters, jams fighters with the native evade penalty, and destroys enemy missiles; range, delay, cooldown, stun and jam duration are configurable; requires the custom-module DLL")
     g_custom.add_argument("--custom-targeted-emp", action="store_true", help="add Targeted EMP: each per-turn charge selects one PCM 3D point; all queued enemy-only bursts fire at turn start; charge count, target range, blast size, delay, burst spacing, fighter stun and evade-jam durations are configurable; requires the custom-module DLL")
+    g_custom.add_argument("--subsystem-modifier", action="append", default=[], metavar="STAT:SOURCE:MIN:MAX", help="replace the ship's subsystem crew modifiers with these entries (repeatable): crew STAT (number or name, e.g. 102 or squadron_repair) gets a bonus from SOURCE subsystem's health (0-6 or name; empty = the stat's own subsystem), MIN at 0 health to MAX at full health, in veterancy BonusAmount units (0.25 = +25%% for percent stats). See docs/game/subsystems.md; requires the custom-module DLL")
+    g_custom.add_argument("--clear-subsystem-modifiers", action="store_true", help="remove the ship's subsystem crew modifiers component")
     g_weap.add_argument("--no-hull-follow", action="store_true", help="skip the hull check. By default every clone is raised out of the hull if it would sit lower than the mount it was copied from (reads the hull mesh from the bundle)")
     g_abil.add_argument("--mini-jump", action="store_true", help="give the ship the micro-FTL jump (Cylon Argos style): adds the MiniJumpAgent and the jump button in the Actions radial menu. The ship needs an FTLEffect component (Mercury, Jupiter, Argos have one)")
     g_abil.add_argument("--jump-range", default="200,10", help="--mini-jump: horizontal,vertical jump range in game units (default 200,10 = Argos)")
@@ -3082,8 +3121,10 @@ LIMITS
                                 metavar=metavar, help=f"set {description}; blank keeps the source value")
     g_abil.add_argument("--technical-support", action="store_true", help="add Defender subsystem support (requires a Raptor-compatible launch bay and a Raptor in battle)")
     g_abil.add_argument("--marine-reinforcement", action="store_true", help="add Defender friendly marine reinforcement (requires a Raptor-compatible launch bay and a Raptor in battle)")
-    g_abil.add_argument("--defender-donor", help="bundle path or name to use for abilities sourced from a Defender")
-    g_abil.add_argument("--celestra-donor", help="bundle path or name to use for abilities sourced from a Celestra")
+    g_abil.add_argument("--defender-donor", help="bundle path or name to copy Defender abilities from (default: colonialdefender in the configured bundle folder)")
+    g_abil.add_argument("--celestra-donor", help="bundle path or name to copy Celestra abilities from (default: colonialcelestra in the configured bundle folder)")
+    g_slot.add_argument("--bay-layout", metavar="FILE.json", help="edit launch bays, munition launchers and slot buttons from a JSON spec: {bays: [{id, position, slot, canLaunch, canDock, dockRange, compat}], launchers: [{id, position, launchPoints}], removeSlots: [slot], removeMunitions: [button id], removeLaunchers: [id], revision?}. Ids come from --list-bays. Removing slots does not change the level files: lower FighterSlots / UtilityFighterSlots / MunitionSlots to match. See docs/game/launch-bays.md")
+    g_slot.add_argument("--list-bays", action="store_true", help="print the launch bays, launch and munition buttons and munition launchers with the ids --bay-layout uses, then exit")
     g_slot.add_argument("--align-launch-bays", action="store_true", help="match launch bay compatibility to the requested fighter and utility slot counts")
     g_slot.add_argument("--mirror-launch-bays", action="store_true", help="mirror adjacent fighter launch bays across the ship in port/starboard pairs")
     g_slot.add_argument("--bay-icon", action="append", default=[], metavar="SLOT=X,Y,Z", help="set the local icon marker position for an existing or newly cloned bay (repeatable; use --inspect to see current coordinates)")
@@ -3105,6 +3146,9 @@ def main():
     if a.stealth: a.stealth = find_bundle(a.stealth, a.bundles)
     stem = os.path.basename(a.src)[:-4] if a.src.endswith(".dec") else os.path.basename(a.src)
     a.encrypt = not a.no_encrypt
+    if a.list_bays:
+        from deadlock_tools import bays as bay_mod
+        print_bay_layout(bay_mod.read_layout(a.src)); return
     if a.list_mounts or a.inspect: a.dst = os.devnull
     elif not a.dst: a.dst = os.path.join(config.out_dir("bundles", a.out), stem if a.encrypt else stem + ".dec")
     for f in (original, a.src):
@@ -3118,12 +3162,32 @@ def main():
         for ability, (_, _, donor) in SUPPORT_ABILITIES.items():
             if getattr(a, ability):
                 name = getattr(a, donor + "_donor")
-                if not name:
-                    raise SystemExit("choose a donor bundle with --%s-donor from the configured bundle folder" % donor)
-                support_abilities[ability] = decrypted(find_bundle(name, a.bundles))
+                path = find_bundle(name, a.bundles) if name else default_support_donor(donor, a.bundles, ability)
+                support_abilities[ability] = decrypted(path)
         if a.turnaround_repair_actions > 1 and "turnaround_repair_bay" not in support_abilities:
             support_abilities["turnaround_repair_bay"] = None
     try:
+        from deadlock_tools import subsystem_modifiers as sm
+        if a.subsystem_modifier and a.clear_subsystem_modifiers:
+            raise ValueError("use either --subsystem-modifier or --clear-subsystem-modifiers, not both")
+        modifier_entries = [sm.parse_spec(text) for text in a.subsystem_modifier]
+        bay_spec = None
+        if a.bay_layout and not (a.list_mounts or a.inspect):
+            with open(a.bay_layout, encoding="utf-8") as source:
+                bay_spec = json.load(source)
+            if not isinstance(bay_spec, dict):
+                raise ValueError("--bay-layout must hold a JSON object")
+            if bay_spec.get("revision") and bay_spec["revision"] != layout_revision(read_bundle(a.src)):
+                raise ValueError("The bundle changed since the bay layout was read. Reload it before saving.")
+            if bay_spec.get("removeSlots") or bay_spec.get("removeMunitions"):
+                from deadlock_tools import bays as bay_mod
+                current = bay_mod.read_layout(a.src)
+                adds_launch = a.fighter_slots is not None and a.utility_slots is not None and \
+                    a.fighter_slots + a.utility_slots > len(current["launchButtons"])
+                adds_munitions = a.munition_slots is not None and a.munition_slots > len(current["munitionButtons"])
+                if adds_launch or adds_munitions:
+                    raise ValueError("remove slots with --bay-layout or add them with --fighter-slots / --utility-slots / "
+                                     "--munition-slots, not both in one run")
         mount_layout = None
         if a.mount_layout:
             with open(a.mount_layout, encoding="utf-8") as source:
@@ -3167,6 +3231,21 @@ def main():
             support_settings=configured_support_settings(a) if not (a.list_mounts or a.inspect) else {},
             turnaround_repair_actions=a.turnaround_repair_actions, mount_layout=mount_layout,
         )
+        if bay_spec:
+            from deadlock_tools import bays as bay_mod
+            spec = {key: value for key, value in bay_spec.items() if key != "revision"}   # checked against the source above
+            result = bay_mod.apply(tmp, tmp, spec, encrypt=False)
+            for line in result["log"]: print("bay layout: " + line)
+            print("bay layout: %d bays, %d launch buttons, %d munition buttons, %d munition launchers" % (
+                result["bays"], result["launchButtons"], result["munitionButtons"], result["launchers"]))
+        if a.inspect:
+            entries = sm.read(a.src)["entries"]
+            print("subsystem crew modifiers: %s" % (len(entries) or "none"))
+            for entry in entries: print("  " + sm.describe(entry))
+        elif (modifier_entries or a.clear_subsystem_modifiers) and not a.list_mounts:
+            entries = sm.apply(tmp, tmp, modifier_entries)["entries"]
+            print("subsystem crew modifiers: %d entr%s" % (len(entries), "y" if len(entries) == 1 else "ies") if entries else "subsystem crew modifiers removed")
+            for entry in entries: print("  " + sm.describe(entry))
     except ValueError as error:
         raise SystemExit(str(error)) from None
     if a.list_mounts or a.inspect: return

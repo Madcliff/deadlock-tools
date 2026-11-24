@@ -59,6 +59,22 @@ def num(x):
     return float("%.7g" % x) if isinstance(x, float) else x
 
 
+def bundle_stats_with_modifiers(path):
+    """bundle_ship_stats plus the ship's subsystem crew modifiers and the stat/source catalog for the editor."""
+    from deadlock_tools import subsystem_modifiers as sm
+    result = wmod.bundle_ship_stats(path)
+    try:
+        entries, error = sm.read(path)["entries"], None
+    except ValueError as exc:
+        entries, error = [], str(exc)
+    result["subsystem_modifiers"] = {
+        "entries": entries, "error": error,
+        "stats": [{"code": code, "name": info["name"], "mode": info["mode"], "when": info.get("when"),
+                   "stock_source": sm.stock_source(code)} for code, info in sm.STATS.items()],
+        "sources": [{"code": code, "label": labels[1]} for code, labels in sm.SOURCES.items()],
+    }
+    return result
+
 class Project:
     def __init__(self, levels, dll, work, bundles):
         ab = lambda x: os.path.abspath(x) if x else x                  # the helper tools run from the script's folder, so no relative paths
@@ -964,7 +980,7 @@ class Project:
         for g in ap._action_groups:
             if g.title in ("positional arguments", "options"): continue
             for a in g._group_actions:
-                if not a.option_strings or a.dest in ("help", "out", "bundles", "inspect") or a.help == argparse.SUPPRESS: continue
+                if not a.option_strings or a.dest in ("help", "out", "bundles", "inspect", "bay_layout", "list_bays") or a.help == argparse.SUPPRESS: continue   # bays: Weapon layout view
                 donor_choice = a.dest in ("defender_donor", "celestra_donor", "stealth")
                 choices = self.bundle_files() if donor_choice else (list(a.choices) if a.choices else None)
                 kind = "choice" if donor_choice else "bool" if isinstance(a, argparse._StoreTrueAction) else "choice" if a.choices else "list" if isinstance(a, argparse._AppendAction) else "text"
@@ -1202,9 +1218,24 @@ class Project:
             return result
 
     def bundle_layout(self, bundle):
+        from deadlock_tools import bays as bymod
         with self.lock:
             path, _ = self.bundle_src(bundle)
             result = wmod.bundle_mount_layout(path)
+            try:
+                bay_layout = bymod.read_layout(path)
+            except (ValueError, KeyError, StopIteration) as error:     # not a ship prefab with bays
+                result["bays"] = {"error": str(error)}
+            else:
+                for item in bay_layout["bays"] + bay_layout["launchers"]:
+                    item["inverse"] = wmod.inverse_transform(item["matrix"])
+                try:
+                    names = {t["id"]: t["name"] for t in self.allocations()["types"]}
+                except Exception:                                        # squadron table unreadable: show numbers
+                    names = {}
+                result["bays"] = {key: bay_layout[key] for key in ("bays", "launchers", "launchButtons", "munitionButtons")}
+                result["bays"]["squadronTypes"] = {str(k): v for k, v in sorted(names.items())}
+                result["bays"]["fighterTypes"] = sorted(wmod.FIGHTER_SQUADRON_TYPES)
             mount = self.S.typedef_index("WeaponMountPoint")
             signature = next(sig for name, sig, _ in self.S.fields(mount) if name == "WeaponType")
             _, enum_index, _ = sd.Reader(self.S, b"").token(signature, 2)
@@ -1231,7 +1262,7 @@ class Project:
         cmd = tool_cmd("weapons") + [src, "-o", self.stage_root] + (["--bundles", self.bundles] if self.bundles else [])
         for a in ap._actions:
             v = opts.get(a.dest)
-            if not a.option_strings or a.dest in ("help", "out", "bundles", "encrypt", "mount_layout") or v in (None, "", False): continue
+            if not a.option_strings or a.dest in ("help", "out", "bundles", "encrypt", "mount_layout", "bay_layout", "list_bays") or v in (None, "", False): continue
             if isinstance(a, argparse._StoreTrueAction): cmd.append(a.option_strings[-1])
             elif isinstance(a, argparse._AppendAction):
                 for line in str(v).splitlines():
@@ -1248,15 +1279,23 @@ class Project:
             if not inspect: self.prepare_stage("bundles")
             produced = os.path.join(self.stage_dir("bundles"), outname) if not inspect else None
             if produced and os.path.exists(produced): os.unlink(produced)
-            if mount_layout is None:
+            bay_layout = None
+            if mount_layout is not None:
+                mount_layout = dict(mount_layout); bay_layout = mount_layout.pop("bays", None)
+                if not mount_layout.get("changes"): mount_layout = None
+            if mount_layout is None and not bay_layout:
                 r = run_cmd(cmd, 900)
             else:
                 import tempfile
                 with tempfile.TemporaryDirectory(prefix="layout-", dir=self.stage_root) as directory:
-                    spec = os.path.join(directory, "mounts.json")
-                    with open(spec, "w", encoding="utf-8") as stream:
-                        json.dump(mount_layout, stream)
-                    r = run_cmd(cmd + ["--mount-layout", spec], 900)
+                    extra = []
+                    for name, flag, value in (("mounts.json", "--mount-layout", mount_layout), ("bays.json", "--bay-layout", bay_layout)):
+                        if not value: continue
+                        spec = os.path.join(directory, name)
+                        with open(spec, "w", encoding="utf-8") as stream:
+                            json.dump(value, stream)
+                        extra += [flag, spec]
+                    r = run_cmd(cmd + extra, 900)
             if r.returncode == 0 and not inspect:
                 if not os.path.isfile(produced):
                     r = subprocess.CompletedProcess(cmd, 1, r.stdout, r.stderr + "\nExpected bundle output was not created: " + str(produced))
@@ -1365,6 +1404,7 @@ class Project:
         custom_types = {"CustomArmourRepairModule", "CustomSquadronReplacementModule",
                         "CustomDroneResupplyModule", "CustomMagazineCapacityModule",
                         "CustomInstantPlatingModule", "CustomInstantPlatingAction"}
+        custom_types.add("CustomSubsystemModifiers")
         custom_types.update({"CustomEmpPulseModule", "CustomEmpPulseAction",
                              "CustomTargetedEmpModule", "CustomTargetedEmpAction"})
         module_count = sum(name in custom_types for name in component_names)
@@ -1399,7 +1439,7 @@ class Project:
             if any(signature in source_bytes for signature in (b"CustomArmourRepairModule", b"CustomSquadronReplacementModule",
                                                                b"CustomDroneResupplyModule", b"CustomMagazineCapacityModule",
                                                                b"CustomRepairBaySlots", b"CustomInstantPlatingModule",
-                                                               b"CustomCommanderStatModifiers")):
+                                                               b"CustomCommanderStatModifiers", b"CustomSubsystemModifiers")):
                 raise ValueError("the configured DLL already has custom modules, but no clean base exists. Put a clean Assembly-CSharp.dll at " + base_dll)
             shutil.copy2(self.dll, base_dll)
 
@@ -1728,7 +1768,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/bundle/stats":
                 path, _ = P.bundle_src(body["bundle"])
                 with P.lock:
-                    return self.send(wmod.bundle_ship_stats(path))
+                    return self.send(bundle_stats_with_modifiers(path))
             if self.path == "/api/bundle/run":
                 layout = body.get("mount_layout")
                 if layout is not None and not isinstance(layout, dict): raise ValueError("Invalid weapon layout.")
@@ -1808,6 +1848,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 .layout-placement p{margin:6px 0 0}
 .layout-workspace canvas.placing-turret{outline:2px solid var(--accent)}
 .layout-properties{display:grid;gap:10px}
+.layout-compat{display:grid;gap:2px;max-height:220px;overflow:auto}.layout-compat label.f.chk{display:flex;flex-direction:row;gap:6px;align-items:center;justify-content:flex-start;text-align:left}.layout-slots tr.removed td{text-decoration:line-through;opacity:.6}.layout-slots tr.removed td:last-child{text-decoration:none;opacity:1}
 .layout-vector{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0;border:1px solid var(--line);border-radius:6px}
 .layout-properties input,.layout-properties select{width:100%;min-width:0;box-sizing:border-box}
 @media(max-width:850px){.layout-workspace:not([hidden]){grid-template-columns:1fr}}
@@ -1862,6 +1903,19 @@ function syncBundleStatFromLevel(dbField,value){
  const input=activeBundle.stats.querySelector('[data-prefab-field="'+HULL_ARMOUR_LINKS[dbField]+'"]');if(!input)return;
  syncingHullArmour=true;input.value=String(Number(value));input.dispatchEvent(new Event('input',{bubbles:true}));syncingHullArmour=false;refreshHullArmourLinkUI(activeBundle);
 }
+function checkSquadronGroups(input){
+ const groups=input.value.split(',').map(value=>value.trim()).filter(Boolean);
+ const fighters=Number(shipFieldValue('FighterSlots')),support=Number(shipFieldValue('UtilityFighterSlots'));
+ let message='';
+ if(groups.length&&!groups.every(value=>/^\d+$/.test(value)&&Number(value)>0))message='Use positive whole numbers separated by commas, e.g. 4,2,2.';
+ else if(groups.length&&Number.isInteger(fighters)&&Number.isInteger(support)){
+   const total=groups.reduce((sum,value)=>sum+Number(value),0);
+   if(total!==fighters+support)message='The groups add up to '+total+', but the ship has '+(fighters+support)+' squadron slots ('+fighters+' fighter + '+support+' support).';
+ }
+ input.setCustomValidity(message);input.title=message;
+ const note=input.parentElement?.querySelector('.groups-check');
+ if(note){note.textContent=message;note.hidden=!message}
+}
 function syncBundleSlotInputs(name,value){
  if(syncingSlotValues||!activeBundle?.slots)return;
  const target={MunitionSlots:'munition_slots',FighterSlots:'fighter_slots',UtilityFighterSlots:'utility_slots'}[name];
@@ -1870,8 +1924,17 @@ function syncBundleSlotInputs(name,value){
  if(name==='FighterSlots'||name==='UtilityFighterSlots'){
    const groups=activeBundle.slots.querySelector('[data-d="squadron_groups"]'),split=activeBundle.slots.querySelector('[data-d="split_squadrons"]');
    const fighters=Number(shipFieldValue('FighterSlots')),support=Number(shipFieldValue('UtilityFighterSlots'));
-   if(groups&&!groups.dataset.manual){if(split?.checked)groups.value='';else if(Number.isInteger(fighters)&&Number.isInteger(support))groups.value=[fighters,support].filter(count=>count>0).join(',')}
+   // Refill only the default fighter/support split; a bundle or user layout with other groups is kept and re-checked.
+   const simple=groups&&groups.value.split(',').filter(value=>value.trim()).length<=2;
+   if(groups&&!groups.dataset.manual&&simple){if(split?.checked)groups.value='';else if(Number.isInteger(fighters)&&Number.isInteger(support))groups.value=[fighters,support].filter(count=>count>0).join(',')}
+   if(groups)checkSquadronGroups(groups);
  }
+}
+// The bundle's slot button counts after the bay editor's pending removals (Weapon layout view).
+function plannedStats(bundle){
+ const stats=bundle?.statsResult;if(!stats)return stats;
+ const removed=bundle.layout?.removals?.()||{slots:0,munitions:0};
+ return removed.slots||removed.munitions?{...stats,launch_actions:stats.launch_actions-removed.slots,munition_actions:stats.munition_actions-removed.munitions}:stats;
 }
 function bundleOptionValues(bundle){
  const opts={};
@@ -1882,7 +1945,7 @@ function bundleOptionValues(bundle){
 function shipBundleChanges(bundle,strict=false){
  const empty={count:0,options:{},changedOptions:[],prefab:{},layout:null};
  if(!bundle?.stats?.dataset.source||!bundle.optionBaseline)return empty;
- const stats=bundle.statsResult||{},opts=bundleOptionValues(bundle),base=bundle.optionBaseline,changed=[];
+ const stats=plannedStats(bundle)||{},opts=bundleOptionValues(bundle),base=bundle.optionBaseline,changed=[];
  for(const [name,value] of Object.entries(opts)){
    if(['munition_slots','fighter_slots','utility_slots'].includes(name))continue;
    if(String(value)!==String(base[name]??''))changed.push(name);
@@ -1891,6 +1954,8 @@ function shipBundleChanges(bundle,strict=false){
  const slotValue=name=>String(opts[name]??'').trim();
  if(slotValue('munition_slots')&&Number(slotValue('munition_slots'))!==stats.munition_actions)changed.push('munition_slots');
  if(slotValue('fighter_slots')&&slotValue('utility_slots')&&Number(slotValue('fighter_slots'))+Number(slotValue('utility_slots'))!==stats.launch_actions)changed.push('fighter_slots','utility_slots');
+ const groupsInput=bundle.slots?.querySelector('[data-d="squadron_groups"]');
+ if(strict&&changed.includes('squadron_groups')&&groupsInput&&!groupsInput.checkValidity())throw new Error('Squadron groups: '+groupsInput.validationMessage);
  const options={};
  for(const [name,value] of Object.entries(opts)){
    if(['munition_slots','fighter_slots','utility_slots','squadron_groups'].includes(name)&&!changed.includes(name))continue;
@@ -2134,7 +2199,11 @@ function weaponLayout(bundle){
  const panel=el('section',{class:'card',hidden:true,'aria-label':'Weapon layout'});
  const status=el('p',{class:'hint',role:'status'});
  const canvas=el('canvas',{width:720,height:440,'aria-label':'Weapon mount projection. Use the mount selector to edit with the keyboard.'});
- const mountSelect=el('select',{'aria-label':'Weapon mount',onchange:()=>{active=mountSelect.selectedIndex;renderFields();draw()}});
+ const mountSelect=el('select',{'aria-label':'Selected object',onchange:()=>{
+   if(layer==='mounts')active=mountSelect.selectedIndex;else sel[layer]=mountSelect.selectedIndex;renderFields();draw()}});
+ const layerSelect=el('select',{'aria-label':'Edit',onchange:()=>{layer=layerSelect.value;placing=false;render()}},
+   [['mounts','Turrets'],['bays','Launch bays'],['launchers','Munition launchers']].map(([value,text])=>el('option',{value},text)));
+ const slotPanel=el('div',{class:'layout-slots'});
  const views={Top:['x','z'],Side:['z','y'],Front:['x','y']};
  const projection=el('select',{'aria-label':'Projection',onchange:draw},Object.keys(views).map(name=>el('option',{value:name},name)));
  const fields=el('div',{class:'layout-properties'});
@@ -2152,15 +2221,27 @@ function weaponLayout(bundle){
  const placement=el('div',{class:'layout-placement'},el('div',{class:'row'},
    el('label',{class:'f'},'New turret weapon',newWeapon),placeNear,cancelAdd),
    el('p',{class:'hint'},'Click a position in the hull view. The new turret inherits depth and facing from a nearby mount; refine them after placing.'));
- const tools=el('div',{class:'row layout-tools'},mountSelect,projection,addButton);
+ const tools=el('div',{class:'row layout-tools'},layerSelect,mountSelect,projection,addButton);
  const reload=el('button',{class:'sec',onclick:()=>{if(!dirty()||confirm('Discard unsaved weapon layout changes?'))load(true)}},'Reload');
  const changed=()=>{if(typeof updPend==='function')updPend()};
- panel.append(el('h3',{},'Weapon layout'),el('p',{class:'hint'},'Layout changes are saved with the rest of the ship by Save ship in the top bar.'),status,tools,placement,workspace,el('div',{class:'row layout-footer'},reload));
+ panel.append(el('h3',{},'Weapon layout'),el('p',{class:'hint'},'Turrets, squadron launch bays and munition launchers. Changes are saved with the rest of the ship by Save ship in the top bar.'),status,tools,placement,workspace,slotPanel,el('div',{class:'row layout-footer'},reload));
  let source='', loaded='', revision='', rows=[], original=[], hull=[], weapons={}, quadrants=[], active=0, request=0, busy=false, drag, clipboard, placing=false;
+ let layer='mounts', bayInfo=null, bays=[], bayOriginal=[], launchers=[], launcherOriginal=[], sel={bays:0,launchers:0};
+ let removedSlots=new Set(), removedMunitions=new Set(), removedLaunchers=new Set(), levelBase=null;
+ const bayEditable=bay=>({id:bay.id,position:bay.position,slot:bay.slot,canLaunch:bay.canLaunch,canDock:bay.canDock,dockRange:bay.dockRange,compat:[...bay.compat].sort((a,b)=>a-b)});
+ const launcherEditable=item=>({id:item.id,position:item.position,launchPoints:item.launchPoints});
+ const bayGone=bay=>removedSlots.has(bay.slot);
+ const bayChanges=()=>bays.filter((bay,index)=>!bayGone(bay)&&JSON.stringify(bayEditable(bay))!==JSON.stringify(bayEditable(bayOriginal[index]))).map(bayEditable);
+ const launcherChanges=()=>launchers.filter((item,index)=>!removedLaunchers.has(item.id)&&JSON.stringify(launcherEditable(item))!==JSON.stringify(launcherEditable(launcherOriginal[index]))).map(launcherEditable);
+ const bayCount=()=>bayChanges().length+launcherChanges().length+removedSlots.size+removedMunitions.size+removedLaunchers.size;
+ const baySpec=()=>bayCount()?{revision,bays:bayChanges(),launchers:launcherChanges(),removeSlots:[...removedSlots].sort((a,b)=>a-b),
+   removeMunitions:[...removedMunitions],removeLaunchers:[...removedLaunchers]}:null;
+ const layerItems=()=>layer==='bays'?bays:layer==='launchers'?launchers:rows;
+ const itemGone=item=>layer==='bays'?bayGone(item):layer==='launchers'?removedLaunchers.has(item.id):false;
  const editable=row=>({id:row.id,clone:Boolean(row.clone),new_mount:Boolean(row.newMount),weapon:row.weapon,quadrant:row.quadrant,
    scale:row.scale,angles:row.angles,position:row.position});
  const changes=()=>rows.filter((row,index)=>row.clone||JSON.stringify(editable(row))!==JSON.stringify(editable(original[index]))).map(editable);
- const dirty=()=>changes().length>0;
+ const dirty=()=>changes().length>0||bayCount()>0;
  const label=(title,input)=>el('label',{class:'f'},title,input);
  const transform=(matrix,vector)=>Object.fromEntries([... 'xyz'].map((axis,i)=>[axis,
    matrix[i][3]+[... 'xyz'].reduce((sum,key,j)=>sum+matrix[i][j]*vector[key],0)]));
@@ -2170,7 +2251,7 @@ function weaponLayout(bundle){
 
  function setSource(file,defer=false){
    if(file===source)return;
-   source=file;loaded='';revision='';rows=[];original=[];hull=[];request++;busy=false;drag=null;
+   source=file;loaded='';revision='';rows=[];original=[];hull=[];request++;busy=false;drag=null;resetBays(null);
    placing=false;render();
    if(!panel.hidden&&!defer)load();
  }
@@ -2183,26 +2264,39 @@ function weaponLayout(bundle){
      const result=await api('/api/bundle/layout',{bundle:current});
      if(token!==request)return;
      ({revision,quadrants,weapons,hull}=result);loaded=current;
-     original=result.mounts;rows=structuredClone(original);active=0;
+     original=result.mounts;rows=structuredClone(original);active=0;resetBays(result.bays);
      const addTypes={...Object.fromEntries(original.map(row=>[row.weapon,'Type '+row.weapon])),...weapons};
      newWeapon.replaceChildren(...Object.entries(addTypes).map(([id,name])=>el('option',{value:id},name)));
-     status.textContent=rows.length?'Select a mount or drag it in the projection. Position fields are local to its parent.':'This bundle has no weapon mounts to use as a template for adding a turret.';
+     status.textContent=rows.length?'Select an object or drag it in the projection. Position fields are local to its parent.':'This bundle has no weapon mounts to use as a template for adding a turret.';
    }catch(error){if(token===request)status.textContent=error.message}
    finally{if(token===request){busy=false;render()}}
+ }
+ function resetBays(info){
+   bayInfo=info&&!info.error?info:null;
+   bays=bayInfo?structuredClone(bayInfo.bays):[];bayOriginal=bayInfo?structuredClone(bayInfo.bays):[];
+   launchers=bayInfo?structuredClone(bayInfo.launchers):[];launcherOriginal=bayInfo?structuredClone(bayInfo.launchers):[];
+   sel={bays:0,launchers:0};removedSlots=new Set();removedMunitions=new Set();removedLaunchers=new Set();levelBase=null;
+   for(const option of layerSelect.options)if(option.value!=='mounts')option.disabled=!(option.value==='bays'?bays.length:launchers.length);
+   if(layerSelect.selectedOptions[0]?.disabled){layer='mounts';layerSelect.value='mounts'}
  }
  function render(){
    const ready=loaded===source&&rows.length>0;
    tools.hidden=workspace.hidden=!ready;
    reload.disabled=busy||!source;
    changed();
-   mountSelect.replaceChildren(...rows.map((row,index)=>el('option',{value:String(index)},row.name+(row.clone?' (new)':''))));
-   mountSelect.selectedIndex=active;
-   renderPlacement();renderFields();draw();
+   const items=layerItems(),index=layer==='mounts'?active:sel[layer];
+   mountSelect.replaceChildren(...items.map((item,i)=>el('option',{value:String(i)},
+     layer==='bays'?item.name+' · slot '+item.slot+(bayGone(item)?' (removed)':''):
+     layer==='launchers'?item.name+(removedLaunchers.has(item.id)?' (removed)':''):item.name+(item.clone?' (new)':''))));
+   mountSelect.selectedIndex=index;
+   addButton.hidden=layer!=='mounts';
+   renderPlacement();renderFields();renderSlots();draw();
  }
  function draw(){
    if(!context||!rows.length)return;
    const [h,v]=views[projection.value];
-   const reference=[...original.map(row=>transform(row.matrix,row.position)),...hull.map(([x,y,z])=>({x,y,z}))];
+   const reference=[...original.map(row=>transform(row.matrix,row.position)),...hull.map(([x,y,z])=>({x,y,z})),
+     ...bayOriginal.map(bay=>transform(bay.matrix,bay.position)),...launcherOriginal.map(item=>transform(item.matrix,item.position))];
    const span=axis=>[Math.min(...reference.map(p=>p[axis])),Math.max(...reference.map(p=>p[axis]))];
    const [minH,maxH]=span(h),[minV,maxV]=span(v);
    const scale=Math.min(630/Math.max(1,maxH-minH),350/Math.max(1,maxV-minV));
@@ -2217,16 +2311,37 @@ function weaponLayout(bundle){
    ctx.font='14px sans-serif';ctx.fillStyle='#a9bdd2';ctx.fillText(h.toUpperCase(),694,420);ctx.fillText(v.toUpperCase(),14,20);
    ctx.fillStyle='#405568';
    for(const [x,y,z] of hull){const [a,b]=toPoint({x,y,z});ctx.fillRect(a,b,2,2)}
-   points=rows.map(row=>toPoint(transform(row.matrix,row.position)));
-   const marker=(i,selected)=>{
-     const [x,y]=points[i];ctx.beginPath();ctx.arc(x,y,selected?8:5,0,Math.PI*2);
-     ctx.fillStyle=selected?'#f9bc60':rows[i].clone?'#85e0b0':'#82bdf5';ctx.fill();
-     if(selected){ctx.strokeStyle='#fff';ctx.stroke()}
+   const turretPoints=rows.map(row=>toPoint(transform(row.matrix,row.position)));
+   const bayPoints=bays.map(bay=>toPoint(transform(bay.matrix,bay.position)));
+   const launcherPoints=launchers.map(item=>toPoint(transform(item.matrix,item.position)));
+   points=layer==='bays'?bayPoints:layer==='launchers'?launcherPoints:turretPoints;
+   const current=layer==='mounts'?active:sel[layer];
+   const shape=(kind,[x,y],r)=>{
+     ctx.beginPath();
+     if(kind==='bays')ctx.rect(x-r,y-r,2*r,2*r);
+     else if(kind==='launchers'){ctx.moveTo(x,y-r*1.2);ctx.lineTo(x+r,y+r*0.8);ctx.lineTo(x-r,y+r*0.8);ctx.closePath()}
+     else ctx.arc(x,y,r,0,Math.PI*2);
    };
-   points.forEach((_,index)=>{if(index!==active)marker(index,false)});
-   marker(active,true);
+   const colour=(kind,item)=>kind==='bays'?(bayGone(item)?'#6b3a3a':item.canLaunch?'#c39bf0':'#7a8fa3')
+     :kind==='launchers'?(removedLaunchers.has(item.id)?'#6b3a3a':'#f08a7a'):item.clone?'#85e0b0':'#82bdf5';
+   for(const [kind,list,pts] of [['mounts',rows,turretPoints],['bays',bays,bayPoints],['launchers',launchers,launcherPoints]]){
+     ctx.globalAlpha=kind===layer?1:0.35;
+     list.forEach((item,i)=>{if(kind===layer&&i===current)return;shape(kind,pts[i],kind===layer?5:4);ctx.fillStyle=colour(kind,item);ctx.fill()});
+   }
+   ctx.globalAlpha=1;
+   if(points[current]){
+     shape(layer,points[current],8);ctx.fillStyle='#f9bc60';ctx.fill();ctx.strokeStyle='#fff';ctx.stroke();
+     const item=layerItems()[current];
+     if(layer==='bays'&&item.launchPath?.length||layer==='launchers'&&item.launchPoints?.length){   // launch path, local to the object
+       const base=transform(item.matrix,item.position),path=(layer==='bays'?item.launchPath:item.launchPoints).map(p=>toPoint({x:base.x+p.x,y:base.y+p.y,z:base.z+p.z}));
+       ctx.strokeStyle='#f9bc60';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(...points[current]);path.forEach(p=>ctx.lineTo(...p));ctx.stroke();ctx.setLineDash([]);
+     }
+   }
+   ctx.font='12px sans-serif';ctx.fillStyle='#a9bdd2';
+   ctx.fillText('● turrets  ■ launch bays  ▲ munition launchers',14,432);
  }
  function renderFields(){
+   if(layer!=='mounts'){renderObjectFields();return}
    const row=rows[active];
    fields.replaceChildren();
    if(!row)return;
@@ -2264,6 +2379,93 @@ function weaponLayout(bundle){
    fields.append(title,label('Weapon',select(types,'weapon')),label('Quadrant',select(facing,'quadrant')),vector('Local position','position'),
      vector('Initial angles','angles'),label('Weapon mesh scale',number(row.scale,value=>{row.scale=value},row.scale===0?0:0.000001)),
      el('div',{class:'row'},duplicate,reset),el('div',{class:'row'},copy,paste));
+ }
+ function renderObjectFields(){
+   const item=layerItems()[sel[layer]];
+   fields.replaceChildren();
+   if(!item)return;
+   const gone=itemGone(item);
+   const edit=()=>{changed();draw();renderSlots()};
+   const number=(value,write,attrs={})=>el('input',{type:'number',step:'any',required:true,value,disabled:busy||gone,...attrs,
+     oninput:event=>{const input=event.target;if(input.validity.valid&&Number.isFinite(input.valueAsNumber))write(input.valueAsNumber);edit()}});
+   const vector=(name,target)=>el('fieldset',{class:'layout-vector'},el('legend',{},name),...[... 'xyz'].map(axis=>
+     label(axis.toUpperCase(),number(round(target[axis]),value=>{target[axis]=value}))));
+   const original=(layer==='bays'?bayOriginal:launcherOriginal)[sel[layer]];
+   const reset=el('button',{type:'button',class:'sec',disabled:busy||gone,onclick:()=>{
+     (layer==='bays'?bays:launchers)[sel[layer]]=structuredClone(original);render()}},'Reset');
+   if(layer==='bays'){
+     const check=(text,key,help)=>el('label',{class:'f chk',title:help},el('input',{type:'checkbox',checked:item[key],disabled:busy||gone,
+       onchange:event=>{item[key]=event.target.checked;edit()}}),text);
+     const names=bayInfo.squadronTypes||{},fighterTypes=new Set(bayInfo.fighterTypes||[]);
+     const known=[...new Set([...Object.keys(names).map(Number),...item.compat,...bayOriginal.flatMap(bay=>bay.compat)])].sort((a,b)=>a-b);
+     const compat=el('fieldset',{class:'layout-compat'},el('legend',{},'Squadron types it can launch / dock'),
+       ...known.map(code=>el('label',{class:'f chk'},el('input',{type:'checkbox',checked:item.compat.includes(code),disabled:busy||gone,onchange:event=>{
+         item.compat=event.target.checked?[...item.compat,code]:item.compat.filter(value=>value!==code);edit()}}),
+         (names[code]||'type '+code)+' ('+code+(fighterTypes.has(code)?', fighter':', support')+')')));
+     fields.append(el('strong',{},item.name),el('span',{class:'hint'},item.path),
+       label('Slot (launches this squadron slot)',number(item.slot,value=>{item.slot=Math.round(value)},{step:1,min:0})),
+       el('div',{class:'row'},check('Can launch','canLaunch','Squadrons leave from here'),check('Can dock','canDock','Squadrons return here')),
+       label('Dock range',number(item.dockRange,value=>{item.dockRange=value},{min:0})),
+       vector('Local position','position'in item?item.position:{}),compat,
+       el('p',{class:'hint'},'Launch path: '+(item.launchPath?.length||0)+' point(s), drawn dashed from the selected bay.'+(item.icon?'':' No build-screen icon marker.')),
+       el('div',{class:'row'},reset));
+   }else{
+     const pointsBox=el('div',{class:'layout-points'});
+     const renderPoints=()=>pointsBox.replaceChildren(...item.launchPoints.map((point,index)=>el('div',{class:'row'},
+       vector('Launch point '+(index+1),point),
+       el('button',{type:'button',class:'sec',disabled:busy||gone||item.launchPoints.length<2,onclick:()=>{item.launchPoints.splice(index,1);renderPoints();edit()}},'Remove point'))));
+     renderPoints();
+     const alive=launchers.filter(other=>!removedLaunchers.has(other.id));
+     const needed=bayInfo.munitionButtons.length-removedMunitions.size>0;
+     const remove=el('button',{type:'button',class:'sec',disabled:busy||(!gone&&alive.length<=1&&needed),
+       title:'A ship with munition slots must keep at least one launcher',onclick:()=>{
+         if(gone)removedLaunchers.delete(item.id);else removedLaunchers.add(item.id);render()}},gone?'Keep launcher':'Remove launcher');
+     fields.append(el('strong',{},item.name),el('span',{class:'hint'},item.path),vector('Local position',item.position),
+       el('p',{class:'hint'},'Munitions leave from these points (offsets from the launcher).'),pointsBox,
+       el('div',{class:'row'},el('button',{type:'button',class:'sec',disabled:busy||gone,onclick:()=>{
+         item.launchPoints.push({...item.launchPoints[item.launchPoints.length-1]||{x:0,y:0,z:0}});renderPoints();edit()}},'Add point'),reset,remove));
+   }
+ }
+ // Squadron slots and munition slots: buttons in the battle radial menus. Removing one also lowers the ship's level count.
+ function renderSlots(){
+   slotPanel.replaceChildren();
+   if(!bayInfo||loaded!==source)return;
+   const launchButtons=bayInfo.launchButtons,munitionButtons=bayInfo.munitionButtons;
+   const slotNumbers=[...new Set([...bays.map(bay=>bay.slot),...launchButtons.map((_,index)=>index)])].sort((a,b)=>a-b);
+   const fighters=levelBase?levelBase.FighterSlots:Number(shipFieldValue('FighterSlots'));
+   const slotRows=slotNumbers.map(slot=>{
+     const owned=bays.filter(bay=>bay.slot===slot),gone=removedSlots.has(slot),button=launchButtons[slot];
+     return el('tr',{class:gone?'removed':''},el('td',{},String(slot)),el('td',{},Number.isFinite(fighters)?(slot<fighters?'fighter':'support'):''),
+       el('td',{},owned.map(bay=>bay.name).join(', ')||'no bay'),el('td',{},button?button.menu:'no button'),
+       el('td',{},el('button',{class:'sec',type:'button',disabled:busy||!owned.length||!button,onclick:()=>toggle(removedSlots,slot)},gone?'Keep':'Remove slot')));
+   });
+   const munitionRows=munitionButtons.map((button,index)=>{
+     const gone=removedMunitions.has(button.id);
+     return el('tr',{class:gone?'removed':''},el('td',{},String(index)),el('td',{},button.menu),el('td',{},'position '+button.radial),
+       el('td',{},el('button',{class:'sec',type:'button',disabled:busy,onclick:()=>toggle(removedMunitions,button.id)},gone?'Keep':'Remove')));
+   });
+   slotPanel.append(el('h4',{},'Squadron slots'),
+     el('p',{class:'hint'},'Slot i is launched by button i and leaves from the bays numbered i. Removing a slot removes its bays and button, renumbers the slots above it and lowers FighterSlots or UtilityFighterSlots (fighter slots come first).'),
+     el('table',{class:'agreement-table'},el('tr',{},...['Slot','Kind','Bays','Button menu',''].map(text=>el('th',{},text))),...slotRows),
+     el('h4',{},'Munition slots'),
+     el('p',{class:'hint'},'One button per munition slot. Removing one lowers MunitionSlots; a continuation page left empty loses its button too.'),
+     el('table',{class:'agreement-table'},el('tr',{},...['Slot','Menu','Radial',''].map(text=>el('th',{},text))),...munitionRows));
+ }
+ function toggle(set,value){
+   if(set.has(value))set.delete(value);else set.add(value);
+   syncLevelCounts();render();
+ }
+ function syncLevelCounts(){
+   if(!state.data||state.data.name!==bundle.ship)return;
+   if(!levelBase)levelBase={FighterSlots:Number(shipFieldValue('FighterSlots')),UtilityFighterSlots:Number(shipFieldValue('UtilityFighterSlots')),MunitionSlots:Number(shipFieldValue('MunitionSlots'))};
+   const fighterGone=[...removedSlots].filter(slot=>slot<levelBase.FighterSlots).length;
+   const want={FighterSlots:levelBase.FighterSlots-fighterGone,UtilityFighterSlots:levelBase.UtilityFighterSlots-(removedSlots.size-fighterGone),
+     MunitionSlots:levelBase.MunitionSlots-removedMunitions.size};
+   // Change only the level fields: the bundle's slot controls must stay as they are, or Save ship would also try to
+   // rebuild the slot buttons the bay layout is removing.
+   syncingSlotValues=true;
+   try{for(const [name,value] of Object.entries(want))if(Number(shipFieldValue(name))!==Math.max(0,value))setShipFieldValue(name,Math.max(0,value))}
+   finally{syncingSlotValues=false}
  }
  function renderPlacement(){
    addButton.disabled=busy||!original.some(row=>row.can_clone&&row.inverse)||rows.length-original.length>=1024;
@@ -2319,9 +2521,11 @@ function weaponLayout(bundle){
    }
    const hits=points.map(([a,b],i)=>[Math.hypot(a-x,b-y),i]).filter(([distance])=>distance<=13).sort((a,b)=>a[0]-b[0]);
    if(!hits.length)return;
-   active=hits.find(([,i])=>i===active)?.[1]??hits[0][1];
-   const row=rows[active];
-   if(row.inverse){
+   const current=layer==='mounts'?active:sel[layer];
+   const picked=hits.find(([,i])=>i===current)?.[1]??hits[0][1];
+   if(layer==='mounts')active=picked;else sel[layer]=picked;
+   const row=layerItems()[picked];
+   if(row.inverse&&!itemGone(row)){
      drag={id:event.pointerId,x,y,position:transform(row.matrix,row.position),local:{...row.position},frame};
      canvas.setPointerCapture(event.pointerId);
    }
@@ -2332,21 +2536,24 @@ function weaponLayout(bundle){
    const [x,y]=pointer(event),{h,v,scale}=drag.frame;
    if(!drag.moved&&x===drag.x&&y===drag.y)return;
    drag.moved=true;
-   const row=rows[active],point={...drag.position};
+   const row=layerItems()[layer==='mounts'?active:sel[layer]],point={...drag.position};
    point[h]+=(x-drag.x)/scale;point[v]-=(y-drag.y)/scale;
    row.position=x===drag.x&&y===drag.y?drag.local:Object.fromEntries(Object.entries(transform(row.inverse,point)).map(([key,value])=>[key,round(value)]));
    renderFields();draw();changed();
  });
  for(const name of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(name,()=>{drag=null});
- function refresh(){loaded='';rows=[];original=[];request++;busy=false;placing=false;render();if(!panel.hidden)load(true)}
+ function refresh(){loaded='';rows=[];original=[];request++;busy=false;placing=false;resetBays(null);render();if(!panel.hidden)load(true)}
  function pending(){
    if(!dirty())return null;
    if(!form.reportValidity())throw new Error('Enter valid weapon layout values.');
    if(loaded!==source)return null;
-   return {revision,changes:changes()};
+   const spec={revision,changes:changes()},bayLayout=baySpec();
+   if(bayLayout)spec.bays=bayLayout;
+   return spec;
  }
  render();
- return {panel,setSource,load,refresh,pending,count:()=>loaded===source?changes().length:0};
+ return {panel,setSource,load,refresh,pending,count:()=>loaded===source?changes().length+bayCount():0,
+   removals:()=>loaded===source?{slots:removedSlots.size,munitions:removedMunitions.size}:{slots:0,munitions:0}};
 }
 
 function shipBundleFields(ship,initialFile=''){
@@ -2375,7 +2582,7 @@ function shipBundleFields(ship,initialFile=''){
  const setOptionValue=(name,value)=>{const input=optionInput(name);if(input){input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}))}};
  const levelNumber=name=>Number(shipFieldValue(name));
  function agreementRows(){
-   const rows=[],stats=bundle.statsResult;
+   const rows=[],stats=plannedStats(bundle);
    if(!stats||!state.data||state.data.name!==bundle.ship)return rows;
    const ARMOUR_LABELS={MaxHullPoints:'Hull',ArmorFront:'Armour front',ArmorRear:'Armour rear',ArmorLeft:'Armour port',ArmorRight:'Armour starboard',ArmorTop:'Armour top',ArmorBottom:'Armour bottom'};
    for(const [dbField,prefabKey] of Object.entries(HULL_ARMOUR_LINKS)){
@@ -2401,9 +2608,10 @@ function shipBundleFields(ship,initialFile=''){
      pending:plannedLaunch!==null&&plannedLaunch!==stats.launch_actions,same:launch===fighters+support,
      useLevel:optionInput('fighter_slots')&&optionInput('utility_slots')?()=>{setOptionValue('fighter_slots',fighters);setOptionValue('utility_slots',support);
        const g=optionInput('squadron_groups'),split=bundle.slots.querySelector('[data-d="split_squadrons"]');
-       if(g&&!g.dataset.manual&&!split?.checked)g.value=[fighters,support].filter(count=>count>0).join(',')}:null,
-     useBundle:groups.length===2?()=>{setShipFieldValue('FighterSlots',groups[0]);setShipFieldValue('UtilityFighterSlots',groups[1])}
-       :launch>=support?()=>setShipFieldValue('FighterSlots',launch-support):null});
+       if(g&&!g.dataset.manual&&!split?.checked&&g.value.split(',').filter(value=>value.trim()).length<=2)g.value=[fighters,support].filter(count=>count>0).join(',');
+       if(g)checkSquadronGroups(g)}:null,
+     // Submenu groups say nothing about which slots are fighters or supports: keep the support count, fit the fighters.
+     useBundle:launch>=support?()=>setShipFieldValue('FighterSlots',launch-support):null});
    return rows;
  }
  bundle.refreshAgreement=()=>{
@@ -2648,6 +2856,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      bundle.stats.dataset.result=JSON.stringify(result);
      bundle.linkBox.disabled=!result.fields.some(field=>Object.values(HULL_ARMOUR_LINKS).includes(field.key));
      if(bundle.linkBox.checked)for(const field of Object.keys(HULL_ARMOUR_LINKS))if(state.pending[key(state.cur,field)])syncBundleStatFromLevel(field,shipFieldValue(field));
+     bundle.setSubsystemModifiers?.(result.subsystem_modifiers);
      bundle.statsResult=result;bundle.optionBaseline=bundleOptionValues(bundle);
      if(activeBundle===bundle)updPend();else bundle.refreshAgreement();
    }catch(error){
@@ -2758,27 +2967,21 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
     };
     i=el('input',attrs);return el('label',{class:'f chk',title:o.help},i,bundleFieldLabel(o))
   }
-  if(o.kind==='choice'){i=el('select',{'data-d':o.dest},[el('option',{value:''},o.choices?'Choose a bundle':'(default)'),...(o.choices||[]).map(c=>el('option',{value:c},c))])}
+  if(o.kind==='choice'){const autoDonor={defender_donor:'colonialdefender',celestra_donor:'colonialcelestra'}[o.dest];
+    i=el('select',{'data-d':o.dest},[el('option',{value:''},autoDonor?'Automatic ('+autoDonor+' from the configured bundle folder)':o.choices?'Choose a bundle':'(default)'),...(o.choices||[]).map(c=>el('option',{value:c},c))])}
   else if(o.kind==='list'){i=el('textarea',{'data-d':o.dest,rows:2,placeholder:'one per line, e.g. '+(o.metavar||'fore=1'),style:'padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'})}
   else i=el('input',{type:'text','data-d':o.dest,placeholder:o.default||o.metavar||''});
   if(o.dest==='squadron_groups')i.addEventListener('input',()=>{
     i.dataset.manual='1';
+    // Groups only split the launch buttons into Fighters submenus (any number of groups, in slot order).
+    // They never change FighterSlots / UtilityFighterSlots; a total that does not match is flagged instead.
     if(i.value.trim()){
       const split=bundle.slots.querySelector('[data-d="split_squadrons"]');if(split)split.checked=false;
-      const groups=i.value.split(',').map(value=>value.trim());
-      if(groups.length===2&&groups.every(value=>/^\d+$/.test(value))){
-        const [fighters,support]=groups.map(Number);
-        if(fighters+support>0){
-          syncingSlotValues=true;
-          const fighterInput=bundle.slots.querySelector('[data-d="fighter_slots"]'),supportInput=bundle.slots.querySelector('[data-d="utility_slots"]');
-          if(fighterInput)fighterInput.value=String(fighters);if(supportInput)supportInput.value=String(support);
-          setShipFieldValue('FighterSlots',fighters);setShipFieldValue('UtilityFighterSlots',support);
-          syncingSlotValues=false;
-        }
-      }
     }
+    checkSquadronGroups(i);
   });
-  return el('label',{class:'f',title:o.help},bundleFieldLabel(o),i,el('span',{class:'orig'},o.help))}));
+  return el('label',{class:'f',title:o.help},bundleFieldLabel(o),i,
+    o.dest==='squadron_groups'?el('span',{class:'msg-bad groups-check',hidden:true}):null,el('span',{class:'orig'},o.help))}));
   if(group==='Abilities'){
     const card=el('div',{class:'card'},el('h3',{},'Abilities'),bundle.installedAbilities,el('h4',{},'Add abilities'),el('p',{class:'hint'},'Multiple Actions-menu abilities are grouped under one Abilities submenu. Enabling the turnaround repair bay uses this ship’s database squadron counts and separates fighter and support launch buttons into submenus when needed to make room in the Fighters menu.'));
     const categories=new Map();
@@ -2793,7 +2996,9 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
     sections.append(card);
     continue;
   }
-  const grid=buildGrid(options);
+  const modifierDests=['subsystem_modifier','clear_subsystem_modifiers'];
+  const grid=buildGrid(options.filter(o=>!modifierDests.includes(o.dest)));
+  if(group==='Custom ship modules'&&options.some(o=>o.dest==='subsystem_modifier'))sections.append(subsystemModifierCard(bundle));
   if(group==='Squadron / munition slots'){
     slots.replaceChildren(el('h4',{},'Bundle slot controls'),el('p',{class:'hint'},'Leave blank to keep the bundle as it is. Level data ↔ bundle at the top compares these with the ship record.'),grid);
   }else if(group==='Custom ship modules'){
@@ -2816,6 +3021,67 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
  actions.replaceChildren(el('h3',{},'Saving the bundle'),
    el('label',{class:'f chk',title:'A .bak backup is made beside the file first'},bundle.overwriteBox,'Save over the opened bundle file instead of the work tree (makes a backup)'),
    el('div',{class:'row'},bundle.message),bundle.output);
+}
+// Subsystem crew modifiers (weapons --subsystem-modifier / --clear-subsystem-modifiers): a table editor that keeps
+// two hidden [data-d] inputs current, so Save ship's option diff and /api/bundle/run handle it like any other option.
+function subsystemModifierCard(bundle){
+ const spec=el('input',{type:'hidden','data-d':'subsystem_modifier'});
+ const clear=el('input',{type:'checkbox','data-d':'clear_subsystem_modifiers',hidden:true});
+ const body=el('div'),status=el('p',{class:'hint'},'Load a ship bundle to see its modifiers.');
+ let catalog={stats:[],sources:[]},rows=[],loadedCount=0;
+ const num=v=>Number(Number(v).toPrecision(7)).toString();
+ const statInfo=code=>catalog.stats.find(stat=>stat.code===Number(code));
+ const effect=row=>{
+   const info=statInfo(row.stat);
+   if(!info)return '';
+   if(!info.mode)return 'No stock game code reads this stat; only custom modules that use it as their crew-modifier field.';
+   const lo=Number(row.min),hi=Number(row.max);
+   const show=v=>info.mode==='percent'?(v>=0?'+':'')+num(v*100)+'%':(v>=0?'+':'')+num(v);
+   const when=info.when==='live'?'re-read during battle, so damage to the source lowers it':'read once at spawn, normally at full source health';
+   return show(lo)+' at 0 health → '+show(hi)+' at full health ('+(info.mode==='percent'?'percentage':'flat')+' bonus, '+when+').';
+ };
+ const sync=()=>{
+   spec.value=rows.map(row=>[row.stat,row.source,num(row.min),num(row.max)].join(':')).join('\n');
+   clear.checked=!rows.length&&loadedCount>0;
+   if(typeof updPend==='function')updPend();
+ };
+ const render=()=>{
+   if(!catalog.stats.length){body.replaceChildren();return}
+   const statOptions=selected=>catalog.stats.map(stat=>el('option',{value:stat.code,selected:stat.code===Number(selected)},
+     stat.name+' ('+stat.code+')'+(stat.mode?'':' · no stock effect')));
+   const sourceOptions=selected=>catalog.sources.map(source=>el('option',{value:source.code,selected:source.code===Number(selected)},source.label));
+   const lines=rows.map((row,index)=>{
+     const note=el('p',{class:'hint',style:'margin:2px 0 0'},effect(row));
+     const update=(name,value)=>{row[name]=value;note.textContent=effect(row);sync()};
+     const number=name=>el('input',{type:'number',step:'any',required:true,value:num(row[name]),style:'width:7em',
+       oninput:event=>{if(event.target.value!==''&&Number.isFinite(event.target.valueAsNumber))update(name,event.target.valueAsNumber)}});
+     return el('div',{style:'padding:6px 0;border-top:1px solid var(--line)'},
+       el('div',{class:'row'},
+         el('label',{class:'f'},'Crew stat',el('select',{onchange:event=>update('stat',Number(event.target.value))},...statOptions(row.stat))),
+         el('label',{class:'f'},'Source subsystem',el('select',{onchange:event=>update('source',Number(event.target.value))},...sourceOptions(row.source))),
+         el('label',{class:'f',title:'Bonus when the source subsystem is at 0 health'},'At 0 health',number('min')),
+         el('label',{class:'f',title:'Bonus when the source subsystem is at full health'},'At full health',number('max')),
+         el('button',{class:'sec',type:'button',onclick:()=>{rows.splice(index,1);render();sync()}},'Remove')),
+       note);
+   });
+   const add=el('button',{class:'sec',type:'button',onclick:()=>{
+     const stat=catalog.stats.find(item=>item.mode)||catalog.stats[0];
+     rows.push({stat:stat.code,source:stat.stock_source,min:0,max:0.1});render();sync();
+   }},'Add modifier');
+   body.replaceChildren(...lines,el('div',{class:'row',style:'margin-top:6px'},add));
+ };
+ bundle.setSubsystemModifiers=data=>{
+   catalog=data||{stats:[],sources:[]};
+   rows=(data?.entries||[]).map(entry=>({...entry}));loadedCount=rows.length;
+   status.className=data?.error?'msg-bad':'hint';
+   status.textContent=data?.error?'Cannot edit modifiers on this bundle: '+data.error
+     :rows.length?rows.length+' modifier'+(rows.length>1?'s':'')+' in this bundle.':'No modifiers in this bundle.';
+   spec.value=rows.map(row=>[row.stat,row.source,num(row.min),num(row.max)].join(':')).join('\n');clear.checked=false;
+   render();
+ };
+ return el('div',{class:'card'},el('h3',{},'Subsystem crew modifiers'),
+   el('p',{class:'hint'},'Let one subsystem’s health add to a crew stat, as a crew veterancy bonus would. The bonus runs linearly from the “0 health” value to the “full health” value. Percentage stats use 0.25 for +25%; flat stats add the number as is. It stacks with veterancy and applies even when crew veterancy is off. Needs the custom-module DLL, which Save ship rebuilds. Details: docs/game/subsystems.md.'),
+   status,body,spec,clear);
 }
 function bundleFieldLabel(option){
  const label=option.flag.replace(/^--/,'').replaceAll('-',' ');

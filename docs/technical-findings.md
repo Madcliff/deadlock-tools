@@ -45,6 +45,18 @@ Targeted EMP uses one per-turn charge for each activation. Each activation opens
 
 The 2026-11-21 fighter-duration update sets stun and evade-jam to 360 ticks (three turns), matching the vanilla Cylon Virus Mine jamming-field duration. The build is `work/candidates/Assembly-CSharp-emp-fighter-jam-360ticks.dll`; it includes the 32,000-point choice in skirmish PvP and co-op cap lists without changing the default. The DLL (SHA-256 `2bb49a653e2627ce5d2bf985dcd86214719b18b49bc79bdb7a3ddbc889cb6d06`) and Mercury bundle (SHA-256 `c8e31fd5f78f491a02aefebffcec6aa0057e10df36c07abdf8b8b06a1e3c0cc0`) were installed to both the work overlay and GOG install. Each prior DLL and bundle is backed up under `BSG_Data/.deadlock-backups/emp-fighter-duration-360ticks-20261121/`. The editor archive was rebuilt as `dist/deadlock.pyz` (SHA-256 `06b9174feb5c98a6884f9f1a097e474356d7f64273e0b033d4034d4ff44967668`). In-game verification of the fighter jam/evade penalty, targeting, EMP damage, missile destruction, and fleet-cap option remains outstanding. The game's `IsJammed` flag affects combat calculations but does not show a custom EMP duration/countdown badge; a fighter status indicator remains a useful follow-up.
 
+### Patching a custom-module build
+
+The custom-module build (`scripts/build_custom_modules.sh`) rewrites `Assembly-CSharp.dll` with Mono.Cecil. Cecil
+lays the method bodies out anew and stores identical bodies once: in the November 2026 build,
+`TurnaroundRepairBayAction.get_VisibleInShipInfoPanel` shares its `ldc.i4.0; ret` body with four other methods. So
+the patches that work at fixed file offsets of the stock build (the indexed repair-bay shortcut) must never touch a
+rebuilt DLL, and an in-place body edit there could change unrelated methods. The merge script installs the indexed
+shortcut itself (`get_ShortcutKey` returns 60 + radial position − 4), so `dll` treats a DLL that contains the custom
+module types as a custom build: `check` reads `get_ShortcutKey` through the metadata and reports it as built in,
+`patch --repair-bay-actions` only stages the key mappings, and a revert of everything leaves the built-in shortcut
+alone. Rank, command-node and munition-load patches find their sites by byte pattern and still apply.
+
 ## Bundle editing and dependencies
 
 ### Commander skill trees

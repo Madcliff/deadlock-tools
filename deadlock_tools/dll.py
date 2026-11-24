@@ -92,6 +92,44 @@ NOTES
     print("%s the munition load check (17 bytes at file offset 0x%x) -> %s" % ("restored" if a.revert else "patched", i, dst))
 
 
+CUSTOM_BUILD_MARKERS = (b"CustomRepairBaySlots", b"CustomArmourRepairModule", b"CustomSquadronReplacementModule",
+                        b"CustomCommanderStatModifiers", b"CustomSubsystemModifiers")
+
+
+def is_custom_build(data):
+    """True for a DLL rewritten by the custom-module build (Cecil): fixed-offset patches do not apply to it."""
+    return any(marker in data for marker in CUSTOM_BUILD_MARKERS)
+
+
+def _method_il(path, type_name, method_name):
+    """IL bytes of a method body, found through the metadata (works on Cecil-rewritten DLLs)."""
+    from deadlock_tools.shipdb import Meta
+    meta = Meta(path); types = meta.tab[0x02]; methods = meta.tab.get(0x06, [])
+    for i, row in enumerate(types):
+        if meta.s(row[1]) != type_name: continue
+        last = types[i + 1][5] - 1 if i + 1 < len(types) else len(methods)
+        for k in range(row[5] - 1, last):
+            if meta.s(methods[k][3]) == method_name and methods[k][0]:
+                at = meta.r2o(methods[k][0]); head = meta.d[at]
+                if head & 3 == 2:                                   # tiny header: size in the top 6 bits
+                    return meta.d[at + 1:at + 1 + (head >> 2)]
+                size = struct.unpack_from("<I", meta.d, at + 4)[0]  # fat header (12 bytes)
+                return meta.d[at + 12:at + 12 + size]
+    return None
+
+
+# get_ShortcutKey returning 60 + (RadialMenuPosition - 4): the binary patch below or the custom-module build's rewrite
+INDEXED_SHORTCUT_IL = re.compile(rb"\x02\x28...\x06(?:\x1a|\x1f\x04)\x59\x1f\x3c\x58\x2a\Z", re.S)
+
+
+def custom_build_shortcuts(path):
+    """'indexed' / 'original' / None for a custom-module build's TurnaroundRepairBayAction.get_ShortcutKey"""
+    il = _method_il(path, "TurnaroundRepairBayAction", "get_ShortcutKey")
+    if il is None: return None
+    if INDEXED_SHORTCUT_IL.match(il): return "indexed"
+    return "original" if il == bytes.fromhex("1f2f2a") else None
+
+
 def _dll_repair_bay_key(argv=None):
     """Give each turnaround repair action a unique indexed battle shortcut."""
     # Exact Assembly-CSharp build signature: TurnaroundRepairBayAction.get_ShortcutKey.
@@ -121,6 +159,22 @@ def _dll_repair_bay_key(argv=None):
     if not 1 <= a.actions <= 16:
         sys.exit("--actions must be between 1 and 16")
     data = bytearray(open(a.dll, "rb").read())
+    if is_custom_build(data):
+        # The custom-module build rewrites get_ShortcutKey itself (scripts/merge_custom_modules.cs); Cecil also moves
+        # and shares method bodies, so the fixed-offset patch below must never touch such a DLL.
+        state = custom_build_shortcuts(a.dll)
+        if a.check:
+            print("indexed repair-bay shortcut patch: %s" % {
+                "indexed": "built into the custom-module DLL",
+                "original": "not installed (custom-module DLL without repair-bay support)"}.get(state, "unknown (custom-module DLL)"))
+            return
+        if a.revert:
+            sys.exit("this custom-module DLL has the indexed repair shortcuts built in, so they cannot be reverted in place. "
+                     "They go away when the custom-module DLL is rebuilt for ships without turnaround repair actions "
+                     "(Save ship), or start from the original DLL (--fresh), which drops every custom module")
+        if state == "indexed":
+            sys.exit("already patched: nothing to do (the custom-module DLL provides the indexed shortcuts)")
+        sys.exit("this custom-module DLL has no indexed repair shortcuts; rebuild it with the custom modules instead of patching it in place")
     rva = struct.unpack_from("<I", data, RVA_FIELD)[0]
     cave = bytes(data[CAVE_OFFSET:CAVE_OFFSET + CAVE_SIZE])
     shortcut_original = (rva == ORIGINAL_RVA and
@@ -301,7 +355,11 @@ def main():
         if a.command_nodes is not None or every: nxt = os.path.join(tmp, "d.dll"); set_command_nodes(cur, None, 1, nxt); cur = nxt
         if a.munition_load or every: step(_dll_munition, ["--revert"], "e.dll")
         with open(cur, "rb") as stream:
-            repair_patch_was_installed = struct.unpack_from("<I", stream.read(0x5DB85E + 4), 0x5DB85E)[0] == 0x00937910
+            current = stream.read()
+        repair_patch_was_installed = len(current) > 0x5DB862 and struct.unpack_from("<I", current, 0x5DB85E)[0] == 0x00937910
+        if every and is_custom_build(current):
+            print("indexed repair shortcuts: built into this custom-module DLL, left as they are")
+            every = False
         if a.repair_bay_shortcuts or every:
             step(_dll_repair_bay_key, ["--revert"], "f.dll")
             if a.repair_bay_shortcuts or repair_patch_was_installed:

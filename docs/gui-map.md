@@ -19,6 +19,7 @@ that changed in one go:
 | Bundle prefab fields (hull, armour, subsystems, ability settings) | `work/BSG_Data/StreamingAssets/<bundle>` | `/api/bundle/run` → `weapons --prefab-fields` |
 | Bundle options (slots, systems, custom modules, abilities, output) | same bundle | `/api/bundle/run` → `weapons --<option>` |
 | Weapon layout (Weapon layout view) | same bundle | `/api/bundle/run` → `weapons --mount-layout` |
+| Launch bays, munition launchers, slot removals (Weapon layout view) | same bundle; level slot counts as level edits | `/api/bundle/run` → `weapons --bay-layout` |
 | Custom-module DLL, repair-shortcut assets | `work/BSG_Data/Managed/`, `level3`, `resources.assets` | `/api/editor/update` → `dll patch` + module build |
 
 The bundle is written once per save. Prerequisites such as turnaround-repair shortcuts are checked first. Under
@@ -33,9 +34,14 @@ Without it, the save goes into the work tree. **Discard changes** throws away le
 | **Level data ↔ bundle** | every value both files hold, side by side, with ✓/✗, per-row **Use level** / **Use bundle**, and *make all match* buttons; *Keep hull & armour linked while editing* | none (stages edits for Save ship); see [game/bundle-level-agreement.md](game/bundle-level-agreement.md) |
 | Field groups | level fields; bundle hull & armour and subsystems inside *Hull & armour*; bundle slot controls inside *Carrier & munition slots* | staged for Save ship |
 | Bundle option cards | Ship systems, Custom ship modules, Abilities (installed + add), Weapons, Output | staged for Save ship |
+| Subsystem crew modifiers | one row per modifier: crew stat, source subsystem, bonus at 0 and at full health, effect note; **Add modifier**, **Remove** | `/api/bundle/stats` (read, with the stat catalog); staged for Save ship → `weapons --subsystem-modifier … / --clear-subsystem-modifiers` |
 | Research, veterancy, advantages | per-ship research rows and veterancy ranks | staged for Save ship |
 | Ship localisation | opens the Localisation tab filtered to the ship | |
-| Weapon layout view | projection, drag mounts, add/clone/reset turrets, **Reload** | `/api/bundle/layout` (read); staged for Save ship |
+| Weapon layout view | **Edit** layer (Turrets / Launch bays / Munition launchers), projection, drag the selected layer's objects, **Reload** | `/api/bundle/layout` (read, includes `bays.read_layout`); staged for Save ship |
+| — Turrets | add/clone/reset turrets, weapon, quadrant, angles, mesh scale | `weapons --mount-layout` |
+| — Launch bays | slot, can launch / can dock, dock range, position, squadron types (named from the SquadronDataTable), launch path drawn dashed | `weapons --bay-layout` (`bays`) |
+| — Munition launchers | position, launch points (add/remove), **Remove launcher** (the last one stays while the ship has munition slots) | `weapons --bay-layout` (`launchers`, `removeLaunchers`) |
+| — Squadron slots / Munition slots tables | **Remove slot** / **Remove** per row (toggle back with **Keep**); lowers FighterSlots / UtilityFighterSlots / MunitionSlots as level edits | `weapons --bay-layout` (`removeSlots`, `removeMunitions`) |
 
 ## DLL
 

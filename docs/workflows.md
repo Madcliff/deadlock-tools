@@ -69,7 +69,7 @@ unpatched `Assembly-CSharp.dll` (configured DLL and `work/.deadlock-tools/base/`
 
 ## Add support abilities
 
-Select a ship, choose its bundle, and enable the desired controls under **Abilities**. Choose donor bundles from the live list for the configured ship-bundle folder; no fallback folders or donor filenames are assumed. Expand an ability to see its settings. For an existing module, open that bundle and enter only the values to change. **Inspect current bundle** shows which modules are present and their stored settings.
+Select a ship, choose its bundle, and enable the desired controls under **Abilities**. The donor bundles are picked automatically: `colonialdefender` and `colonialcelestra` from the configured ship-bundle folder (plain or `.dec`), then the work folder. Choose another bundle from the donor list only to override that. Expand an ability to see its settings. For an existing module, open that bundle and enter only the values to change. **Inspect current bundle** shows which modules are present and their stored settings.
 
 | Ability | Donor | Recipient requirements |
 |---|---|---|

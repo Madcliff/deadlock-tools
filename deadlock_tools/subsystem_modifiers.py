@@ -10,6 +10,7 @@ see ``docs/game/subsystems.md`` for which stats the game actually reads and when
 Function API (no printing, no argv):
     read(path) -> {"present": bool, "entries": [entry, ...]}
     apply(src, dst, entries) -> same shape, read back from dst
+    parse_spec("STAT:SOURCE:MIN:MAX") -> entry; describe(entry) -> str
 An entry is ``{"stat": int, "source": int, "min": float, "max": float}``. ``apply`` with an empty
 list removes the component. Encrypted input gives encrypted output; plain UnityFS stays plain.
 """
@@ -81,6 +82,44 @@ def stock_source(stat):
     """The subsystem whose crew drives this stat stock (the stat enum groups stats by hundreds)."""
     return min(stat // 100, 6)
 
+
+
+def _key(text):
+    return "".join(ch for ch in str(text).lower() if ch.isalnum())
+
+
+def _lookup(text, names, what):
+    text = str(text).strip()
+    try:
+        number = int(text)
+    except ValueError:
+        number = next((code for code, labels in names.items() if _key(text) in {_key(label) for label in labels}), None)
+    if number not in names:
+        raise ValueError("unknown %s %r" % (what, text))
+    return number
+
+
+def parse_spec(text):
+    """Parse 'STAT:SOURCE:MIN:MAX' (the weapons --subsystem-modifier value) into an entry.
+
+    STAT is a crew-stat number or name (e.g. 102 or squadron_repair); SOURCE is 0-6 or a subsystem
+    name (engineering, Tech Bay, TechLab); an empty SOURCE means the stat's stock subsystem.
+    """
+    parts = str(text).split(":")
+    if len(parts) != 4:
+        raise ValueError("--subsystem-modifier needs STAT:SOURCE:MIN:MAX, got %r" % text)
+    stat = _lookup(parts[0], {code: (info["name"],) for code, info in STATS.items()}, "crew stat")
+    source = stock_source(stat) if not parts[1].strip() else _lookup(parts[1], SOURCES, "source subsystem")
+    return _validate([{"stat": stat, "source": source, "min": parts[2], "max": parts[3]}])[0]
+
+
+def describe(entry):
+    """One readable line for an entry, with whether the stock game reads the stat."""
+    info = STATS.get(entry["stat"], {"name": "stat %s" % entry["stat"], "mode": None})
+    effect = ("%s, %s" % (info["mode"], info["when"])) if info.get("mode") else "no stock effect"
+    return "%s (%d) from %s: %g at 0 health -> %g at full health [%s]" % (
+        info["name"], entry["stat"], SOURCES.get(entry["source"], ("?", "source %s" % entry["source"]))[1],
+        entry["min"], entry["max"], effect)
 
 # ----- bundle plumbing ------------------------------------------------------------------
 

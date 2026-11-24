@@ -141,5 +141,26 @@ class RoundTripTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path("bad")))
 
 
+class ParseSpec(unittest.TestCase):
+    """weapons --subsystem-modifier values; no bundle needed."""
+
+    def test_names_numbers_and_stock_source(self):
+        self.assertEqual(sm.parse_spec("102:4:0:0.5"), {"stat": 102, "source": 4, "min": 0.0, "max": 0.5})
+        self.assertEqual(sm.parse_spec("squadron_repair:Hangar:0:0.5"), sm.parse_spec("102:4:0:0.5"))
+        self.assertEqual(sm.parse_spec("Marine strength:tech bay:1:2")["source"], 6)
+        self.assertEqual(sm.parse_spec("201::1:2")["source"], 2)          # empty source = the stat's own subsystem
+        self.assertEqual(sm.parse_spec("605:TechLab:-1:3")["min"], -1.0)
+
+    def test_rejects_bad_specs(self):
+        for bad in ("102:4:0", "bogus:1:0:1", "102:galley:0:1", "102:4:x:1", "102:4:0:inf"):
+            with self.assertRaises(ValueError, msg=bad):
+                sm.parse_spec(bad)
+
+    def test_describe(self):
+        line = sm.describe({"stat": 102, "source": 4, "min": 0.0, "max": 0.5})
+        self.assertIn("Squadron repair", line); self.assertIn("Hangar", line); self.assertIn("percent, live", line)
+        self.assertIn("no stock effect", sm.describe({"stat": 0, "source": 0, "min": 0, "max": 1}))
+
+
 if __name__ == "__main__":
     unittest.main()

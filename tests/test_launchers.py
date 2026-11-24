@@ -59,6 +59,33 @@ class Launchers(unittest.TestCase):
         with self.assertRaises(ValueError):
             bays.apply(BUNDLE, self.out("none"), {"removeLaunchers": [l["id"] for l in self.layout["launchers"]]})
 
+    def test_weapons_bay_layout_cli(self):
+        """weapons --bay-layout (what Save ship runs): revision check, edits applied after the other options."""
+        import json, subprocess, sys
+        from deadlock_tools import weapons as w
+        spec = {"revision": self.layout["revision"], "removeSlots": [max(self.layout["slots"])],
+                "bays": [{"id": self.layout["bays"][0]["id"], "dockRange": 7.5}]}
+        path = self.out("spec.json")
+        with open(path, "w") as stream:
+            json.dump(spec, stream)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        run = lambda *args: subprocess.run([sys.executable, "-m", "deadlock_tools", "weapons", BUNDLE, *args],
+                                           cwd=root, capture_output=True, text=True)
+        result = run(self.out("cli"), "--no-encrypt", "--bay-layout", path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = bays.read_layout(self.out("cli"))
+        self.assertEqual(len(after["launchButtons"]), len(self.layout["launchButtons"]) - 1)
+        self.assertEqual(next(b for b in after["bays"] if b["id"] == spec["bays"][0]["id"])["dockRange"], 7.5)
+        listing = run("--list-bays")
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertIn(self.layout["bays"][0]["id"], listing.stdout)
+        spec["revision"] = "0" * 64                                  # stale layout: refused, nothing written
+        with open(path, "w") as stream:
+            json.dump(spec, stream)
+        stale = run(self.out("stale"), "--no-encrypt", "--bay-layout", path)
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertFalse(os.path.exists(self.out("stale")))
+
 
 if __name__ == "__main__":
     unittest.main()
