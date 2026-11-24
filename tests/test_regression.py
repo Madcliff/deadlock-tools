@@ -3,6 +3,8 @@
 They need game files, so they are skipped unless tests/regression_inputs.json exists (copy
 tests/regression_inputs.example.json and fill in your paths). Each input is checked against the hash it had when the
 expected outputs were recorded; a different input file skips that test instead of failing it.
+"levels" must be an unmodded level folder: every level file is checked, so installing edited levels into it skips
+the shipdb tests (keep a clean copy for the tests).
 
     python -m unittest tests.test_regression -v
 """
@@ -12,10 +14,17 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 INPUTS_FILE = os.path.join(HERE, "regression_inputs.json")
 INPUT_SHA1 = {   # the input files the expected hashes were made from
     "dll": "f036ae751809d34e257b7bbc325c6f7f8251b49e",            # unpatched Assembly-CSharp.dll
-    "level0": "ee0a41809d2ed1958c24d62b2634a6e5f501769f",         # <levels>/level0
+    "level0": "ee0a41809d2ed1958c24d62b2634a6e5f501769f",         # <levels>/level0 .. level97 (unmodified game levels)
     "mercury_dec": "0d15aa1ca98fde9e80bde2bd53547d94f3ab79a2",    # decrypted colonialmercury.dec
     "orion_dec": "0c2d95780c6478a2f15b3439c25d9ac7ca6fbf7d",      # decrypted colonialorion.dec
     "mercury_enc": "a11060eaa9200e202619772e413155ade96e630b",    # encrypted colonialmercury (game file)
+}
+LEVEL_SHA1 = {   # every level file the shipdb tests read; "level0" in need() checks all of them
+    "level0": "ee0a41809d2ed1958c24d62b2634a6e5f501769f", "level1": "f08668032c13494fcb6158829c46120f0695deaf",
+    "level3": "dd4038e40441cc91b050854b2cef8f7ba7d5a274", "level5": "8808a0be3de4f8710285eb99cfd1c5f3cdbd6312",
+    "level6": "b6a717d5f60836899a185ba376846e22d361b71b", "level7": "dda264d1d90811944240563242f0d47d034313f1",
+    "level8": "99a3f3e80e1b02c64ae30c82f8e1733a11136067", "level85": "f6aeee5f3b1b8a4f23d7b277a994f1a6af252a1e",
+    "level9": "d85ab2c22562011ecd6334f4be2571b139cdcb5d", "level97": "88af62ae9282e352f8b1b6975ffcd7460f6ca407",
 }
 SET_LEVELS = {"level0": "86b9870f9ef6df8379ce01207a44bd524791863c", "level1": "137df9bf81ff14ab3a0bdfd920b8c2a3f1826ee1", "level3": "df25e4cc27f30aab4a496471747f4d90c86f874c",
               "level5": "06e67d22bac85f2ff418c9b4d59e98a23284ed32", "level6": "b3b37161adf77f2bec048e89880e2c5fc5067c77", "level7": "ec4f97265f5067cfb5bf9ff3cda8c4e74de6b954",
@@ -40,9 +49,12 @@ INPUTS = load_inputs()
 class Regression(unittest.TestCase):
     def need(self, *keys):
         for k in keys:
-            path = os.path.join(INPUTS["levels"], "level0") if k == "level0" else INPUTS.get(k)
-            if not path or not os.path.isfile(path) or sha1(path) != INPUT_SHA1[k]:
-                self.skipTest("input %s is missing or not the recorded file" % k)
+            # "level0" stands for the whole levels folder: a modded level elsewhere changes the outputs too
+            checks = [(os.path.join(INPUTS["levels"], name), h, "levels/" + name) for name, h in LEVEL_SHA1.items()] \
+                if k == "level0" else [(INPUTS.get(k), INPUT_SHA1[k], k)]
+            for path, expected, label in checks:
+                if not path or not os.path.isfile(path) or sha1(path) != expected:
+                    self.skipTest("input %s is missing or not the recorded file" % label)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.out = self.tmp.name
@@ -210,7 +222,7 @@ class Regression(unittest.TestCase):
         self.run_tool("weapons", INPUTS["mercury_dec"], "-o", self.out, "--clone", "fore=3", "--layout", "free", "--scale", "fore=0.7", "--clone-scale", "0.7",
                       "--fighter-slots", "5", "--utility-slots", "1", "--munition-slots", "4", "--hull-regen", "0.5", "--munition-factory",
                       "--mini-jump", "--augury", "--stealth", INPUTS["orion_dec"], "--ability-submenu")
-        self.assertHash(os.path.join(self.out, "bundles", "colonialmercury"), "5c3d1c82c69b4653b9e67b2ad1fbf13cd43f21b2")
+        self.assertHash(os.path.join(self.out, "bundles", "colonialmercury"), "4bacedcdfdf6653de6533c2eb417def427ba49f3")   # v0.4.0 labels the Abilities submenu button (descriptionID 21)
 
 
 if __name__ == "__main__":

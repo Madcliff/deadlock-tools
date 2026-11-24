@@ -1044,7 +1044,12 @@ def bundle_ship_stats(path):
             if pid not in prefab.by_pid or prefab.by_pid[pid].classid != 114 or script_of(pid) != "SubMenuAction": continue
             count = launch_count(object_fields(pid).get("SubMenu", {}).get("m_PathID"))
             if count: squadron_groups.append(count)
+    # FireMissileAction components = munition slot buttons in the battle UI; they must match
+    # the level ship record's MunitionSlots (see docs/game/bundle-level-agreement.md).
+    munition_actions = sum(1 for obj in prefab.objs if obj.classid == 114 and script_of(obj.pid) == "FireMissileAction")
     return {"prefab": name, "abilities": abilities, "subsystems": EDITABLE_SHIP_SUBSYSTEMS, "squadron_groups": squadron_groups,
+        "munition_actions": munition_actions,
+        "launch_actions": sum(1 for obj in prefab.objs if obj.classid == 114 and script_of(obj.pid) == "LaunchFightersAction"),
         "modifier_fields": [{"value": value, "label": label}
                             for value, label in CREW_MODIFIER_FIELDS.items()], "fields": [
         {"key": key, "value": value, "kind": "bool" if storage == "bool" or key in PREFAB_BOOLEAN_BYTES or key in SUBSYSTEM_SWITCHES else

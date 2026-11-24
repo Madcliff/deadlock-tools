@@ -13,14 +13,14 @@
 | Rebuild destroyed squadrons | | Add the custom squadron replacement module | Custom-module DLL (rebuilt automatically on save) |
 | Increase commander ranks | Extend the rank and XP tables | | Raise the rank cap and configure command nodes as needed |
 
-The ship editor's **Hull & armour** fields come from the level ship database, while **Bundle hull & armour** comes from the ship prefab. Corresponding hull and armour values sync 1:1. If they disagree, the editor offers **Use level data as source** and **Use bundle as source**; choose which file has the values you want to keep. Click **Apply** in the top bar to save the correction to the work tree. **Armour regen** under **Ship systems** is a separate passive behaviour on the prefab.
+Hull, armour and slot counts are stored in both the level ship record and the bundle. The **Level data ↔ bundle** table on the ship page lists them side by side with ✓/✗ and per-row **Use level** / **Use bundle** buttons. **Save ship** in the top bar writes both files. See [game/bundle-level-agreement.md](game/bundle-level-agreement.md). Every GUI control and the tool behind it is listed in [gui-map.md](gui-map.md).
 
 ## Edit a ship in the browser
 
 1. Run `python -m deadlock_tools gui` from the project folder. In **Settings**, choose the default level-data folder, ship-bundle folder, DLL file, and work folder. Click **Save and load**.
 2. The work folder mirrors the game's `BSG_Data/` tree. A same-named file there takes priority over the configured source. Ship database changes are saved in the work tree's `BSG_Data/` root.
 3. Check **Bundle file** when editing a prefab. The editor selects a matching work copy first, then a matching file in the configured bundle folder. Use **Load bundle…** to import a chosen file into the work tree. **Inspect current bundle** displays mounts, launch action counts, and available module settings.
-4. Set the relevant bundle fields on the ship page and click **Save bundle edits**. The edited prefab goes to `BSG_Data/StreamingAssets/` in the work folder. **Overwrite opened bundle** replaces that work copy after confirmation and keeps a backup beside it.
+4. Edit level fields, bundle fields and the weapon layout on the ship page, then click **Save ship** in the top bar. It writes the level files and the bundle (to `BSG_Data/StreamingAssets/` in the work folder) in one go and rebuilds the custom-module DLL when needed. Tick *Save over the opened bundle file* under **Saving the bundle** to replace the opened file instead; a backup is kept beside it.
 5. Check the status and output log after each save. **Database** groups the other table tools by subject. Its write forms display current values from staged files where available, and **Start from the originals** previews source values.
 
 ## Copy and add a ship
@@ -31,7 +31,7 @@ The ship editor's **Hull & armour** fields come from the level ship database, wh
 
 ## Commander trees
 
-The **Commanders** page loads every ability definition and bonus found in the configured level data. Edit subsystem choices, each ability's bonus/display settings, and its unlock rank. The tree preview, subsystem choice editor, and ability list have separate scroll areas. **Restore loaded tree mapping** returns to the exact mapping from the loaded files. New custom abilities support flat and percentage ship-stat modifiers; saving writes the ability and bonus records, localization, and required work-tree DLL changes. When a tree has more than three choices, saving also installs the extended rank lookup even if those choices use their default ranks.
+The **Commanders** page starts with **Ranks & command tree**. Add ranks to the level tables, then set the DLL's rank cap and Command-column node count, all with one button. It warns when the level rank count and the DLL cap differ. The subsystem choice editor also has the `fixspecs` reset buttons. The page loads every ability definition and bonus found in the configured level data. Edit subsystem choices, each ability's bonus/display settings, and its unlock rank. The tree preview, subsystem choice editor, and ability list have separate scroll areas. **Restore loaded tree mapping** returns to the exact mapping from the loaded files. New custom abilities support flat and percentage ship-stat modifiers; saving writes the ability and bonus records, localization, and required work-tree DLL changes. When a tree has more than three choices, saving also installs the extended rank lookup even if those choices use their default ranks.
 4. Select the new ship and edit its fields and copied bundle as needed. The donor preview art and its `PreviewAssetBundle` reference are retained. The clone is a starting point; check its mounts, abilities, shared assets, and game presentation before using it in a campaign.
 
 Creation is additive and writes to the work tree. It uses the effective ship records (including prior work-tree edits), and rejects duplicate ship names and bundle filenames.
@@ -39,9 +39,9 @@ Creation is additive and writes to the work tree. It uses the effective ship rec
 ## Add munition slots to Colonial Mercury
 
 1. Open **Carrier & munition slots** on Colonial Mercury's ship page.
-2. Set the database field **MunitionSlots** to the desired total, for example `4`, and click **Apply**.
-3. Set **Munition slots** under **Bundle slot controls** to the same total and click **Save bundle edits**. For fighter bays, supply both the fighter and utility totals in the bundle controls, including either value that stays the same.
-4. Install both the level files and the bundle. If an existing campaign save still uses its old munition list, apply **Munition load fix** on the DLL page and reload the campaign with the patched DLL installed. The fix rebuilds lists that are shorter than the configured slot count. Review the affected ships' loadouts after loading.
+2. Set the database field **MunitionSlots** to the desired total, for example `4`. The bundle's **Munition slots** control follows automatically, and **Level data ↔ bundle** shows the new count *on save*. Fighter and support slot fields work the same way.
+3. Click **Save ship**.
+4. Install both the level files and the bundle. If an existing campaign save still uses its old munition list, apply **Munition load fix** on the DLL tab and reload the campaign with the patched DLL installed. The fix rebuilds lists that are shorter than the configured slot count. Review the affected ships' loadouts after loading.
 
 The CLI example assumes the source has fewer than four slots. Check both current counts before choosing the new total.
 

@@ -1,6 +1,7 @@
 """Squadron prefab and allocation editors: every edit reads back, reverses byte-for-byte, and touches only its objects.
 
-Needs the game's BSG_Data (set DEADLOCK_GAME_DATA, or the levels path in deadlock.json); skipped otherwise.
+Needs the game's BSG_Data (set DEADLOCK_GAME_DATA, or the levels path in deadlock.json) and Assembly-CSharp.dll
+(DEADLOCK_GAME_DLL, or the dll path in deadlock.json); skipped otherwise.
 """
 import os, unittest
 
@@ -12,7 +13,16 @@ def game_data():
     return path if path and os.path.isfile(os.path.join(path, "sharedassets9.assets")) and os.path.isfile(os.path.join(path, "level5")) else None
 
 
+def game_dll(game):
+    """The DLL from DEADLOCK_GAME_DLL or deadlock.json's dll setting; <BSG_Data>/Managed only as a fallback."""
+    for path in (os.environ.get("DEADLOCK_GAME_DLL"), config.setting("dll", required=False),
+                 game and os.path.join(game, "Managed", "Assembly-CSharp.dll")):
+        if path and os.path.isfile(path): return path
+    return None
+
+
 GAME = game_data()
+DLL = game_dll(GAME)
 
 
 def objects(data):
@@ -20,10 +30,11 @@ def objects(data):
 
 
 @unittest.skipIf(GAME is None, "no game BSG_Data with sharedassets9.assets and level5")
+@unittest.skipIf(DLL is None, "no Assembly-CSharp.dll (set DEADLOCK_GAME_DLL, or the dll path in deadlock.json)")
 class SquadronEditors(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.S = sd.Schema(os.path.join(GAME, "Managed", "Assembly-CSharp.dll"))
+        cls.S = sd.Schema(DLL)
         with open(os.path.join(GAME, "sharedassets9.assets"), "rb") as fh: cls.assets = fh.read()
         with open(os.path.join(GAME, "level5"), "rb") as fh: cls.level = fh.read()
 

@@ -5,7 +5,7 @@ abilities), the ship / munition / research / commander tables in the level files
 the game UI layouts for ships with expanded slot lists.
 Everything is also available as a browser GUI. Uses Python and the standard library. Python 3.10 or newer is recommended for the editor.
 
-Select a ship to edit its database values and bundle settings on the same page, or use **Load bundle…** to edit a bundle directly without loading a similarly named ship. **Compare with bundle…** shows the editable prefab settings and installed abilities side by side. In the editor, **Overwrite opened bundle** replaces the work copy after confirmation and leaves a `.bak` copy; **Save bundle edits** writes to that same work copy.
+Select a ship to edit its database values and bundle settings on the same page, or use **Load bundle…** to edit a bundle directly without loading a similarly named ship. **Compare with bundle…** shows the editable prefab settings and installed abilities side by side. **Save ship** writes the level record, bundle and weapon layout together. The **Level data ↔ bundle** table flags values the two files must share (hull, armour, slot counts) and fixes them with one click. Every tab and control is listed in [docs/gui-map.md](docs/gui-map.md).
 
 Saving a bundle containing custom modules or turnaround repair actions also rebuilds the matching custom-module DLL and indexed repair shortcut assets into the work tree. The combined update starts from a clean DLL base kept in `work/.deadlock-tools/base/`; it backs up and stages the DLL and any affected level assets, and does not install them into the game. A configured level-data folder with its matching `Managed/` references is required for this build.
 

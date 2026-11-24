@@ -6,7 +6,11 @@ How the game wires them (Assembly-CSharp.dll, see docs/game/launch-bays.md):
   * A squadron launches from the LaunchPoint whose SlotNo is its slot (the tool's notes: falls back to any compatible
     bay). LaunchPoint also holds CanLaunch / CanDock / DockRange / LaunchCompatibility (squadron types) and the
     launch path (LaunchPoints, local offsets).
-  * Munition slots are the FireMissileAction buttons in the Munitions menu (and its submenus), in order.
+  * Munition slots are the FireMissileAction buttons in the Munitions menu (and its submenus), in order
+    (FireMissileAction.Slot = its index among GetComponentsInChildren<FireMissileAction>).
+  * Munition launchers are MissileLauncher components (MK2: Weapons/MissileLauncherFore/Port/Starboard), each with
+    LaunchPoints (local offsets). FireMissileAction collects GetComponentsInChildren<MissileLauncher>() from the ship
+    root and logs an error (the button is dead) when there are none, so at least one launcher must remain.
 
 Removing slot k therefore removes every bay with SlotNo k, renumbers the bays above it, removes the k-th launch button
 and lowers the ship's FighterSlots / UtilityFighterSlots by one (the caller updates the level data).
@@ -88,8 +92,14 @@ def read_layout(path):
     def buttons(script):
         return [{"id": str(pid), "menu": view.path(view.v(pid)["m_GameObject"]["m_PathID"]), "radial": view.v(pid)["radialMenuPosition"]}
                 for pid in view.ordered(script, root)]
+    launchers = []
+    for pid in view.ordered("MissileLauncher", root):
+        ml = view.v(pid); go = ml["m_GameObject"]["m_PathID"]; tr = view.v(view.transform_of(go))
+        launchers.append({"id": str(pid), "name": view.v(go)["m_Name"], "path": view.path(go), "position": tr["m_LocalPosition"],
+                          "rotation": tr["m_LocalRotation"], "launchPoints": ml["LaunchPoints"],
+                          "matrix": w.transform_matrix(tr["m_Father"]["m_PathID"], view.v)})
     layout = w.bundle_mount_layout(path)
-    return {"revision": w.layout_revision(bundle), "bays": bays, "launchButtons": buttons("LaunchFightersAction"),
+    return {"revision": w.layout_revision(bundle), "bays": bays, "launchers": launchers, "launchButtons": buttons("LaunchFightersAction"),
             "munitionButtons": buttons("FireMissileAction"), "hull": layout["hull"],
             "slots": sorted({b["slot"] for b in bays if b["canLaunch"]})}
 
@@ -146,6 +156,24 @@ def apply(src, dst, spec, encrypt=True):
             if any(abs(new[a] - tr["m_LocalPosition"][a]) > 1e-6 for a in "xyz"):
                 log.append("%s: moved to %.2f, %.2f, %.2f" % (name, new["x"], new["y"], new["z"])); tr["m_LocalPosition"] = new
 
+    launchers = {pid: view.v(pid) for pid in view.ordered("MissileLauncher", root)}
+    for row in spec.get("launchers") or []:
+        pid = int(row["id"])
+        if pid not in launchers:
+            raise ValueError("unknown munition launcher %s" % row["id"])
+        ml = fields(pid); name = view.v(ml["m_GameObject"]["m_PathID"])["m_Name"]
+        if "launchPoints" in row:
+            points = [{axis: float(p[axis]) for axis in "xyz"} for p in row["launchPoints"]]
+            if not points:
+                raise ValueError("%s needs at least one launch point" % name)
+            if points != ml["LaunchPoints"]:
+                log.append("%s: %d launch point(s) -> %d" % (name, len(ml["LaunchPoints"]), len(points))); ml["LaunchPoints"] = points
+        if "position" in row:
+            t_pid = view.transform_of(ml["m_GameObject"]["m_PathID"]); tr = fields(t_pid)
+            new = {axis: float(row["position"][axis]) for axis in "xyz"}
+            if any(abs(new[a] - tr["m_LocalPosition"][a]) > 1e-6 for a in "xyz"):
+                log.append("%s: moved to %.2f, %.2f, %.2f" % (name, new["x"], new["y"], new["z"])); tr["m_LocalPosition"] = new
+
     def remove_subtree(transform):
         go = view.v(transform)["m_GameObject"]["m_PathID"]
         for child in view.v(transform)["m_Children"]:
@@ -184,6 +212,21 @@ def apply(src, dst, spec, encrypt=True):
             raise ValueError("slot %d has no launch button (the ship has %d)" % (k, len(live)))
         remove_component(live[k])
         log.append("removed launch button %d (%s)" % (k, view.path(view.v(live[k])["m_GameObject"]["m_PathID"])))
+
+    remove_launchers = [int(x) for x in spec.get("removeLaunchers") or []]
+    for pid in remove_launchers:
+        if pid not in launchers:
+            raise ValueError("unknown munition launcher %s" % pid)
+    if remove_launchers and len(set(remove_launchers)) >= len(launchers) and view.ordered("FireMissileAction", root):
+        raise ValueError("the ship must keep at least one munition launcher while it has munition slots "
+                         "(FireMissileAction finds launchers with GetComponentsInChildren<MissileLauncher> and fails with none)")
+    for pid in remove_launchers:
+        go = view.v(pid)["m_GameObject"]["m_PathID"]; t = view.transform_of(go)
+        if len([c for c in view.components(go) if prefab.by_pid[c].classid == 114]) == 1:
+            detach(t); remove_subtree(t)                         # the GameObject only carries the launcher
+        else:
+            remove_component(pid)
+        log.append("removed munition launcher %s" % view.v(go)["m_Name"])
 
     munitions = view.ordered("FireMissileAction", root)
     removed_munitions = [int(x) for x in spec.get("removeMunitions") or []]
@@ -241,4 +284,5 @@ def apply(src, dst, spec, encrypt=True):
         fh.write(w.xor_bytes(data) if encrypt else data)
     os.remove(tmp)
     return {"log": log or ["no changes"], "removedSlots": removed_slots, "removedMunitions": len(removed_munitions),
+            "removedLaunchers": len(remove_launchers), "launchers": len(check["launchers"]),
             "bays": len(check["bays"]), "launchButtons": len(check["launchButtons"]), "munitionButtons": len(check["munitionButtons"])}

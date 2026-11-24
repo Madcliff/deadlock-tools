@@ -1725,15 +1725,14 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/bundle/import": return self.send(P.import_bundle(body["bundle"]))
             if self.path == "/api/bundle/layout":
                 return self.send(P.bundle_layout(body["bundle"]))
-            if self.path == "/api/bundle/layout/save":
-                if not isinstance(body.get("layout"), dict):
-                    raise ValueError("Missing weapon layout.")
-                return self.send(P.run_bundle(body["bundle"], {}, mount_layout=body["layout"]))
             if self.path == "/api/bundle/stats":
                 path, _ = P.bundle_src(body["bundle"])
                 with P.lock:
                     return self.send(wmod.bundle_ship_stats(path))
-            if self.path == "/api/bundle/run": return self.send(P.run_bundle(body["bundle"], body["options"], body.get("prefab_fields"), body.get("overwrite", False)))
+            if self.path == "/api/bundle/run":
+                layout = body.get("mount_layout")
+                if layout is not None and not isinstance(layout, dict): raise ValueError("Invalid weapon layout.")
+                return self.send(P.run_bundle(body["bundle"], body["options"], body.get("prefab_fields"), body.get("overwrite", False), mount_layout=layout))
             if self.path == "/api/editor/update": return self.send(P.editor_update(body["bundle"], body.get("patches")))
             if self.path == "/api/dll/patch": return self.send(P.dll_patch(body))
             if self.path == "/api/dll/revert": return self.send(P.dll_revert(body))
@@ -1823,6 +1822,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 .localisation-row[aria-pressed=true]{background:var(--chg);outline:1px solid var(--accent);outline-offset:-1px}
 .localisation-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cmd-tree-scroll{max-height:52vh;overflow:auto;padding:18px 4px 8px}.cmd-tree-root{width:max-content;margin:0 auto 18px;padding:10px 28px;border:2px solid var(--accent);border-radius:24px;background:var(--chg);font-weight:700;text-align:center}.cmd-tree-branches{display:grid;grid-template-columns:repeat(7,minmax(155px,1fr));gap:10px;min-width:1160px;position:relative}.cmd-tree-branch{position:relative;border-top:2px solid var(--line);padding:14px 6px 6px;text-align:center}.cmd-tree-branch:before{content:"";position:absolute;left:50%;top:-16px;height:14px;border-left:2px solid var(--line)}.cmd-tree-branch-title{display:block;margin:0 auto 10px;padding:8px 5px;border:1px solid var(--accent);border-radius:8px;background:var(--panel);font-weight:650}.cmd-tree-node{display:block;margin:8px 0;padding:8px 4px;border:1px solid var(--line);border-radius:7px;background:var(--panel);font-size:12px;line-height:1.35}.cmd-tree-node:before{content:"";display:block;width:0;height:10px;border-left:2px solid var(--line);margin:-18px auto 8px}.cmd-tree-node:first-of-type:before{height:12px;margin-top:-20px}.cmd-tree-effect{display:block;color:var(--muted);font-size:10px;overflow-wrap:anywhere}
+.agreement-table{width:100%;margin-top:8px}.agreement-table th{text-align:left;color:var(--muted);font-weight:600;font-size:12px}.agreement-table td .row{gap:6px;flex-wrap:nowrap}.agreement-table td:nth-child(n+2){white-space:nowrap}.agreement-table td:last-child button{padding:4px 10px}.agreement-scroll{overflow-x:auto}
 .cmd-choice-scroll,.cmd-ability-scroll{max-height:58vh;overflow:auto;padding-right:6px;overscroll-behavior:contain}.cmd-choice-scroll{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;align-items:start}.cmd-ability-scroll{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;align-items:start}
 @media(max-width:770px){.localisation-editor{grid-template-columns:1fr}.localisation-results{max-height:28vh}}
 </style></head><body>
@@ -1830,7 +1830,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 <nav><button data-t="ships" class="on">Ships</button><button data-t="dll">DLL</button><button data-t="commanders">Commanders</button><button data-t="squadrons">Squadrons</button><button data-t="tools">Database</button><button data-t="localisation">Localisation</button><button data-t="armaments">Armaments</button><button data-t="settings">Settings</button></nav>
 <span class="sp"></span><span id="pend" class="hint"></span>
 <label class="hint"><input type="checkbox" id="fresh"> start from the originals</label>
-<button class="sec" id="discard" disabled>Discard</button><button class="pri" id="apply" disabled>Apply</button></header>
+<button class="sec" id="discard" disabled title="Throw away unsaved ship and bundle edits">Discard changes</button><button class="pri" id="apply" disabled title="Write the level record, bundle and weapon layout edits for this ship to the work tree">Save ship</button></header>
 <main id="tab-ships"><aside id="side"><input id="q" placeholder="Search ships" autocomplete="off"><button class="sec" id="load-bundle">Load bundle…</button><button class="sec" id="copy-ship">Copy and add a ship…</button><button class="sec" id="ship-tools">Ship database tools</button><div id="list"></div></aside><section id="view"><p class="hint">Pick a ship or load a bundle.</p></section></main>
 <section id="tab-dll" hidden style="padding:16px 20px;max-width:980px"></section>
 <section id="tab-commanders" hidden style="padding:16px 20px;max-width:1250px"></section>
@@ -1856,38 +1856,11 @@ const key=(s,f)=>s+'|'+f;
 let syncingSlotValues=false;
 function shipFieldValue(name){const pending=state.pending[key(state.cur,name)];return pending?pending.value:state.data?.fields.find(field=>field.name===name)?.value}
 function setShipFieldValue(name,value){const input=$('#view [data-db-field="'+name+'"]');if(!input)return;input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}))}
-function hullArmourMismatches(bundle){
- return Object.entries(HULL_ARMOUR_LINKS).flatMap(([dbField,prefabKey])=>{
-  const level=Number(shipFieldValue(dbField)),input=bundle?.stats?.querySelector('[data-prefab-field="'+prefabKey+'"]'),prefab=input?.valueAsNumber;
-  return Number.isFinite(level)&&Number.isFinite(prefab)&&Math.abs(level-prefab)>1e-5*Math.max(1,Math.abs(level),Math.abs(prefab))
-   ?[{dbField,prefabKey,level,prefab}]:[];
- });
-}
-function refreshHullArmourLinkUI(bundle=activeBundle){
- if(!bundle?.linkHint)return;
- const mismatches=hullArmourMismatches(bundle);
- bundle.linkHint.textContent=mismatches.length
-  ?mismatches.length+' linked value'+(mismatches.length===1?' differs':'s differ')+'. Choose which file supplies the matching values.'
-  :'Level data and bundle hull/armour values match 1:1.';
- if(bundle.linkRepairButtons)bundle.linkRepairButtons.hidden=!mismatches.length;
- if(bundle.linkDetails)bundle.linkDetails.replaceChildren(...mismatches.map(item=>el('div',{class:'hint'},item.dbField+': level '+item.level+' · bundle '+item.prefab)));
-}
+function refreshHullArmourLinkUI(bundle=activeBundle){bundle?.refreshAgreement?.()}
 function syncBundleStatFromLevel(dbField,value){
  if(syncingHullArmour||!activeBundle?.linkBox?.checked||!activeBundle.stats.dataset.source||!HULL_ARMOUR_LINKS[dbField])return;
  const input=activeBundle.stats.querySelector('[data-prefab-field="'+HULL_ARMOUR_LINKS[dbField]+'"]');if(!input)return;
  syncingHullArmour=true;input.value=String(Number(value));input.dispatchEvent(new Event('input',{bubbles:true}));syncingHullArmour=false;refreshHullArmourLinkUI(activeBundle);
-}
-function linkedPrefabChanges(bundle){
- const changes={};if(!bundle?.linkBox?.checked||!bundle.stats.dataset.source)return changes;
- for(const [dbField,prefabKey] of Object.entries(HULL_ARMOUR_LINKS)){
-     const input=bundle.stats.querySelector('[data-prefab-field="'+prefabKey+'"]');
-  const value=input.valueAsNumber,original=JSON.parse(input.dataset.original);
-  if(Number.isFinite(value)&&value!==original)changes[prefabKey]=value;
- }
- return changes;
-}
-function linkedHullArmourLabel(){
- return 'Level database and bundle prefab values sync 1:1. Use Apply in the top bar to save both files.';
 }
 function syncBundleSlotInputs(name,value){
  if(syncingSlotValues||!activeBundle?.slots)return;
@@ -1900,7 +1873,52 @@ function syncBundleSlotInputs(name,value){
    if(groups&&!groups.dataset.manual){if(split?.checked)groups.value='';else if(Number.isInteger(fighters)&&Number.isInteger(support))groups.value=[fighters,support].filter(count=>count>0).join(',')}
  }
 }
-function updPend(){const n=Object.keys(state.pending).length+Object.keys(linkedPrefabChanges(activeBundle)).length;$('#pend').textContent=n?n+' pending change'+(n>1?'s':''):'';$('#apply').disabled=!n;$('#discard').disabled=!n;renderList()}
+function bundleOptionValues(bundle){
+ const opts={};
+ for(const area of [bundle.slots,bundle.sections])area.querySelectorAll('[data-d]').forEach(input=>{opts[input.dataset.d]=input.type==='checkbox'?input.checked:input.value});
+ return opts;
+}
+// Everything the Save ship button would write to the bundle. strict=true validates and throws.
+function shipBundleChanges(bundle,strict=false){
+ const empty={count:0,options:{},changedOptions:[],prefab:{},layout:null};
+ if(!bundle?.stats?.dataset.source||!bundle.optionBaseline)return empty;
+ const stats=bundle.statsResult||{},opts=bundleOptionValues(bundle),base=bundle.optionBaseline,changed=[];
+ for(const [name,value] of Object.entries(opts)){
+   if(['munition_slots','fighter_slots','utility_slots'].includes(name))continue;
+   if(String(value)!==String(base[name]??''))changed.push(name);
+ }
+ // Slot options only count when they would change the bundle's actual action counts.
+ const slotValue=name=>String(opts[name]??'').trim();
+ if(slotValue('munition_slots')&&Number(slotValue('munition_slots'))!==stats.munition_actions)changed.push('munition_slots');
+ if(slotValue('fighter_slots')&&slotValue('utility_slots')&&Number(slotValue('fighter_slots'))+Number(slotValue('utility_slots'))!==stats.launch_actions)changed.push('fighter_slots','utility_slots');
+ const options={};
+ for(const [name,value] of Object.entries(opts)){
+   if(['munition_slots','fighter_slots','utility_slots','squadron_groups'].includes(name)&&!changed.includes(name))continue;
+   options[name]=value;
+ }
+ const prefab={};
+ for(const area of [bundle.stats,bundle.installedAbilities]){
+   for(const input of area.querySelectorAll('[data-prefab-field]')){
+     const inputs=input.matches('fieldset')?[...input.querySelectorAll('input')]:[input];
+     if(strict&&inputs.some(field=>!field.reportValidity()))throw new Error('Enter a valid value for the highlighted bundle field.');
+     const value=input.matches('fieldset')?Object.fromEntries(inputs.map(field=>[field.dataset.axis,field.valueAsNumber]))
+       :input.type==='checkbox'?input.checked:input.tagName==='SELECT'?Number(input.value):input.valueAsNumber;
+     const original=JSON.parse(input.dataset.original);
+     const same=input.matches('fieldset')?Object.keys(value).every(axis=>value[axis]===original[axis]):value===original;
+     if(!same&&!(typeof value==='number'&&Number.isNaN(value)&&!strict))prefab[input.dataset.prefabField]=value;
+   }
+ }
+ const layout=strict?bundle.layout.pending():null,layoutCount=bundle.layout.count();
+ return {count:changed.length+Object.keys(prefab).length+layoutCount,options,changedOptions:changed,prefab,layout};
+}
+function updPend(){
+ const n=Object.keys(state.pending).length+shipBundleChanges(activeBundle).count;
+ if(n)state.saveStatus=null;
+ $('#pend').className=n||!state.saveStatus?'hint':state.saveStatus.cls;
+ $('#pend').textContent=n?n+' unsaved change'+(n>1?'s':''):state.saveStatus?.text||'';
+ $('#apply').disabled=!n;$('#discard').disabled=!n;renderList();
+ activeBundle?.refreshAgreement?.();
+}
 function renderList(){const q=$('#q').value.toLowerCase();const dirty=new Set(Object.values(state.pending).map(p=>p.ship));const box=$('#list');box.replaceChildren(...state.ships.filter(s=>(s.name+' '+s.faction+' '+s.class).toLowerCase().includes(q)).map(s=>el('div',{class:'ship'+(s.name===state.cur?' on':''),onclick:()=>openShip(s.name)},el('span',{},dirty.has(s.name)?el('span',{class:'dot'},'● '):'',s.name),el('small',{},s.faction[0]+' · '+s.class))))}
 function fieldInput(f){const k=key(state.cur,f.name),orig=f.value,pend=state.pending[k];const cur=pend?pend.value:orig;let inp;
  const mark=()=>{const v=read();const same=(f.type==='bool'||f.type==='enum')?String(v)===String(orig):Math.abs(Number(v)-Number(orig))<1e-6*Math.max(1,Math.abs(orig));if(same)delete state.pending[k];else state.pending[k]={ship:state.cur,field:f.name,value:(f.type==='bool'||f.type==='enum')?(f.type==='bool'?!!v:Number(v)):Number(v)};inp.classList.toggle('chg',!same);if(f.type!=='bool')note.textContent=same?'':'was '+orig;if(['MunitionSlots','FighterSlots','UtilityFighterSlots'].includes(f.name))syncBundleSlotInputs(f.name,v);if(!syncingHullArmour)syncBundleStatFromLevel(f.name,v);updPend()};
@@ -1951,13 +1969,13 @@ function renderShip(){const d=state.data;if(!d)return;const by={};d.fields.forEa
  const bundle=activeBundle;
  view.replaceChildren(el('div',{class:'row'},el('h2',{style:'margin:0 0 12px'},d.name),
    el('button',{class:'sec',onclick:()=>{showTab('localisation');loadLocalisation(d.name)}},'Ship localisation')));
- v.append(el('p',{class:'hint'},'Level database values from '+d.source),bundle.source);
+ v.append(el('p',{class:'hint'},'Level database values from '+d.source),bundle.source,bundle.agreement);
  for(const [title,names] of GROUPS){
    const fields=names.map(name=>by[name]).filter(Boolean);
    fields.forEach(field=>used.add(field.name));
    const prefab=title==='Carrier & munition slots'?bundle.slots:title==='Hull & armour'?bundle.stats:null;
    if(fields.length||prefab){
-     v.append(el('div',{class:'card'},el('h3',{},title),el('div',{class:'grid'},fields.map(fieldInput)),title==='Hull & armour'?bundle.linkControl:null,prefab));
+     v.append(el('div',{class:'card'},el('h3',{},title),el('div',{class:'grid'},fields.map(fieldInput)),prefab));
    }
  }
  v.append(bundle.sections,bundle.actions);
@@ -2032,23 +2050,51 @@ function showCloneShipForm(){
   el('div',{class:'card'},el('h3',{},'New ship'),el('div',{class:'grid'},field('Copy ship settings from',donor),field('Donor source',donorLayer),field('Database ship name',name),field('In-game display name',display),field('New bundle file name',bundle),field('Donor bundle file',donorBundle),field('Research list',list),field('Blueprint heading',header),field('Blueprint description',description)),el('p',{class:'hint'},'The current work copy is used by default so its edited stats, abilities, and bundle settings carry over. Choose the configured base folder to copy vanilla values. The new ship is written to the work tree.'),el('div',{class:'row'},save),message));
 }
 $('#load-bundle').onclick=async()=>{try{const file=await pickPath({files:true,start:state.info.bundle_dir||state.info.home,title:'Load a ship bundle'});if(file)openBundleFile(file)}catch(e){alert(e.message)}};
-$('#discard').onclick=()=>{state.pending={};updPend();if(state.data){renderShip();if(activeBundle?.currentFile)activeBundle.activatePath(activeBundle.currentFile)}};
-$('#apply').onclick=async()=>{
- const edits=Object.values(state.pending),bundle=activeBundle,prefabFields=linkedPrefabChanges(bundle),b=$('#apply');
- b.disabled=true;let bundleSaved=false;
+$('#discard').onclick=()=>{state.pending={};if(state.data){renderShip();if(activeBundle?.currentFile){activeBundle.activatePath(activeBundle.currentFile);activeBundle.layout.refresh()}}updPend()};
+// The one save for the Ships tab: level record edits, bundle prefab fields, bundle options and the weapon layout.
+async function saveShip(){
+ const b=$('#apply'),pend=$('#pend'),bundle=activeBundle,edits=Object.values(state.pending);
+ const say=(text,cls='hint')=>{state.saveStatus=cls==='hint'?null:{text,cls};pend.className=cls;pend.textContent=text;if(bundle?.message){bundle.message.className=cls;bundle.message.textContent=text}};
+ let bundleSaved=null,levelSaved=false,changes;
+ try{changes=shipBundleChanges(bundle,true)}catch(e){say(e.message,'msg-bad');return}
+ const writesBundle=changes.count>0;
+ if(writesBundle&&!bundle.currentFile){say('Choose a bundle file before saving bundle changes.','msg-bad');return}
+ const overwrite=writesBundle&&bundle.overwriteBox?.checked;
+ if(overwrite&&!confirm('Replace the opened bundle file? A backup is made beside it.\n\n'+bundle.currentFile))return;
+ b.disabled=true;
  try{
-  if(Object.keys(prefabFields).length){
-   if(!bundle.currentFile)throw new Error('The linked bundle is not loaded; choose a bundle before applying linked hull and armour values.');
-   const saved=await api('/api/bundle/run',{bundle:bundle.currentFile,options:{},prefab_fields:prefabFields,overwrite:false});
-   if(!saved.ok||!saved.dst)throw new Error('Could not save linked bundle fields: '+saved.output);
-   bundleSaved=true;bundle.currentFile=saved.dst;openedBundles.set(state.cur,saved.dst);bundle.activatePath(saved.dst);
+  if(writesBundle){
+   say('Checking bundle requirements…');
+   const patches=await bundlePatchOptions(changes.options);
+   if(patches===null){say('Save cancelled.');return}
+   say('Saving the bundle…');
+   const result=await api('/api/bundle/run',{bundle:bundle.currentFile,options:changes.options,prefab_fields:changes.prefab,overwrite,mount_layout:changes.layout});
+   bundle.output.textContent=result.cmd+'\n\n'+result.output;bundle.output.hidden=false;
+   if(!result.ok)throw new Error('The bundle tool reported an error (see the output under Saving the bundle).');
+   bundleSaved=result;
+   say('Updating the custom-module DLL and UI assets…');
+   const update=await api('/api/editor/update',{bundle:result.dst,patches});
+   bundle.output.textContent+='\n\n'+update.output;
+   if(!update.ok)throw new Error('The bundle was saved, but the DLL/UI update failed (see the output).');
+   bundleSaved.update=update;
   }
-  const r=edits.length?await api('/api/apply',{edits,fresh:$('#fresh').checked}):{log:[]};
-  state.pending={};await loadShips();if(state.cur)await openShip(state.cur);updPend();
-  alert('Applied. '+(bundleSaved?'Linked ship bundle saved.\n':'')+r.log.slice(0,6).join('\n')+(r.log.length>6?'\n...':'')+'\n\nSaved in '+state.info.work+' (level data and bundle). Merge this tree into the game folder when ready.');
- }catch(e){alert((bundleSaved?'The linked bundle was saved, but another part of the apply failed: ':'Failed: ')+e.message);b.disabled=false}
-};
-document.querySelectorAll('header nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('on',x===b));for(const t of ['ships','dll','commanders','squadrons','tools','localisation','armaments','settings'])$('#tab-'+t).hidden=t!==b.dataset.t;if(b.dataset.t==='dll')loadDll();if(b.dataset.t==='commanders')loadCommanders();if(b.dataset.t==='squadrons')loadSquadrons();if(b.dataset.t==='tools')loadTools();if(b.dataset.t==='localisation')loadLocalisation();if(b.dataset.t==='armaments')loadArmaments();if(b.dataset.t==='settings')loadSettings()});
+  let log=[];
+  if(edits.length){say('Saving the level data…');log=(await api('/api/apply',{edits,fresh:$('#fresh').checked})).log;levelSaved=true}
+  state.pending={};
+  await loadShips();if(state.cur)await openShip(state.cur);
+  if(bundleSaved){openedBundles.set(bundle.ship,bundleSaved.dst);bundle.activatePath(bundleSaved.dst);bundle.layout.refresh()}
+  updPend();
+  const parts=[];
+  if(levelSaved)parts.push('level data ('+edits.length+' change'+(edits.length>1?'s':'')+')');
+  if(bundleSaved)parts.push('bundle '+bundleSaved.dst.split(/[\\/]/).pop()+(overwrite?' (over the opened file; backup made)':''));
+  if(bundleSaved?.update?.updated)parts.push('custom-module DLL');
+  say('Saved '+parts.join(', ')+(overwrite?'.':' to the work folder.'),'msg-ok');
+ }catch(e){
+  say((bundleSaved?'Bundle saved. ':'')+(levelSaved?'Level data saved. ':'')+e.message,'msg-bad');
+ }finally{b.disabled=!(Object.keys(state.pending).length+shipBundleChanges(activeBundle).count)}
+}
+$('#apply').onclick=saveShip;
+document.querySelectorAll('header nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('on',x===b));for(const id of ['#pend','#apply','#discard'])$(id).hidden=b.dataset.t!=='ships';for(const t of ['ships','dll','commanders','squadrons','tools','localisation','armaments','settings'])$('#tab-'+t).hidden=t!==b.dataset.t;if(b.dataset.t==='dll')loadDll();if(b.dataset.t==='commanders')loadCommanders();if(b.dataset.t==='squadrons')loadSquadrons();if(b.dataset.t==='tools')loadTools();if(b.dataset.t==='localisation')loadLocalisation();if(b.dataset.t==='armaments')loadArmaments();if(b.dataset.t==='settings')loadSettings()});
 let bundleForm;
 let activeBundle;
 const openedBundles=new Map();
@@ -2092,7 +2138,7 @@ function weaponLayout(bundle){
  const views={Top:['x','z'],Side:['z','y'],Front:['x','y']};
  const projection=el('select',{'aria-label':'Projection',onchange:draw},Object.keys(views).map(name=>el('option',{value:name},name)));
  const fields=el('div',{class:'layout-properties'});
- const form=el('form',{onsubmit:event=>{event.preventDefault();save()}},fields);
+ const form=el('form',{onsubmit:event=>event.preventDefault()},fields);
  const workspace=el('div',{class:'layout-workspace'},canvas,form);
  const addButton=el('button',{class:'sec','aria-expanded':'false',onclick:()=>{
    if(placing){endPlacement();return}
@@ -2108,8 +2154,8 @@ function weaponLayout(bundle){
    el('p',{class:'hint'},'Click a position in the hull view. The new turret inherits depth and facing from a nearby mount; refine them after placing.'));
  const tools=el('div',{class:'row layout-tools'},mountSelect,projection,addButton);
  const reload=el('button',{class:'sec',onclick:()=>{if(!dirty()||confirm('Discard unsaved weapon layout changes?'))load(true)}},'Reload');
- const saveButton=el('button',{class:'pri',onclick:save},'Save weapon layout');
- panel.append(el('h3',{},'Weapon layout'),status,tools,placement,workspace,el('div',{class:'row layout-footer'},saveButton,reload));
+ const changed=()=>{if(typeof updPend==='function')updPend()};
+ panel.append(el('h3',{},'Weapon layout'),el('p',{class:'hint'},'Layout changes are saved with the rest of the ship by Save ship in the top bar.'),status,tools,placement,workspace,el('div',{class:'row layout-footer'},reload));
  let source='', loaded='', revision='', rows=[], original=[], hull=[], weapons={}, quadrants=[], active=0, request=0, busy=false, drag, clipboard, placing=false;
  const editable=row=>({id:row.id,clone:Boolean(row.clone),new_mount:Boolean(row.newMount),weapon:row.weapon,quadrant:row.quadrant,
    scale:row.scale,angles:row.angles,position:row.position});
@@ -2148,7 +2194,7 @@ function weaponLayout(bundle){
    const ready=loaded===source&&rows.length>0;
    tools.hidden=workspace.hidden=!ready;
    reload.disabled=busy||!source;
-   saveButton.disabled=busy||!dirty();
+   changed();
    mountSelect.replaceChildren(...rows.map((row,index)=>el('option',{value:String(index)},row.name+(row.clone?' (new)':''))));
    mountSelect.selectedIndex=active;
    renderPlacement();renderFields();draw();
@@ -2186,7 +2232,7 @@ function weaponLayout(bundle){
    if(!row)return;
    const title=el('strong',{},row.name);
    const select=(values,key)=>el('select',{value:String(row[key]),disabled:busy,onchange:event=>{
-     row[key]=Number(event.target.value);saveButton.disabled=busy||!dirty();
+     row[key]=Number(event.target.value);changed();
    }},values.map(([id,name])=>el('option',{value:String(id),selected:id===row[key]},name)));
    const types=Object.entries({...weapons,[row.weapon]:weapons[row.weapon]||'Type '+row.weapon}).map(([id,name])=>[Number(id),name]);
    const facing=quadrants.map((name,id)=>[id,name[0].toUpperCase()+name.slice(1)]);
@@ -2195,7 +2241,7 @@ function weaponLayout(bundle){
      oninput:event=>{
        const input=event.target;
        if(input.validity.valid&&Number.isFinite(input.valueAsNumber))write(input.valueAsNumber);
-       saveButton.disabled=busy||!dirty();draw();
+       changed();draw();
      }});
    const vector=(name,key)=>el('fieldset',{class:'layout-vector'},el('legend',{},name),...[... 'xyz'].map(axis=>
      label(axis.toUpperCase(),number(round(row[key][axis]),value=>{row[key][axis]=value}))));
@@ -2289,25 +2335,18 @@ function weaponLayout(bundle){
    const row=rows[active],point={...drag.position};
    point[h]+=(x-drag.x)/scale;point[v]-=(y-drag.y)/scale;
    row.position=x===drag.x&&y===drag.y?drag.local:Object.fromEntries(Object.entries(transform(row.inverse,point)).map(([key,value])=>[key,round(value)]));
-   renderFields();draw();saveButton.disabled=!dirty();
+   renderFields();draw();changed();
  });
  for(const name of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(name,()=>{drag=null});
- async function save(){
-   if(busy||!dirty()||!form.reportValidity())return;
-   const current=source,token=++request;
-   busy=true;placing=false;render();status.textContent='Saving weapon layout…';
-   try{
-     const result=await api('/api/bundle/layout/save',{bundle:current,layout:{revision,changes:changes()}});
-     if(token!==request)return;
-     if(!result.ok)throw new Error(result.output);
-     loaded='';busy=false;bundle.activatePath(result.dst,true);
-     await load(true);
-     if(source===result.dst&&loaded===source)status.textContent='Saved to '+result.dst;
-   }catch(error){if(token===request)status.textContent=error.message}
-   finally{if(token===request){busy=false;render()}}
+ function refresh(){loaded='';rows=[];original=[];request++;busy=false;placing=false;render();if(!panel.hidden)load(true)}
+ function pending(){
+   if(!dirty())return null;
+   if(!form.reportValidity())throw new Error('Enter valid weapon layout values.');
+   if(loaded!==source)return null;
+   return {revision,changes:changes()};
  }
  render();
- return {panel,setSource,load};
+ return {panel,setSource,load,refresh,pending,count:()=>loaded===source?changes().length:0};
 }
 
 function shipBundleFields(ship,initialFile=''){
@@ -2315,40 +2354,81 @@ function shipBundleFields(ship,initialFile=''){
    ship,
    source:el('div',{class:'card ship-bundle'},el('h3',{},'Bundle file'),el('p',{class:'hint'},'Loading bundle tools…')),
    slots:el('div',{class:'bundle-slot-fields'}),
-   slotStatus:el('p',{class:'hint'}),
    stats:el('div',{class:'bundle-slot-fields','aria-live':'polite'}),
    linkBox:el('input',{type:'checkbox',checked:true,disabled:true}),
-   linkHint:el('span',{class:'hint'},'Load a matching bundle to link hull and armour values.'),
-   linkRepairButtons:null,
-   linkDetails:el('div',{class:'hint'}),
-   linkControl:null,
    installedAbilities:el('div',{class:'bundle-slot-fields'}),
    sections:el('div'),
    actions:el('div',{class:'card'})
  };
  bundle.layout=weaponLayout(bundle);
- bundle.linkControl=el('div',{class:'row',style:'margin:8px 0'},el('label',{class:'f chk',title:'Synchronize level database and bundle prefab hull/armour values one-to-one.'},bundle.linkBox,'Link level and bundle hull & armour'),bundle.linkHint);
- const useLevelSource=el('button',{class:'sec',onclick:()=>{
+ // One table for every value the level ship record and the bundle prefab must agree on.
+ const agreementBody=el('tbody'),agreementNote=el('p',{class:'hint'});
+ const allLevel=el('button',{class:'sec',onclick:()=>{for(const row of agreementRows())if(!row.same&&row.useLevel)row.useLevel()}},'Make the bundle match the level data');
+ const allBundle=el('button',{class:'sec',onclick:()=>{for(const row of agreementRows())if(!row.same&&row.useBundle)row.useBundle()}},'Make the level data match the bundle');
+ bundle.agreement=el('div',{class:'card agreement'},el('h3',{},'Level data ↔ bundle'),
+   el('p',{class:'hint'},'These values exist in both the level ship record and the ship bundle and must be equal in game. Edit either side; mismatches are flagged here and fixed with one click. Save ship writes both files.'),
+   el('label',{class:'f chk',title:'Synchronize level database and bundle prefab hull/armour values one-to-one.'},bundle.linkBox,'Keep hull & armour linked while editing'),
+   el('div',{class:'agreement-scroll'},el('table',{class:'alloc agreement-table'},el('thead',{},el('tr',{},el('th',{},'Value'),el('th',{},'Level data'),el('th',{},'Bundle'),el('th',{},''),el('th',{},''))),agreementBody)),
+   el('div',{class:'row',style:'margin-top:8px'},allLevel,allBundle),agreementNote);
+ const prefabInput=name=>bundle.stats.querySelector('[data-prefab-field="'+name+'"]');
+ const optionInput=name=>bundle.slots.querySelector('[data-d="'+name+'"]');
+ const setOptionValue=(name,value)=>{const input=optionInput(name);if(input){input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}))}};
+ const levelNumber=name=>Number(shipFieldValue(name));
+ function agreementRows(){
+   const rows=[],stats=bundle.statsResult;
+   if(!stats||!state.data||state.data.name!==bundle.ship)return rows;
+   const ARMOUR_LABELS={MaxHullPoints:'Hull',ArmorFront:'Armour front',ArmorRear:'Armour rear',ArmorLeft:'Armour port',ArmorRight:'Armour starboard',ArmorTop:'Armour top',ArmorBottom:'Armour bottom'};
    for(const [dbField,prefabKey] of Object.entries(HULL_ARMOUR_LINKS)){
-     const input=bundle.stats.querySelector('[data-prefab-field="'+prefabKey+'"]'),value=Number(shipFieldValue(dbField));
-     if(input&&Number.isFinite(value)){
-       input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));
-       state.pending[key(state.cur,dbField)]={ship:state.cur,field:dbField,value};
-     }
+     const input=prefabInput(prefabKey);if(!input)continue;
+     const level=levelNumber(dbField),prefab=input.valueAsNumber;
+     rows.push({label:ARMOUR_LABELS[dbField],level,bundle:prefab,
+       same:Number.isFinite(level)&&Number.isFinite(prefab)&&Math.abs(level-prefab)<=1e-5*Math.max(1,Math.abs(level)),
+       useLevel:()=>{syncingHullArmour=true;input.value=String(level);input.dispatchEvent(new Event('input',{bubbles:true}));syncingHullArmour=false},
+       useBundle:()=>{syncingHullArmour=true;setShipFieldValue(dbField,prefab);syncingHullArmour=false}});
    }
-   refreshHullArmourLinkUI(bundle);updPend();
- }},'Use level data as source');
- const useBundleSource=el('button',{class:'sec',onclick:()=>{
-   for(const [dbField,prefabKey] of Object.entries(HULL_ARMOUR_LINKS)){
-     const input=bundle.stats.querySelector('[data-prefab-field="'+prefabKey+'"]');
-     if(input&&Number.isFinite(input.valueAsNumber))setShipFieldValue(dbField,input.valueAsNumber);
+   // Slot counts: the bundle value is its current action count, or the count Save ship will build.
+   const planned=name=>{const v=String(optionInput(name)?.value??'').trim();return v===''?null:Number(v)};
+   const munitions=planned('munition_slots')??stats.munition_actions,levelMunitions=levelNumber('MunitionSlots');
+   rows.push({label:'Munition slots (battle buttons)',level:levelMunitions,bundle:munitions,pending:planned('munition_slots')!==null&&planned('munition_slots')!==stats.munition_actions,
+     same:munitions===levelMunitions,useLevel:optionInput('munition_slots')?()=>setOptionValue('munition_slots',levelMunitions):null,
+     useBundle:()=>setShipFieldValue('MunitionSlots',munitions)});
+   const fighters=levelNumber('FighterSlots'),support=levelNumber('UtilityFighterSlots');
+   const plannedLaunch=planned('fighter_slots')!==null&&planned('utility_slots')!==null?planned('fighter_slots')+planned('utility_slots'):null;
+   const launch=plannedLaunch??stats.launch_actions;
+   const groups=stats.squadron_groups||[];
+   rows.push({label:'Squadron launch buttons (fighter + support)',level:fighters+support,bundle:launch,
+     detail:fighters+' fighter + '+support+' support'+(groups.length?' · bundle groups '+groups.join(','):''),
+     pending:plannedLaunch!==null&&plannedLaunch!==stats.launch_actions,same:launch===fighters+support,
+     useLevel:optionInput('fighter_slots')&&optionInput('utility_slots')?()=>{setOptionValue('fighter_slots',fighters);setOptionValue('utility_slots',support);
+       const g=optionInput('squadron_groups'),split=bundle.slots.querySelector('[data-d="split_squadrons"]');
+       if(g&&!g.dataset.manual&&!split?.checked)g.value=[fighters,support].filter(count=>count>0).join(',')}:null,
+     useBundle:groups.length===2?()=>{setShipFieldValue('FighterSlots',groups[0]);setShipFieldValue('UtilityFighterSlots',groups[1])}
+       :launch>=support?()=>setShipFieldValue('FighterSlots',launch-support):null});
+   return rows;
+ }
+ bundle.refreshAgreement=()=>{
+   const rows=agreementRows();
+   if(!rows.length){
+     agreementBody.replaceChildren();allLevel.hidden=allBundle.hidden=true;
+     agreementNote.textContent=bundle.statsResult?'Link this bundle to a ship record to compare values.':'Load the ship’s bundle to compare it with the level data.';
+     return;
    }
-   refreshHullArmourLinkUI(bundle);
- }},'Use bundle as source');
- bundle.linkRepairButtons=el('div',{class:'row',hidden:true},useLevelSource,useBundleSource);
- bundle.linkControl.append(bundle.linkRepairButtons,bundle.linkDetails);
+   const bad=rows.filter(row=>!row.same).length;
+   allLevel.hidden=allBundle.hidden=!bad;
+   agreementNote.className=bad?'msg-bad':'msg-ok';
+   agreementNote.textContent=bad?bad+' value'+(bad>1?'s differ':' differs')+'. Pick which side is right for each row, or use the buttons above for all of them.':'Level data and bundle agree.';
+   agreementBody.replaceChildren(...rows.map(row=>el('tr',{},
+     el('td',{},row.label,row.detail?el('div',{class:'hint'},row.detail):null),
+     el('td',{},String(row.level)),
+     el('td',{},String(row.bundle),row.pending?el('span',{class:'hint'},' (on save)'):null),
+     el('td',{class:row.same?'msg-ok':'msg-bad'},row.same?'✓ match':'✗ differs'),
+     el('td',{},row.same?'':el('span',{class:'row'},
+       row.useLevel?el('button',{class:'sec',onclick:()=>{row.useLevel();updPend()}},'Use level'):null,
+       row.useBundle?el('button',{class:'sec',onclick:()=>{row.useBundle();updPend()}},'Use bundle'):null)))));
+ };
+ for(const area of [bundle.stats,bundle.installedAbilities,bundle.slots,bundle.sections])
+   for(const type of ['input','change'])area.addEventListener(type,()=>updPend());
  bundle.linkBox.addEventListener('change',()=>{
-   bundle.linkHint.textContent=linkedHullArmourLabel();
    if(bundle.linkBox.checked)for(const field of Object.keys(HULL_ARMOUR_LINKS))syncBundleStatFromLevel(field,shipFieldValue(field));
  });
  bundle.stats.addEventListener('input',event=>{
@@ -2376,6 +2456,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
    const request=++statsRequest;bundle.currentFile=file;bundle.layout.setSource(file,deferLayout);
    bundle.stats.replaceChildren();
    bundle.installedAbilities.replaceChildren();
+   bundle.statsResult=null;delete bundle.optionBaseline;
    if(bundle.compare)bundle.compare.replaceChildren();
    delete bundle.stats.dataset.source;
    for(const area of [bundle.slots,bundle.sections])area.querySelectorAll('[data-d]').forEach(input=>{
@@ -2383,6 +2464,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      if(input.type==='checkbox')input.checked=false;
      else input.value='';
    });
+   if(activeBundle===bundle)updPend();else bundle.refreshAgreement();
    if(!file)return;
    bundle.stats.textContent='Reading current bundle settings…';
    try{
@@ -2403,12 +2485,6 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      }
      const groupsInput=bundle.slots.querySelector('[data-d="squadron_groups"]');
      if(groupsInput&&!groupsInput.dataset.manual)groupsInput.value=(result.squadron_groups||[]).join(',');
-     bundle.slotStatus.replaceChildren();bundle.slotStatus.className='hint';
-     if(result.squadron_groups?.length&&state.data?.name===ship){
-       const expected=['FighterSlots','UtilityFighterSlots'].map(name=>Number(shipFieldValue(name)));
-       const actual=result.squadron_groups.reduce((sum,count)=>sum+count,0),wanted=expected.reduce((sum,count)=>sum+count,0);
-       if(actual!==wanted){bundle.slotStatus.className='msg-bad';bundle.slotStatus.textContent='This bundle has '+actual+' launch actions in groups '+result.squadron_groups.join(',')+', but the ship database has '+expected[0]+' fighter and '+expected[1]+' support slots ('+wanted+' total).';}
-     }
      const labels={MaxHullPoints:'Hull',defaultArmourFront:'Front',defaultArmourRear:'Rear',
        defaultArmourLeft:'Port',defaultArmourRight:'Starboard',defaultArmourTop:'Top',defaultArmourBottom:'Bottom'};
      const modifierFields=result.modifier_fields||[];
@@ -2571,11 +2647,11 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      bundle.stats.dataset.source=file;
      bundle.stats.dataset.result=JSON.stringify(result);
      bundle.linkBox.disabled=!result.fields.some(field=>Object.values(HULL_ARMOUR_LINKS).includes(field.key));
-     bundle.linkHint.textContent=bundle.linkBox.disabled?'This bundle has no matching hull/armour prefab fields.':linkedHullArmourLabel();
      if(bundle.linkBox.checked)for(const field of Object.keys(HULL_ARMOUR_LINKS))if(state.pending[key(state.cur,field)])syncBundleStatFromLevel(field,shipFieldValue(field));
-     refreshHullArmourLinkUI(bundle);
+     bundle.statsResult=result;bundle.optionBaseline=bundleOptionValues(bundle);
+     if(activeBundle===bundle)updPend();else bundle.refreshAgreement();
    }catch(error){
-     if(request===statsRequest)bundle.stats.textContent='Bundle stats unavailable. '+error.message;
+     if(request===statsRequest){bundle.stats.textContent='Bundle stats unavailable. '+error.message;bundle.refreshAgreement()}
    }
  }
  function selectBundle(file,deferLayout=false){
@@ -2719,7 +2795,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
   }
   const grid=buildGrid(options);
   if(group==='Squadron / munition slots'){
-    slots.replaceChildren(el('h4',{},'Bundle slot controls'),grid,bundle.slotStatus);
+    slots.replaceChildren(el('h4',{},'Bundle slot controls'),el('p',{class:'hint'},'Leave blank to keep the bundle as it is. Level data ↔ bundle at the top compares these with the ship record.'),grid);
   }else if(group==='Custom ship modules'){
     sections.append(el('div',{class:'card'},el('h3',{},group),
       el('p',{class:'hint'},'Adding a custom module also switches off its Mercury legacy hook where applicable. The matching custom-module DLL must be installed before launching the game.'),grid));
@@ -2734,18 +2810,12 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
    const submenu=bundle.sections.querySelector('[data-d="ability_submenu"]');
    if(enabled>1&&submenu)submenu.checked=true;
  });
- if(ship&&state.data?.name===ship){
-   for(const [field,dest] of [['MunitionSlots','munition_slots'],['FighterSlots','fighter_slots'],['UtilityFighterSlots','utility_slots']]){
-     const input=bundle.slots.querySelector('[data-d="'+dest+'"]');
-     const value=shipFieldValue(field);
-     if(input&&input.value===''&&Number.isFinite(Number(value)))input.value=String(value);
-   }
- }
- actions.replaceChildren(el('div',{class:'row'},
-   el('button',{class:'pri',id:'brun',onclick:()=>runBundle(bundle,get)},'Save bundle edits'),
-   el('button',{class:'sec',id:'boverwrite',onclick:()=>runBundle(bundle,get,true)},'Overwrite opened bundle'),
-   el('span',{id:'bmsg',class:'hint'},'Saves into the work tree under BSG_Data/StreamingAssets/')),
-   el('pre',{id:'bout',hidden:true}));
+ bundle.overwriteBox=el('input',{type:'checkbox'});
+ bundle.message=el('span',{class:'hint'},'Save ship in the top bar writes the bundle into the work tree under BSG_Data/StreamingAssets/.');
+ bundle.output=el('pre',{hidden:true});
+ actions.replaceChildren(el('h3',{},'Saving the bundle'),
+   el('label',{class:'f chk',title:'A .bak backup is made beside the file first'},bundle.overwriteBox,'Save over the opened bundle file instead of the work tree (makes a backup)'),
+   el('div',{class:'row'},bundle.message),bundle.output);
 }
 function bundleFieldLabel(option){
  const label=option.flag.replace(/^--/,'').replaceAll('-',' ');
@@ -2790,75 +2860,12 @@ async function bundlePatchOptions(options){
  }
  return patches;
 }
-async function runBundle(bundle,get,overwrite=false){
- const opts={};
- for(const area of [bundle.slots,bundle.sections]){
-   area.querySelectorAll('[data-d]').forEach(input=>{
-     opts[input.dataset.d]=input.type==='checkbox'?input.checked:input.value;
-   });
- }
- const button=get(overwrite?'boverwrite':'brun'),message=get('bmsg'),output=get('bout');
- const source=get('bpath').value.trim();
- const prefabFields={};
- let saved=false;
- button.disabled=true;
- message.className='hint';
- output.hidden=true;
- try{
-   if(!source)throw new Error('Choose a bundle file first.');
-   if(overwrite&&!window.confirm('Replace this bundle file? A backup will be created beside it.\n\n'+source))return;
-   if(bundle.stats.dataset.source===source){
-     for(const area of [bundle.stats,bundle.installedAbilities]){
-       for(const input of area.querySelectorAll('[data-prefab-field]')){
-         const inputs=input.matches('fieldset')?[...input.querySelectorAll('input')]:[input];
-         if(inputs.some(field=>!field.reportValidity())){
-           throw new Error('Enter a valid value for the highlighted prefab field.');
-         }
-         const value=input.matches('fieldset')
-           ?Object.fromEntries(inputs.map(field=>[field.dataset.axis,field.valueAsNumber]))
-           :input.type==='checkbox'?input.checked:input.tagName==='SELECT'?Number(input.value):input.valueAsNumber;
-         const original=JSON.parse(input.dataset.original);
-         const unchanged=input.matches('fieldset')
-           ?Object.keys(value).every(axis=>value[axis]===original[axis])
-           :value===original;
-         if(!unchanged)prefabFields[input.dataset.prefabField]=value;
-       }
-     }
-   }
-   message.textContent='Checking bundle requirements…';
-   const patches=await bundlePatchOptions(opts);
-   if(patches===null){
-     message.textContent='Bundle edit cancelled.';
-     return;
-   }
-   message.textContent='Saving bundle…';
-   const result=await api('/api/bundle/run',{bundle:source,options:opts,prefab_fields:prefabFields,overwrite});
-   output.textContent=result.cmd+'\n\n'+result.output;
-   output.hidden=false;
-   if(!result.ok)throw new Error('The bundle tool reported an error.');
-   saved=Boolean(result.dst);
-   if(saved)bundle.activatePath(result.dst);
-   message.textContent='Updating related DLL and UI assets…';
-   const update=await api('/api/editor/update',{bundle:result.dst,patches});
-   output.textContent+='\n\n'+update.output;
-   if(!update.ok)throw new Error('The combined editor update failed. See the output below.');
-   message.textContent=update.updated
-     ?'Saved bundle, rebuilt custom-module DLL'+(update.assets?.length?' and repair shortcut assets':'')+'. Work-tree DLL: '+update.dst
-     :(overwrite?'Overwrote bundle. Backup: '+result.backup:result.dst?'Saved bundle to '+result.dst:'Done');
-   message.className='msg-ok';
- }catch(error){
-   message.textContent=(saved?'Bundle saved. ':'')+error.message;
-   message.className='msg-bad';
- }finally{
-   button.disabled=false;
- }
-}
 async function loadDll(){const box=$('#tab-dll');if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}const fld=(id,l,h)=>el('label',{class:'f'},l,el('input',{type:'number',id,step:'any'}),el('span',{class:'orig'},h));
  if(!box.dataset.ok){box.dataset.ok=1;box.replaceChildren(el('div',{class:'card'},el('h3',{},'Current DLL'),el('pre',{id:'dchk'},'checking...')),
   el('div',{class:'card'},el('h3',{},'Patch'),el('p',{class:'hint'},'Commander max rank and command-tree nodes are set on the Commanders tab. Custom-module and commander DLL code is rebuilt automatically when you save a bundle or the commander tree.'),el('div',{class:'grid'},fld('d_repair_actions','Repair action shortcuts','Unique, automatically indexed shortcuts (1–16)'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches continue from the edited work-tree DLL unless you choose otherwise'},el('input',{type:'checkbox',id:'d_fresh',onchange:loadDll}),'Start from the original DLL (drops earlier patches)')),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'pri',id:'dgo',onclick:patchDll},'Patch DLL'),el('span',{id:'dmsg',class:'hint'}))),
-  el('div',{class:'card'},el('h3',{},'Revert'),el('div',{class:'grid'},...[['r_armour','Legacy armour regen (removed feature)'],['r_revive','Legacy squadron revive (removed feature)'],['r_mun','Munition load fix'],['r_repair_key','Indexed repair action shortcuts']].map(([id,l])=>el('label',{class:'f chk'},el('input',{type:'checkbox',id}),l))),
-   el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'sec',id:'rgo',onclick:revertDll},'Revert ticked (none ticked = all)'),el('span',{id:'rmsg',class:'hint'}))),el('pre',{id:'dout',hidden:true}))}
+  el('div',{class:'card'},el('h3',{},'Revert'),el('div',{class:'grid'},...[['r_mun','Munition load fix'],['r_repair_key','Indexed repair action shortcuts']].map(([id,l])=>el('label',{class:'f chk'},el('input',{type:'checkbox',id}),l))),
+   el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'sec',id:'rgo',onclick:revertDll},'Revert ticked patches'),el('span',{id:'rmsg',class:'hint'}))),el('pre',{id:'dout',hidden:true}))}
  try{const r=await api('/api/dll/check'+($('#d_fresh').checked?'?fresh=1':''));$('#dchk').textContent=r.output+'\n(source: '+r.source+')'}catch(e){$('#dchk').textContent=e.message}}
 async function patchDll(){$('#dgo').disabled=true;try{const r=await api('/api/dll/patch',{repair_bay_actions:$('#d_repair_actions').value,munition_load:$('#d_mun').checked,fresh:$('#d_fresh').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;$('#dmsg').textContent=r.ok?'written to '+r.dst+' and work-tree key mapping assets':'failed';$('#dmsg').className=r.ok?'msg-ok':'msg-bad';if(r.ok)$('#d_fresh').checked=false;loadDll()}catch(e){$('#dmsg').textContent=e.message;$('#dmsg').className='msg-bad'}$('#dgo').disabled=false}
 
@@ -2882,7 +2889,7 @@ function pickPath({files=false,start='',title='Choose'}){return new Promise(res=
  pth.addEventListener('keydown',e=>{if(e.key==='Enter')go(pth.value)});
  dlg.append(el('h3',{},title),el('div',{class:'row'},pth,el('button',{class:'sec',onclick:()=>go(pth.value)},'Go')),list,
   el('div',{class:'row'},files?'':el('button',{class:'pri',onclick:()=>done(cur)},'Use this folder'),el('button',{class:'sec',onclick:()=>done(null)},'Cancel'),files?el('span',{class:'hint'},'Click a file to choose it.'):''));
- back.append(dlg);back.addEventListener('mousedown',e=>{if(e.target===back)done(null)});document.body.append(back);go(start||state.info.home)})}async function revertDll(){const m=$('#rmsg');$('#rgo').disabled=true;try{const r=await api('/api/dll/revert',{armour:$('#r_armour').checked,revive:$('#r_revive').checked,max_rank:$('#r_rank').checked,command_nodes:$('#r_nodes').checked,munition_load:$('#r_mun').checked,repair_bay_shortcuts:$('#r_repair_key').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;m.textContent=r.ok?'written to '+r.dst:'failed';m.className=r.ok?'msg-ok':'msg-bad';loadDll()}catch(e){m.textContent=e.message;m.className='msg-bad'}$('#rgo').disabled=false}
+ back.append(dlg);back.addEventListener('mousedown',e=>{if(e.target===back)done(null)});document.body.append(back);go(start||state.info.home)})}async function revertDll(){const m=$('#rmsg');if(!$('#r_mun').checked&&!$('#r_repair_key').checked){m.className='msg-bad';m.textContent='Tick the patches to revert. Commander rank and nodes are reverted on the Commanders tab.';return}$('#rgo').disabled=true;try{const r=await api('/api/dll/revert',{munition_load:$('#r_mun').checked,repair_bay_shortcuts:$('#r_repair_key').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;m.textContent=r.ok?'written to '+r.dst:'failed';m.className=r.ok?'msg-ok':'msg-bad';loadDll()}catch(e){m.textContent=e.message;m.className='msg-bad'}$('#rgo').disabled=false}
 
 let localisationEditor;
 function loadLocalisation(ship=''){
