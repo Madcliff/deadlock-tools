@@ -58,8 +58,11 @@ def save_asset(serialized_file, source_path, target_path):
     return len(data)
 
 
-def update_key_assets(levels, output_root, action_count):
-    """Stage level3 key mappings and their localized labels for repair actions."""
+def update_key_assets(levels, output_root, action_count, managed=None):
+    """Stage level3 key mappings and their localized labels for repair actions.
+
+    managed: the game's Managed/ folder (type trees for the KeyManager MonoBehaviour); defaults to
+    <levels>/Managed, which is missing when the level files are kept apart from the game install."""
     if not 0 <= action_count <= MAX_REPAIR_ACTIONS:
         raise ValueError(f"repair action count must be between 0 and {MAX_REPAIR_ACTIONS}")
     try:
@@ -68,9 +71,11 @@ def update_key_assets(levels, output_root, action_count):
     except ImportError as exc:
         raise RuntimeError("repair-bay shortcuts need the optional UnityPy asset support") from exc
 
-    managed = os.path.join(levels, "Managed")
-    if not os.path.isdir(levels) or not os.path.isdir(managed):
+    managed = managed or os.path.join(levels, "Managed")
+    if not os.path.isdir(levels):
         raise ValueError("configured levels path must be the game's BSG_Data folder")
+    if not os.path.isfile(os.path.join(managed, "Assembly-CSharp.dll")):
+        raise ValueError("could not find the game's Managed folder (needed to read level3 key mappings): " + managed)
     os.makedirs(output_root, exist_ok=True)
 
     def source_path(name):

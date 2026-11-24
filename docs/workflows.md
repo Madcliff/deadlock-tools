@@ -64,8 +64,8 @@ Use **Inspect current bundle** to compare the number of launch actions and the n
 
 Use **Custom armour repair** and **Custom squadron replacement** under **Custom ship modules**. The old sign-flag armour
 regeneration and Munition Factory squadron revive were removed. Saving a bundle that still carries those old flags
-clears them once the replacement module is installed, and `dll revert --armour --revive` removes the old patches from a
-DLL made by an older version.
+clears them once the replacement module is installed. A DLL that still carries the old patches has to be rebuilt from an
+unpatched `Assembly-CSharp.dll` (configured DLL and `work/.deadlock-tools/base/`).
 
 ## Add support abilities
 

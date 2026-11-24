@@ -5,9 +5,8 @@ dll - every Assembly-CSharp.dll patch for the Deadlock tools, in one place.
   python -m deadlock_tools dll patch  [DLL] [--max-rank N] [--munition-load] [--repair-bay-key]
                                             [--command-nodes N [--command-step S] [--command-first-rank R]] [--fresh]
   python -m deadlock_tools dll check  [DLL]
-  python -m deadlock_tools dll revert [DLL] [--armour] [--revive] [--max-rank] [--command-nodes] [--munition-load]
-                                            (no option = revert all patches; --armour/--revive remove the
-                                            removed legacy armour-regen / squadron-revive patches from old DLLs)
+  python -m deadlock_tools dll revert [DLL] [--max-rank] [--command-nodes] [--munition-load] [--repair-bay-shortcuts]
+                                            (no option = revert all patches)
 
 DLL defaults to the 'dll' path in deadlock.json. The result is written to the work tree at BSG_Data/Managed/Assembly-CSharp.dll
 (the original is never touched) and later runs continue from that file, so patches given in separate runs add up; --fresh
@@ -22,178 +21,16 @@ PATCHES (each is only applied when its option is given; re-running on a patched 
   --munition-load     let existing saves pick up a raised MunitionSlots count in battle (see 'dll munition -h')
   --repair-bay-actions N  assign indexed shortcuts and key mappings to repair actions (1-16)
 Back up the game's DLL, then merge the work-tree copy into BSG_Data/Managed/.
-The single patches can also be run on their own: dll armour ... / dll revive ... / dll munition ... (options --factor/--turns/--check/--revert).
+The munition patch can also be run on its own: dll munition ... (options --check/--revert).
 """
 import argparse, os, re, shutil, struct, sys, tempfile
 
 if __package__ in (None, ""): sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from deadlock_tools import config
 
-# ---- the individual patches (each also available on its own: 'armour' / 'revive') ----
-def _dll_armour(argv=None):
-    """
-ARMOUR REGENERATION - make flagged ships regenerate their ARMOUR in battle, in step with the Regenerative Hull Resin module.
-
-WHAT IT DOES
-    Patches Assembly-CSharp.dll so the Regenerative Hull Resin module's tick (every tick, same rate as its hull repair,
-    already scaled by the ship's Engineering subsystem) also restores the ship's normal armour:
-        every hull quadrant:  armour = Min(armour + hullRepairRate * FACTOR, that quadrant's maximum)
-    Only quadrants below their maximum change, so it works exactly "when the armour is damaged".
-    The hull still repairs as before.
-
-THE FLAG (which ships regenerate armour)
-    The flag is the SIGN of the module's hullPerTick value:
-        positive  (e.g.  0.2)  -> normal module: hull repair only, as in the unpatched game
-        negative  (e.g. -0.2)  -> hull repair of 0.2 AND armour regeneration
-    So every existing ship (positive values) is unchanged; only ships you give a negative value regenerate armour.
-    Set it with weapons:   --hull-regen 0.2 --armour-regen     (adds the module with -0.2)
-                                       --armour-regen                      (on a ship that already has the module)
-
-USAGE
-    python -m deadlock_tools dll armour [Assembly-CSharp.dll]       -> writes the work-tree DLL copy
-    python -m deadlock_tools dll armour Assembly-CSharp.dll --factor 5      armour per tick = hull rate x 5 (default 1)
-    python -m deadlock_tools dll armour Assembly-CSharp.dll --revert        -> restores the original methods
-    (re-running with a different --factor on an already patched DLL just changes the factor)
-
-    FACTOR is applied to EACH of the 6 quadrants every tick. The Mercury has 1000-1800 armour per quadrant, so use a
-    large hull-regen value or factor if you want it to be noticeable. Back up the game's DLL first.
-NOTES
-    Changes two methods in place (file size unchanged): RegenerativeHullResinModule's tick and an
-    unused decoy method in ArmourInfo that now holds the armour code. The script refuses a DLL it does not recognise.
-    The armour bar may only visibly update on the next hit if the HUD does not poll armour.
-"""
-    import argparse, struct, sys
-
-    TICK_OFF = 1679060
-    TICK_ORIG = bytes.fromhex("133004004800000010000011027bb91d00046f683b00062d012a027bba1d0004027bb81d00046f8d5f00060a027bb91d00046f6c3b0006027bb91d00047b16130004340f027bb91d00040617166f3e5c0006262a")
-    TICK_NEW = bytes.fromhex("133004004200000010000011027bb91d00046f683b00062d012a027bb91d00046f3e3b0006027bba1d0004027bb81d00046f8d5f00061616283b2f00060a027bb91d00040617166f3e5c0006262a000000000000")
-    H_OFF = 879476
-    H_ORIG = bytes.fromhex("13300300b800000025000011040a027b6a0f0004069822008043443644027b6a0f0004069803361d052c11027b6a0f0004068f36000001254e0359562200807e4410012b1c03027b6a0f00040698591001052c0d027b6a0f000406220000ea43a00322008038443306220020c7442a027b680f0004069822000005443644027b680f0004069803361d052c11027b680f0004068f36000001254e035956220000664410012b1c03027b680f00040698591001052c0d027b680f0004062200c0f744a0032a")
-    H_NEW = bytes.fromhex("133006005e00000025000011032200000000345403651001022c4d027b680f00042c45027b690f00042c3d160a06027b680f00048e692f30027b680f000406027b680f0004069803220000803f5a582200000000027b690f00040698289d05000aa00617580a2bc5032a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
-    FACTOR_OFF = 73      # offset of the factor float inside the helper
-    assert len(TICK_ORIG) == len(TICK_NEW) and len(H_ORIG) == len(H_NEW)
-
-
-    def helper(factor):
-        b = bytearray(H_NEW); struct.pack_into("<f", b, FACTOR_OFF, factor); return bytes(b)
-
-
-    def main():
-        ap = argparse.ArgumentParser(description=_dll_armour.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-        ap.add_argument("dll", nargs="?"); _sub_args(ap)
-        ap.add_argument("--check", action="store_true", help="only report whether this DLL has the armour regeneration patch (and its factor)")
-        ap.add_argument("--factor", type=float, default=1.0, help="armour restored per tick = hull repair rate x factor (default 1)")
-        a = ap.parse_args(argv); _sub_input(a)
-        d = bytearray(open(a.dll, "rb").read())
-        cur_tick = bytes(d[TICK_OFF:TICK_OFF + len(TICK_ORIG)]); cur_h = bytes(d[H_OFF:H_OFF + len(H_ORIG)])
-        masked = lambda x: x[:FACTOR_OFF] + x[FACTOR_OFF + 4:]
-        patched = cur_tick == TICK_NEW and masked(cur_h) == masked(H_NEW)
-        original = cur_tick == TICK_ORIG and cur_h == H_ORIG
-        if not (patched or original):
-            sys.exit("this DLL is not the expected version (the two methods are not at the expected place); not changing it")
-        if a.check:
-            print("armour regeneration patch: %s" % ("INSTALLED, factor %g" % struct.unpack_from("<f", cur_h, FACTOR_OFF)[0] if patched else "not installed (original code)"))
-            return
-        if a.revert:
-            if original: sys.exit("already original: nothing to do")
-            t, h = TICK_ORIG, H_ORIG
-        else:
-            t, h = TICK_NEW, helper(a.factor)
-        d[TICK_OFF:TICK_OFF + len(t)] = t; d[H_OFF:H_OFF + len(h)] = h
-        dst = a.dst or os.path.join(config.out_dir("dll", a.out), os.path.basename(a.dll))
-        config.write(dst, bytes(d), a.original)
-        print(("restored original methods" if a.revert else "armour regeneration installed (factor %g)" % a.factor), "->", dst)
-        if not a.revert: print("Back up the game's original Assembly-CSharp.dll, then replace it with this file (same name).")
-    main()
-
-
-def _dll_revive(argv=None):
-    """
-SQUADRON REVIVE - ships with a Munition Factory module rebuild their DESTROYED squadrons.
-
-WHAT IT DOES
-    Patches Assembly-CSharp.dll so that, in every battle, a FLAGGED ship that has the Munition Factory module (the passive
-    munition-resupply module of the Cylon Argos) rebuilds squadrons that were DESTROYED (the empty carrier slots):
-        a destroyed squadron (no hull left) is put back in its carrier slot, docked and ready to relaunch, with ONE fighter,
-        and the ship's NORMAL squadron repair (the repair crew's docked-squadron repair) is started on it, so the
-        numbers climb back by the game's own rules rather than from nothing to full at once.
-        --turns N adds an optional delay first: N x 120 progress, counted at the module's resupply rate (Armory
-        MunitionResupplyRange / 100, so it is slower when the Armory is damaged). Default 0 = revive at once.
-    Squadrons that still have hull (only damaged) are NOT touched (use the normal docking repair for those).
-
-THE FLAG (which ships do this)
-    The flag is a ship setting that only the editor used (ShipInfo "ShowExclusionInEditor", 0 or 1). Ships are 0 unless you
-    set it, so every ship (including the Argos) behaves exactly as before; only ships you flag rebuild squadrons.
-    Set it with weapons:   --munition-factory --squadron-revive    (adds the module AND the flag)
-                                       --squadron-revive                        (flag a ship that already has the module)
-
-    It works in all battle types: the game's own "revive squadron" routine was restricted to Survival battles; that
-    restriction is removed.  Ships without the flag are unaffected, enemy ships included.
-
-USAGE
-    python -m deadlock_tools dll revive [Assembly-CSharp.dll]       -> writes the work-tree DLL copy
-    python -m deadlock_tools dll revive Assembly-CSharp.dll --turns 60    delay before the revive (default 0 = at once; 8 = the nuke time)
-    python -m deadlock_tools dll revive Assembly-CSharp.dll --revert      -> restores the original methods
-    (re-running with a different --turns on an already patched DLL just changes the time)
-    TURNS x 120 is counted in module ticks; at full rate (1.0) a destroyed squadron takes TURNS x 120 ticks.
-
-NOTES
-    Changes three places in place (file size unchanged): MunitionFactoryModule.OnGameEvent, an unused
-    decoy method in the same class that now holds the revive code, and one byte in ShipInfo.ReviveSquadron.
-    The progress is stored in the squadron's (unused) LastRoundYaw field. The script refuses a DLL it does not recognise.
-    Works together with the armour patch (different methods). Back up the game's DLL first.
-"""
-    import argparse, struct, sys
-
-    OGE_OFF = 1587076
-    OGE_ORIG = bytes.fromhex("133003004b0000000000000002030428441501060214280800000a2d0e02284700000a14280800000a2c012a031f142e1f031f1f2e06031f452e082a0228e74f00062a0204742916000228f34f00062a0228f94f00062a")
-    OGE_NEW = bytes.fromhex("13300300420000000000000002030428441501060214280800000a2d0f031f142e25031f1f2e06031f452e0e2a0228e74f00060228e34f00062a0204742916000228f34f00062a0228f94f00062a000000000000000000")
-    H_OFF = 1586868
-    H_ORIG = bytes.fromhex("13300600c3000000f8040011027b591b00046f5a5d00060a062c04068e2d012a027b5b1b00046f050a000a068e692e300272e09503701e8d140000012517027b5b1b00046f050a000a8c2d000001a22517068e698c2d000001a228dd1701062a160b2b5c027b5b1b0004076f060a000a7b531b00042d450607a3f10400020c087bc6200004087bc52000042f2f02727bca00701d8d140000012516078c2d000001a22516027b591b00046f3600000aa228bb170106020728eb4f00060717580b07027b5b1b00046f050a000a32962a")
-    H_NEW = bytes.fromhex("13300600b2000000740300112b012a027b591b00040a067b1a1300042cf0066f683b00062ce8027b5a1b00042ce0160b07067be82000046f4b06000a2fd0067be8200004076f4906000a0c086f683b00062d6208257be7200004027b5a1b00046f405f0006587de7200004087be72000042200006145373d0822000000007de7200004086f1b5d0006087bf12000047b801400048e2c1e08087bf12000047b8014000416986f733b0006087bf12000046fc13f00060717580b3872ffffff0000000000000000000000000000000000")
-    TIMER_OFF = 114     # offset of the "ticks needed" float inside the helper
-    REV_OFF = 1828632         # ShipInfo.ReviveSquadron: BattleType == Survival check (ldc.i4.6 -> dup)
-    REV_ORIG, REV_NEW = 0x1c, 0x25
-    assert len(OGE_ORIG) == len(OGE_NEW) and len(H_ORIG) == len(H_NEW)
-
-
-    def helper(turns):
-        b = bytearray(H_NEW); struct.pack_into("<f", b, TIMER_OFF, turns * 120.0); return bytes(b)
-
-
-    def main():
-        ap = argparse.ArgumentParser(description=_dll_revive.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-        ap.add_argument("dll", nargs="?"); _sub_args(ap)
-        ap.add_argument("--check", action="store_true", help="only report whether this DLL has the squadron revive patch (and the rebuild time)")
-        ap.add_argument("--turns", type=float, default=0.0, help="delay before a destroyed squadron is revived, in turns of 120 ticks at full resupply rate (default 0 = at once; the normal squadron repair then does the restoring. 8 = the time a nuke takes)")
-        a = ap.parse_args(argv); _sub_input(a)
-        if a.turns < 0: sys.exit("--turns cannot be negative")
-        d = bytearray(open(a.dll, "rb").read())
-        cur_o = bytes(d[OGE_OFF:OGE_OFF + len(OGE_ORIG)]); cur_h = bytes(d[H_OFF:H_OFF + len(H_ORIG)]); cur_r = d[REV_OFF]
-        masked = lambda x: x[:TIMER_OFF] + x[TIMER_OFF + 4:]
-        patched = cur_o == OGE_NEW and masked(cur_h) == masked(H_NEW) and cur_r == REV_NEW
-        original = cur_o == OGE_ORIG and cur_h == H_ORIG and cur_r == REV_ORIG
-        if not (patched or original):
-            sys.exit("this DLL is not the expected version (the methods are not at the expected place); not changing it")
-        if a.check:
-            print("squadron revive patch: %s" % ("INSTALLED, %g turns at full rate" % (struct.unpack_from("<f", cur_h, TIMER_OFF)[0] / 120) if patched else "not installed (original code)"))
-            return
-        if a.revert:
-            if original: sys.exit("already original: nothing to do")
-            o, h, r = OGE_ORIG, H_ORIG, REV_ORIG
-        else:
-            o, h, r = OGE_NEW, helper(a.turns), REV_NEW
-        d[OGE_OFF:OGE_OFF + len(o)] = o; d[H_OFF:H_OFF + len(h)] = h; d[REV_OFF] = r
-        dst = a.dst or os.path.join(config.out_dir("dll", a.out), os.path.basename(a.dll))
-        config.write(dst, bytes(d), a.original)
-        print(("restored original methods" if a.revert else "squadron revive installed (%g turns = %g ticks at full rate)" % (a.turns, a.turns * 120)), "->", dst)
-        if not a.revert: print("Back up the game's original Assembly-CSharp.dll, then replace it with this file (same name).")
-    main()
-
-
-
+# ---- the individual patches (munition load and repair-bay shortcuts can also run on their own) ----
 def _sub_args(ap):
-    """options shared by the single-patch commands (armour / revive / munition)"""
+    """options shared by the single-patch commands (munition / repair-bay shortcuts)"""
     config.add_path_args(ap, "out")
     ap.add_argument("--revert", action="store_true")
     ap.add_argument("--fresh", action="store_true", help="start from the original DLL, not the work-tree copy")
@@ -269,7 +106,7 @@ def _dll_repair_bay_key(argv=None):
     PANEL_VISIBLE_OFFSET = 0xA6761  # get_VisibleInShipInfoPanel body (after tiny header)
     PANEL_HIDDEN = 0x16             # ldc.i4.0
     # This is an unused zero-filled run near the end of the managed .text section.
-    # Keep it separate from ArmourInfo's helper body used by the armour-regeneration patch.
+    # Keep it clear of the ArmourInfo helper body that the removed armour-regeneration patch used in older DLLs.
     CAVE_OFFSET = 0x935B10
     CAVE_SIZE = 14
     # Return RepairBayShortcutBase + (RadialMenuPosition - first repair position).
@@ -404,10 +241,16 @@ def check(dll):
         else:
             n_, (st_, b_) = v["tree-bound"], v["tree-elem"]
             print("command skill nodes: %d, one every %d rank(s) from rank %d (last at rank %d)" % (n_, st_, b_ - 1, b_ - 1 + (n_ - 1) * st_))
-    for fn in (_dll_armour, _dll_revive, _dll_munition, _dll_repair_bay_key):
+    for fn in (_dll_munition, _dll_repair_bay_key):
         try: fn([dll, "--check", "--dst", "-"])
         except SystemExit as e:
             if e.code not in (0, None): print(e)
+
+
+def _managed_dir(levels, dll):
+    """the game's Managed/ folder: <levels>/Managed, else the folder holding the configured DLL"""
+    inside = os.path.join(levels, "Managed")
+    return inside if os.path.isdir(inside) else os.path.dirname(os.path.abspath(dll))
 
 
 def main():
@@ -423,8 +266,6 @@ def main():
     ap.add_argument("--munition-load", action="store_true", help="patch/revert the munition load check")
     ap.add_argument("--repair-bay-actions", type=int, help="assign indexed shortcuts and key mappings to repair actions (1-16)")
     ap.add_argument("--repair-bay-shortcuts", action="store_true", help="revert indexed repair-bay shortcut support and its staged key mappings")
-    ap.add_argument("--armour", action="store_true", help="revert: remove the legacy armour-regeneration patch (feature removed)")
-    ap.add_argument("--revive", action="store_true", help="revert: remove the legacy squadron-revive patch (feature removed)")
     a = ap.parse_args(); a.dll = a.dll or a.dll_opt
     original = config.setting("dll", a.dll)
     if a.cmd == "check":
@@ -453,11 +294,9 @@ def main():
         if a.repair_bay_actions is not None:
             step(_dll_repair_bay_key, ["--actions", str(a.repair_bay_actions)], "f.dll")
             from deadlock_tools.repair_shortcuts import update_key_assets
-            update_key_assets(config.setting("levels", a.levels), config.out_dir("levels", a.out), a.repair_bay_actions)
+            update_key_assets(config.setting("levels", a.levels), config.out_dir("levels", a.out), a.repair_bay_actions, _managed_dir(config.setting("levels", a.levels), original))
     else:
-        every = not (a.armour or a.revive or a.max_rank is not None or a.command_nodes is not None or a.munition_load or a.repair_bay_actions is not None or a.repair_bay_shortcuts)
-        if a.armour or every: step(_dll_armour, ["--revert"], "a.dll")
-        if a.revive or every: step(_dll_revive, ["--revert"], "b.dll")
+        every = not (a.max_rank is not None or a.command_nodes is not None or a.munition_load or a.repair_bay_actions is not None or a.repair_bay_shortcuts)
         if a.max_rank is not None or every: nxt = os.path.join(tmp, "c.dll"); set_max_rank(cur, 10, nxt); cur = nxt
         if a.command_nodes is not None or every: nxt = os.path.join(tmp, "d.dll"); set_command_nodes(cur, None, 1, nxt); cur = nxt
         if a.munition_load or every: step(_dll_munition, ["--revert"], "e.dll")
@@ -467,7 +306,7 @@ def main():
             step(_dll_repair_bay_key, ["--revert"], "f.dll")
             if a.repair_bay_shortcuts or repair_patch_was_installed:
                 from deadlock_tools.repair_shortcuts import update_key_assets
-                update_key_assets(config.setting("levels", a.levels), config.out_dir("levels", a.out), 0)
+                update_key_assets(config.setting("levels", a.levels), config.out_dir("levels", a.out), 0, _managed_dir(config.setting("levels", a.levels), original))
     if config.same_file(cur, out): print("nothing changed ->", out)
     else: shutil.copyfile(cur, out); print("done ->", out)
     shutil.rmtree(tmp, ignore_errors=True)

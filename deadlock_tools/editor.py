@@ -1483,7 +1483,7 @@ class Project:
         """Undo selected DLL patches in the work-tree copy."""
         dst = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
         cmd = tool_cmd("dll") + ["revert", self.dll, "--levels", self.levels, "-o", self.stage_root]
-        for key, flag in (("armour", "--armour"), ("revive", "--revive"), ("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"), ("munition_load", "--munition-load"), ("repair_bay_shortcuts", "--repair-bay-shortcuts")):
+        for key, flag in (("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"), ("munition_load", "--munition-load"), ("repair_bay_shortcuts", "--repair-bay-shortcuts")):
             if o.get(key) in (True, "true", 1, "1"): cmd.append(flag)
         r = self.run_staged("dll", cmd, 300)
         return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr).replace(self.stage_root, self.work), "dst": dst}

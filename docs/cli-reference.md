@@ -125,13 +125,14 @@ Run `python -m deadlock_tools dll check` to inspect the staged DLL or configured
 python -m deadlock_tools dll patch --max-rank 20 --command-nodes 10
 python -m deadlock_tools dll patch --repair-bay-actions 2 --levels /path/to/BSG_Data
 python -m deadlock_tools dll check
-python -m deadlock_tools dll revert --revive
+python -m deadlock_tools dll revert --munition-load
 python -m deadlock_tools dll revert --repair-bay-shortcuts --levels /path/to/BSG_Data
 ```
 
-The legacy armour-regeneration (`--armour-factor`) and squadron-revive (`--revive-turns`) patches were removed in favour of
-the custom armour repair and squadron replacement modules. `dll check` still reports them and `dll revert --armour` /
-`--revive` (or a plain `dll revert`) removes them from a DLL patched by an older version.
+The legacy armour-regeneration (`--armour-factor`) and squadron-revive (`--revive-turns`) patches were removed
+completely, including their check and revert. Use the custom armour repair and squadron replacement modules. To get rid
+of the old patches, rebuild from an unpatched DLL. The editor's custom-module build always starts from
+`work/.deadlock-tools/base/Assembly-CSharp.dll`, so that file must be a clean copy.
 
 `dll revert` with no patch flags reverts all supported patches. The `dll armour`, `dll revive`, and `dll munition` subcommands also provide single-patch operations with `--check` and `--revert`. Repair shortcut changes also stage the relevant key mappings and descriptions. The tool checks for expected code patterns before patching.
 
