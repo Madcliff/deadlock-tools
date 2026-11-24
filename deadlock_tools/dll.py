@@ -2,19 +2,18 @@
 """
 dll - every Assembly-CSharp.dll patch for the Deadlock tools, in one place.
 
-  python -m deadlock_tools dll patch  [DLL] [--armour-factor F] [--revive-turns N] [--max-rank N] [--munition-load] [--repair-bay-key]
+  python -m deadlock_tools dll patch  [DLL] [--max-rank N] [--munition-load] [--repair-bay-key]
                                             [--command-nodes N [--command-step S] [--command-first-rank R]] [--fresh]
   python -m deadlock_tools dll check  [DLL]
   python -m deadlock_tools dll revert [DLL] [--armour] [--revive] [--max-rank] [--command-nodes] [--munition-load]
-                                            (no option = revert all patches)
+                                            (no option = revert all patches; --armour/--revive remove the
+                                            removed legacy armour-regen / squadron-revive patches from old DLLs)
 
 DLL defaults to the 'dll' path in deadlock.json. The result is written to the work tree at BSG_Data/Managed/Assembly-CSharp.dll
 (the original is never touched) and later runs continue from that file, so patches given in separate runs add up; --fresh
 starts again from the original. 'check' with no DLL reports on the work-tree copy if it exists, else on the original.
 
 PATCHES (each is only applied when its option is given; re-running on a patched DLL just changes the values)
-  --armour-factor F   armour regeneration for ships built with 'weapons --armour-regen' (armour per tick = hull rate x F)
-  --revive-turns N    squadron revive for ships built with 'weapons --squadron-revive' (N turns; 0 = rebuild at the next opportunity)
   --max-rank N        commander max rank (game default 10), for 'shipdb setcommanders'
   --command-nodes N   number of nodes in the Command (fleet-size) column of the commander skill tree. Game default: 4 nodes, available at
                       commander rank 1/3/5/7. Node i becomes available at rank R + i*S, with --command-first-rank R (default 1) and
@@ -334,7 +333,12 @@ def set_max_rank(src, value, dst):
     if not hits: raise SystemExit("max-rank patch: expected 2 sites - this DLL build differs, nothing written")
     assert 5 <= value <= 100
     for pos, _ in hits: d[pos] = value
-    open(dst, "wb").write(d); print("commander max rank %d -> %d -> %s" % (hits[0][1], value, dst))
+    with open(dst, "wb") as f:
+        f.write(d)
+        f.flush()
+        if hasattr(os, 'fsync'):
+            os.fsync(f.fileno())
+    print("commander max rank %d -> %d -> %s" % (hits[0][1], value, dst))
 
 
 # ---- Command-column node count (OPHEFGLELFC.KDNKKEKBOMG = int[4]{2,4,6,8}: the ranks at which a command point is earned) ----
@@ -381,7 +385,11 @@ def set_command_nodes(src, n, step, dst, first=1):
     if n is not None and not (1 <= n <= 60 and 1 <= step <= 20 and 1 <= first <= 60 and first + 1 + (n - 1) * step <= 100): raise SystemExit("--command-nodes must be 1-60, --command-step 1-20, --command-first-rank 1-60")
     for pos, ln, kind, _ in sites:
         new = _cmd_bytes(kind, T, n, step, n is None, first + 1); assert len(new) == ln, kind; d[pos:pos + ln] = new
-    open(dst, "wb").write(d)
+    with open(dst, "wb") as f:
+        f.write(d)
+        f.flush()
+        if hasattr(os, 'fsync'):
+            os.fsync(f.fileno())
     print("command skill nodes -> %s -> %s" % ("original (4 nodes, at commander rank 1/3/5/7)" if n is None else "%d nodes, at commander rank %s" % (n, ", ".join(str(first + i * step) for i in range(min(n, 10))) + (" ... %d" % (first + (n - 1) * step) if n > 10 else "")), dst))
 
 
@@ -403,20 +411,20 @@ def check(dll):
 
 
 def main():
-    sub = {"armour": _dll_armour, "revive": _dll_revive, "munition": _dll_munition}
+    sub = {"munition": _dll_munition}
     if sys.argv[1:2] and sys.argv[1] in sub: sub[sys.argv[1]](sys.argv[2:]); return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["patch", "check", "revert"]); ap.add_argument("dll", nargs="?", metavar="DLL", help="default: 'dll' in deadlock.json")
     ap.add_argument("--dll", dest="dll_opt", metavar="PATH", help="same as giving DLL")
     config.add_path_args(ap, "out", "levels")
     ap.add_argument("--fresh", action="store_true", help="start from the original DLL, not the work-tree copy (earlier patches are dropped)")
-    ap.add_argument("--armour-factor", type=float); ap.add_argument("--revive-turns", type=float)
     ap.add_argument("--max-rank", type=int, nargs="?", const=10, help="patch: new max rank; revert: give the flag alone")
     ap.add_argument("--command-nodes", type=int, nargs="?", const=0, help="patch: node count; revert: give the flag alone"); ap.add_argument("--command-step", type=int, default=1); ap.add_argument("--command-first-rank", type=int, default=1)
     ap.add_argument("--munition-load", action="store_true", help="patch/revert the munition load check")
     ap.add_argument("--repair-bay-actions", type=int, help="assign indexed shortcuts and key mappings to repair actions (1-16)")
     ap.add_argument("--repair-bay-shortcuts", action="store_true", help="revert indexed repair-bay shortcut support and its staged key mappings")
-    ap.add_argument("--armour", action="store_true"); ap.add_argument("--revive", action="store_true")
+    ap.add_argument("--armour", action="store_true", help="revert: remove the legacy armour-regeneration patch (feature removed)")
+    ap.add_argument("--revive", action="store_true", help="revert: remove the legacy squadron-revive patch (feature removed)")
     a = ap.parse_args(); a.dll = a.dll or a.dll_opt
     original = config.setting("dll", a.dll)
     if a.cmd == "check":
@@ -435,12 +443,10 @@ def main():
             print(e.code); return
         cur = nxt
     if a.cmd == "patch":
-        if a.armour_factor is None and a.revive_turns is None and a.max_rank is None and not a.command_nodes and not a.munition_load and a.repair_bay_actions is None:
+        if a.max_rank is None and not a.command_nodes and not a.munition_load and a.repair_bay_actions is None:
             ap.error("give at least one patch option")
         if a.repair_bay_actions is not None and not 1 <= a.repair_bay_actions <= 16:
             ap.error("--repair-bay-actions must be between 1 and 16")
-        if a.armour_factor is not None: step(_dll_armour, ["--factor", str(a.armour_factor)], "a.dll")
-        if a.revive_turns is not None: step(_dll_revive, ["--turns", str(a.revive_turns)], "b.dll")
         if a.max_rank is not None: nxt = os.path.join(tmp, "c.dll"); set_max_rank(cur, a.max_rank, nxt); cur = nxt
         if a.command_nodes: nxt = os.path.join(tmp, "d.dll"); set_command_nodes(cur, a.command_nodes, a.command_step, nxt, a.command_first_rank); cur = nxt
         if a.munition_load: step(_dll_munition, [], "e.dll")

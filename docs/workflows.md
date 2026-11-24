@@ -9,8 +9,8 @@
 | Clone or resize turrets | | Edit the mounts | |
 | Micro-FTL, Predictive Augury, or stealth | | Add the ability and its battle-menu control | |
 | Hull regeneration | | Add the Hull Resin module | |
-| Armour regeneration | | Add or flag Hull Resin | Apply the armour regeneration patch |
-| Rebuild destroyed squadrons | | Add or use Munition Factory and enable squadron revive | Apply the squadron revive patch |
+| Armour regeneration | | Add the custom armour repair module | Custom-module DLL (rebuilt automatically on save) |
+| Rebuild destroyed squadrons | | Add the custom squadron replacement module | Custom-module DLL (rebuilt automatically on save) |
 | Increase commander ranks | Extend the rank and XP tables | | Raise the rank cap and configure command nodes as needed |
 
 The ship editor's **Hull & armour** fields come from the level ship database, while **Bundle hull & armour** comes from the ship prefab. Corresponding hull and armour values sync 1:1. If they disagree, the editor offers **Use level data as source** and **Use bundle as source**; choose which file has the values you want to keep. Click **Apply** in the top bar to save the correction to the work tree. **Armour regen** under **Ship systems** is a separate passive behaviour on the prefab.
@@ -27,11 +27,11 @@ The ship editor's **Hull & armour** fields come from the level ship database, wh
 
 1. On the **Ships** page, choose **Copy and add a ship…**.
 2. Select a donor ship and its bundle, then enter a unique database name, in-game display name, new bundle filename, and blueprint text. Choose the capital-ship or battlestar research list.
-3. Create the ship. The editor copies the donor's full ship record into each ship table, allocates a new ID, adds the ship to campaign research, creates fresh localization entries, and copies the bundle into `work/BSG_Data/StreamingAssets/`.
+3. Create the ship. The editor copies the donor's full ship record into each ship table, allocates a new ID, adds the ship to campaign research, registers it in `FleetModelFactory`, `ProjectionFactory`, `ShipImageDataTable`, and the battle `ShipFactory`, and adds the ID to the working DLL's `ShipType` enum. The enum is needed for fleet-placement collision checks; `ShipFactory` maps the type to its battle bundle so it can spawn in combat. It creates fresh localization entries and copies the bundle into `work/BSG_Data/StreamingAssets/` using a lowercase filename for case-sensitive game installs. It also renames the bundle internal AssetBundle name, prefab container path, and referenced prefab root to match that key, which the game uses for `LoadAsset<GameObject>`. It sets `ShipInfo.ShipType` to the new database ID so the in-game ship record identifies the clone rather than its donor. The copied ship record retains the donor's preview art bundle, so its research card uses the donor artwork.
 
 ## Commander trees
 
-The **Commanders** page loads every ability definition and bonus found in the configured level data. Edit subsystem choices, each ability's bonus/display settings, and its unlock rank. The tree preview, subsystem choice editor, and ability list have separate scroll areas. **Restore loaded tree mapping** returns to the exact mapping from the loaded files. New custom abilities support flat and percentage ship-stat modifiers; saving writes the ability and bonus records, localization, and required work-tree DLL changes.
+The **Commanders** page loads every ability definition and bonus found in the configured level data. Edit subsystem choices, each ability's bonus/display settings, and its unlock rank. The tree preview, subsystem choice editor, and ability list have separate scroll areas. **Restore loaded tree mapping** returns to the exact mapping from the loaded files. New custom abilities support flat and percentage ship-stat modifiers; saving writes the ability and bonus records, localization, and required work-tree DLL changes. When a tree has more than three choices, saving also installs the extended rank lookup even if those choices use their default ranks.
 4. Select the new ship and edit its fields and copied bundle as needed. The donor preview art and its `PreviewAssetBundle` reference are retained. The clone is a starting point; check its mounts, abilities, shared assets, and game presentation before using it in a campaign.
 
 Creation is additive and writes to the work tree. It uses the effective ship records (including prior work-tree edits), and rejects duplicate ship names and bundle filenames.
@@ -60,15 +60,12 @@ Use **Inspect current bundle** to compare the number of launch actions and the n
 - **Bay icon** sets the marker coordinates relative to its launch bay. Enter one `SLOT=X,Y,Z` line per marker. This also works on bundles with extra bays already installed. For example, `4=12.5,4.28,8.99` moves the marker for slot 4. Use the inspector and a game preview to tune the spacing.
 - **Split squadrons** groups the battle launch buttons. **Ability submenu** groups the added Actions-menu abilities. These organise the battle radial menus.
 
-## Enable passive armour regeneration
+## Armour regeneration and squadron replacement
 
-1. Select the ship and inspect its bundle. Under **Ship systems**, enable **Armour regen**. If the prefab needs a Hull Resin module, supply a positive **Hull regen** value, for example `0.2`. Leave **Hull regen** blank when flagging an existing module.
-2. Click **Save bundle edits**. If the required DLL patch is missing, enter an armour regeneration factor at the prompt. This factor multiplies the hull repair rate for armour restoration.
-3. Check the save result and install the staged bundle and, if generated, the patched DLL.
-
-The same prompt workflow applies to **Squadron revive**. The prefab needs a Munition Factory module. Supply **Munition factory** when adding it and choose a revive delay when prompted. A value of `0` starts the revive as soon as the game can process it.
-
-The editor checks the staged DLL first. An installed patch keeps its current value, which you can change on the **DLL** page. Cancelling the prompt stops the save. An unrecognised DLL build stops the save at the check. If a later DLL write fails after the prefab saves, the result reports the saved bundle and the DLL error.
+Use **Custom armour repair** and **Custom squadron replacement** under **Custom ship modules**. The old sign-flag armour
+regeneration and Munition Factory squadron revive were removed. Saving a bundle that still carries those old flags
+clears them once the replacement module is installed, and `dll revert --armour --revive` removes the old patches from a
+DLL made by an older version.
 
 ## Add support abilities
 
@@ -117,6 +114,6 @@ In **Bundle file**, select your installed Mercury bundle and use **Inspect curre
 |---|---|
 | Stats look unchanged | Confirm that the staged level files were installed where the game reads them and that the expected ship appears in `shipdb show`. |
 | Battle shows fewer launch options than the database | Compare the database totals to the launch actions in **Inspect current bundle**. Verify that the edited encrypted bundle is installed. |
-| Armour regeneration or squadron revive is missing | Check the prefab module and flag, then run `dll check` against the DLL actually installed in the game. |
+| Armour repair or squadron replacement is missing | Check that the custom module is listed under **Installed abilities**, and that the custom-module DLL from the work tree is installed in the game. |
 | A bundle tool cannot find a mount, bay, or ability component | Inspect the selected prefab and read the tool's error. Some operations require specific components, geometry, or available radial-menu positions. |
 | A later prefab edit dropped earlier changes | Rebuild from the chosen source with the complete option set. |

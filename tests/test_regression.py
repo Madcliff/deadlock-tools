@@ -61,12 +61,15 @@ class Regression(unittest.TestCase):
 
     def test_dll_all_patches_in_one_run_and_stacked(self):
         self.need("dll")
-        self.run_tool("dll", "patch", INPUTS["dll"], "--armour-factor", "0.1", "--revive-turns", "0", "--max-rank", "20", "--command-nodes", "10", "-o", self.out)
-        self.assertHash(os.path.join(self.out, "dll", os.path.basename(INPUTS["dll"])), "52190e7e9d4ee6251c7fc6edfc986ec702944d43")
+        # The legacy armour-regen / squadron-revive patches were removed, so the old recorded
+        # four-patch hash no longer applies: one run and stacked runs must agree instead.
+        self.run_tool("dll", "patch", INPUTS["dll"], "--max-rank", "20", "--command-nodes", "10", "-o", self.out)
+        single = sha1(os.path.join(self.out, "dll", os.path.basename(INPUTS["dll"])))
+        self.assertNotEqual(single, INPUT_SHA1["dll"])
         stacked = os.path.join(self.out, "stacked")
-        for opt in (["--armour-factor", "0.1"], ["--revive-turns", "0"], ["--max-rank", "20"], ["--command-nodes", "10"]):
+        for opt in (["--max-rank", "20"], ["--command-nodes", "10"]):
             self.run_tool("dll", "patch", INPUTS["dll"], *opt, "-o", stacked)
-        self.assertHash(os.path.join(stacked, "dll", os.path.basename(INPUTS["dll"])), "52190e7e9d4ee6251c7fc6edfc986ec702944d43")
+        self.assertHash(os.path.join(stacked, "dll", os.path.basename(INPUTS["dll"])), single)
         self.run_tool("dll", "revert", INPUTS["dll"], "-o", stacked)
         self.assertHash(os.path.join(stacked, "dll", os.path.basename(INPUTS["dll"])), INPUT_SHA1["dll"])
 
@@ -205,8 +208,8 @@ class Regression(unittest.TestCase):
         out = self.run_tool("weapons", INPUTS["mercury_dec"], "--list-mounts")
         self.assertEqual(hashlib.sha1(out.encode()).hexdigest(), "b851f19c648b7d7a40d7f44f48e1f3a2db608453")
         self.run_tool("weapons", INPUTS["mercury_dec"], "-o", self.out, "--clone", "fore=3", "--layout", "free", "--scale", "fore=0.7", "--clone-scale", "0.7",
-                      "--fighter-slots", "5", "--utility-slots", "1", "--munition-slots", "4", "--hull-regen", "0.5", "--munition-factory", "--squadron-revive",
-                      "--armour-regen", "--mini-jump", "--augury", "--stealth", INPUTS["orion_dec"], "--ability-submenu")
+                      "--fighter-slots", "5", "--utility-slots", "1", "--munition-slots", "4", "--hull-regen", "0.5", "--munition-factory",
+                      "--mini-jump", "--augury", "--stealth", INPUTS["orion_dec"], "--ability-submenu")
         self.assertHash(os.path.join(self.out, "bundles", "colonialmercury"), "5c3d1c82c69b4653b9e67b2ad1fbf13cd43f21b2")
 
 

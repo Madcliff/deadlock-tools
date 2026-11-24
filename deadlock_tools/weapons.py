@@ -5,7 +5,7 @@ weapons - edit a Deadlock ship bundle (built around the Colonial Mercury).
 What it does (all optional, combine as needed; run with -h for every option and examples):
     turrets      clone / resize weapon mounts, placed on free hull space with left-right symmetry (--clone, --layout free, --scale, --clone-scale)
     slots        extra munition slots and squadron slots, with launch bays, build-screen icons and optional squadron submenus
-    systems      hull-resin regen, armour regen, Munition Factory, squadron revive
+    systems      hull-resin regen, Munition Factory, custom armour repair / squadron replacement
     abilities    micro-FTL jump, predictive augury, stealth (donors: Argos, guardian basestar, Orion), optionally grouped in an Abilities submenu
 
 Usage
@@ -15,7 +15,7 @@ ship-bundle folder. Encrypted bundles are decrypted into the work folder's tool 
 encrypted and under the game's file name, to the work tree's BSG_Data/StreamingAssets/ folder.
 
 Every run starts again from the original bundle (turret cloning is not repeatable), so give all options in ONE command.
-DLL patches (armour regen, squadron revive, commander ranks) are in 'dll'; slot counts and other ship data in the level
+DLL patches (commander ranks, munition load, repair shortcuts) are in 'dll'; slot counts and other ship data in the level
 files are edited with 'shipdb' and must match the numbers used here (the battle UI shows min(prefab buttons, level-data slots)).
 """
 """Unity serialized file (v17, with type tree) reader/writer + UnityFS bundle container. Dependency free."""
@@ -155,11 +155,12 @@ class SerFile:
         if n.meta & 0x4000: out += b"\0" * (al(len(out)) - len(out))
 
     # ----- rebuild the file with replaced / appended object data -----
-    def rebuild(self, replaced=None, appended=None):
-        """replaced: {pid: bytes}; appended: [(pid, type_index, bytes)]. Returns new file bytes."""
-        replaced = replaced or {}; appended = appended or []
+    def rebuild(self, replaced=None, appended=None, removed=None):
+        """replaced: {pid: bytes}; appended: [(pid, type_index, bytes)]; removed: set of pids to drop. Returns new file bytes."""
+        replaced = replaced or {}; appended = appended or []; removed = set(removed or ())
         blobs = []
         for o in self.objs:
+            if o.pid in removed: continue
             blobs.append((o.pid, o.tidx, replaced.get(o.pid, self.raw(o))))
         for pid, ti, b in appended: blobs.append((pid, ti, b))
         blobs.sort(key=lambda t: t[0])   # keep the object table sorted by path id (Unity may binary-search it)
@@ -256,8 +257,19 @@ def parse_bundle(d):
     j = d.index(b"\0", o); rev = d[o:j].decode(); o = j + 1
     size, cs, us, fl = struct.unpack(">qIII", d[o:o + 20]); hdr_end = o + 20
     comp = fl & 0x3f
-    assert ver == 6 and not fl & 0x80, "unsupported UnityFS layout (expected a v6 bundle with the block list at the start)"
-    bi = _decompress(d[hdr_end:hdr_end + cs], us, comp)          # block list (LZMA / LZ4 / none)
+    if ver != 6:
+        raise ValueError(f"unsupported UnityFS version {ver} (expected version 6)")
+    if not hdr_end <= size <= len(d) or not 0 < cs <= size - hdr_end:
+        raise ValueError("invalid UnityFS size or block list length")
+    if fl & 0x80:  # BlocksInfoAtTheEnd
+        info_offset = size - cs
+        data_offset, data_end = hdr_end, info_offset
+    else:
+        info_offset = hdr_end
+        data_offset, data_end = hdr_end + cs, size
+    bi = _decompress(d[info_offset:info_offset + cs], us, comp)
+    if len(bi) != us:
+        raise ValueError("UnityFS block list has an incorrect uncompressed size")
     p = 16; nb = struct.unpack(">i", bi[p:p + 4])[0]; p += 4
     blocks = []
     for _ in range(nb): blocks.append(struct.unpack(">IIH", bi[p:p + 10])); p += 10
@@ -266,24 +278,123 @@ def parse_bundle(d):
     for _ in range(nn):
         off, sz, f = struct.unpack(">qqI", bi[p:p + 20]); p += 20
         e = bi.index(b"\0", p); nodes.append((off, sz, f, bi[p:e].decode())); p = e + 1
-    data = b""; q = hdr_end + cs
-    for usz_, csz_, f_ in blocks:                                # data blocks (LZMA / LZ4 / none) -> one uncompressed buffer
-        data += _decompress(d[q:q + csz_], usz_, f_ & 0x3f); q += csz_
-    return dict(version=ver, player=pl, revision=rev, flags=fl, hash=bi[:16], nodes=nodes, data=data)
+    decoded = []
+    q = data_offset
+    for uncompressed_size, compressed_size, block_flags in blocks:
+        end = q + compressed_size
+        if end > data_end:
+            raise ValueError("UnityFS data block extends past the data section")
+        block = _decompress(d[q:end], uncompressed_size, block_flags & 0x3f)
+        if len(block) != uncompressed_size:
+            raise ValueError("UnityFS data block has an incorrect uncompressed size")
+        decoded.append(block)
+        q = end
+    return dict(version=ver, player=pl, revision=rev, flags=fl, hash=bi[:16], nodes=nodes, data=b"".join(decoded))
 
 
 def write_bundle(path, b, node_blobs):
     """node_blobs: list of (flags, name, bytes) in order -> uncompressed single block bundle."""
-    data = b""; nodes = []
+    import sys
+    # Validate all blobs exist and have valid size before writing
+    nodes = []
+    data = b""
     for f, name, blob in node_blobs:
-        nodes.append((len(data), len(blob), f, name)); data += blob
+        if not isinstance(blob, bytes):
+            raise TypeError(f"Expected bytes for {name!r}, got {type(blob)}")
+        if len(blob) != 0 and not blob:
+            raise ValueError(f"Blob for {name!r} is empty but has non-zero length claim")
+        nodes.append((len(data), len(blob), f, name))
+        data += blob
     bi = bytearray(b["hash"]) + struct.pack(">i", 1) + struct.pack(">IIH", len(data), len(data), 0x40) + struct.pack(">i", len(nodes))
     for off, sz, f, name in nodes: bi += struct.pack(">qqI", off, sz, f) + name.encode() + b"\0"
     hdr = b"UnityFS\0" + struct.pack(">I", b["version"]) + b["player"].encode() + b"\0" + b["revision"].encode() + b"\0"
     total = len(hdr) + 8 + 4 + 4 + 4 + len(bi) + len(data)
     out = hdr + struct.pack(">qIII", total, len(bi), len(bi), 0x40) + bytes(bi) + data
     assert len(out) == total, (len(out), total)
-    open(path, "wb").write(out)
+    with open(path, "wb") as f:
+        f.write(out)
+        f.flush()
+        # Try to sync to disk for data integrity, but handle platforms that don't support fsync
+        if hasattr(f, 'fsync'):
+            try:
+                f.fsync()
+            except (AttributeError, IOError):
+                # Some platforms (Windows in some cases) or filesystems don't support fsync
+                pass
+
+
+def rename_bundle_asset(data, target_name, ship_type_id=None):
+    """Relink a copied ship prefab and optionally assign its new database ID.
+
+    Deadlock calls AssetBundle.LoadAsset<GameObject>(assetName), where the same
+    assetName is also the bundle filename. Renaming only the file therefore
+    leaves Unity's AssetBundle container pointing at the donor prefab name.
+    A cloned ShipInfo also retains the donor ShipType unless a new ID is given.
+    """
+    import tempfile
+
+    data = bytes(data)
+    target_name = str(target_name).lower()
+    if ship_type_id is not None and (type(ship_type_id) is not int or ship_type_id < 0):
+        raise ValueError("Ship type ID must be a non-negative integer.")
+    encrypted = not data.startswith(b"UnityFS\0")
+    bundle = parse_bundle(data)
+    node_blobs = []
+    for offset, size, flags, node_name in bundle["nodes"]:
+        blob = bundle["data"][offset:offset + size]
+        if node_name.startswith("CAB-") and not node_name.endswith(".resS"):
+            serialized = SerFile(blob)
+            replacements = {}
+            roots = []
+            for obj in serialized.objs:
+                if obj.classid != 142:  # Unity AssetBundle
+                    continue
+                asset_bundle, _ = serialized.read(obj)
+                asset_bundle["m_Name"] = target_name
+                container = asset_bundle.get("m_Container", [])
+                if len(container) != 1:
+                    raise ValueError("Expected one prefab in the copied ship bundle.")
+                entry = container[0]
+                old_path = entry["first"]
+                directory = old_path.rsplit("/", 1)[0]
+                entry["first"] = directory + "/" + target_name.lower() + ".prefab"
+                pointer = entry["second"]["asset"]
+                if pointer.get("m_FileID") != 0:
+                    raise ValueError("The ship prefab points into an external serialized file.")
+                roots.append(pointer["m_PathID"])
+                replacements[obj.pid] = serialized.write(obj, asset_bundle)
+            if len(roots) != 1:
+                raise ValueError("Could not identify the copied bundle's single prefab root.")
+            root = next((obj for obj in serialized.objs if obj.pid == roots[0]), None)
+            if root is None or root.classid != 1:
+                raise ValueError("The bundle's prefab pointer does not refer to a GameObject.")
+            value, _ = serialized.read(root)
+            value["m_Name"] = target_name
+            replacements[root.pid] = serialized.write(root, value)
+            if ship_type_id is not None:
+                scripts = {obj.pid: serialized.read(obj)[0].get("m_ClassName")
+                           for obj in serialized.objs if obj.classid == 115}
+                ship_infos = []
+                for obj in serialized.objs:
+                    if obj.classid != 114:
+                        continue
+                    fields, _ = serialized.read(obj)
+                    if (scripts.get(fields.get("m_Script", {}).get("m_PathID")) == "ShipInfo"
+                            and fields.get("m_GameObject", {}).get("m_PathID") == root.pid):
+                        ship_infos.append((obj, fields))
+                if len(ship_infos) != 1:
+                    raise ValueError(f"Expected one ShipInfo on the copied prefab root, found {len(ship_infos)}.")
+                ship_info, fields = ship_infos[0]
+                fields["ShipType"] = ship_type_id
+                replacements[ship_info.pid] = serialized.write(ship_info, fields)
+            blob = serialized.rebuild(replacements)
+        node_blobs.append((flags, node_name, blob))
+
+    with tempfile.TemporaryDirectory(prefix="deadlock-bundle-rename-") as temp:
+        plain_path = os.path.join(temp, "bundle.unity")
+        write_bundle(plain_path, bundle, node_blobs)
+        output = open(plain_path, "rb").read()
+    return xor_bytes(output) if encrypted else output
 
 
 # ======================================================================================
@@ -798,8 +909,22 @@ def prefab_range(value):
             and all(type(endpoint) in (float, int) for endpoint in value.values()))
 
 
+EDITABLE_SHIP_SUBSYSTEMS = {
+    "CIC": "CIC",
+    "Navigation": "Navigation",
+    "FireControl": "Fire Control",
+    "Engineering": "Engineering",
+    "TechLab": "Tech Bay",
+    "Hangar": "Hangar",
+    "Armory": "Armoury",
+    "RepairCrew": "Repair Crew",
+}
+SUBSYSTEM_SWITCHES = {"TechLab.UseHackingStrength", "TechLab.UseMiniJumpRange"}
+
+
 def ship_prefab_fields(prefab):
-    """Find editable fields and installed ability modules on the main ship."""
+    """Find editable fields on the main ship, its abilities, and its subsystems."""
+    from math import isfinite
     scripts = {obj.pid: prefab.read(obj)[0]["m_ClassName"]
                for obj in prefab.objs if obj.classid == 115}
     ships = []
@@ -812,17 +937,38 @@ def ship_prefab_fields(prefab):
         return None, {}, {}
     _, ship = max(ships, key=lambda item: len(prefab.read(
         prefab.by_pid[item[1]["m_GameObject"]["m_PathID"]])[0]["m_Component"]))
-    owner = prefab.read(prefab.by_pid[ship["m_GameObject"]["m_PathID"]])[0]
+    owner_pid = ship["m_GameObject"]["m_PathID"]
+    owner = prefab.read(prefab.by_pid[owner_pid])[0]
+    transforms = {obj.pid: prefab.read(obj)[0] for obj in prefab.objs if obj.classid == 4}
+    root_transform = next((ref["component"]["m_PathID"] for ref in owner["m_Component"]
+                           if ref["component"]["m_PathID"] in transforms), None)
+    descendants = {owner_pid}
+    pending = [root_transform] if root_transform is not None else []
+    visited = set()
+    while pending:
+        pid = pending.pop()
+        if pid in visited:
+            continue
+        visited.add(pid)
+        fields = transforms[pid]
+        descendants.add(fields["m_GameObject"]["m_PathID"])
+        pending.extend(child["m_PathID"] for child in fields["m_Children"] if child["m_PathID"] in transforms)
     result = {}
     abilities = {}
     repair_bays = 0
-    for component in owner["m_Component"]:
-        ref = component["component"]
-        obj = prefab.by_pid.get(ref["m_PathID"]) if not ref["m_FileID"] else None
-        if obj is None or obj.classid != 114:
+    owner_components = [prefab.by_pid[ref["component"]["m_PathID"]]
+                        for ref in owner["m_Component"] if not ref["component"]["m_FileID"]
+                        and ref["component"]["m_PathID"] in prefab.by_pid]
+    owner_ids = {obj.pid for obj in owner_components}
+    for obj in owner_components + [obj for obj in prefab.objs if obj.classid == 114 and obj.pid not in owner_ids]:
+        if obj.classid != 114:
             continue
         fields = prefab.read(obj)[0]
         script = scripts.get(fields.get("m_Script", {}).get("m_PathID"))
+        subsystem = script in EDITABLE_SHIP_SUBSYSTEMS
+        if obj.pid not in owner_ids and (
+                not subsystem or fields["m_GameObject"]["m_PathID"] not in descendants):
+            continue
         group = script
         if script == "TurnaroundRepairBayModule":
             repair_bays += 1
@@ -831,17 +977,25 @@ def ship_prefab_fields(prefab):
         if script in EDITABLE_ABILITY_MODULES:
             label = EDITABLE_ABILITY_MODULES[script]
             abilities[group] = f"{label} {repair_bays}" if group != script else label
-        elif script not in ("ShipInfo", "ArmourInfo"):
+        elif not subsystem and script not in ("ShipInfo", "ArmourInfo"):
             continue
         for node in prefab.types[obj.tidx].nodes:
             if node.level != 1 or node.name.startswith("m_"):
                 continue
             value = fields.get(node.name)
-            if script == "Armory" and node.name == "MunitionResupplyRange" and prefab_range(value):
-                for endpoint, endpoint_value in value.items():
-                    key = f"{script}.{node.name}.{endpoint}"
-                    result[key] = (obj, f"{node.name}.{endpoint}", "float", endpoint_value)
-                continue
+            if subsystem:
+                if node.name == "Quadrant":
+                    continue
+                if prefab_range(value) or (isinstance(value, dict) and set(value) == {"Start", "End", "Power"}):
+                    for endpoint, endpoint_value in value.items():
+                        if type(endpoint_value) in (float, int) and isfinite(endpoint_value):
+                            key = f"{group}.{node.name}.{endpoint}"
+                            if key in result:
+                                raise ValueError(f"ambiguous prefab field {key}")
+                            result[key] = (obj, f"{node.name}.{endpoint}", "float", endpoint_value)
+                    continue
+                if type(value) is float and not isfinite(value):
+                    continue
             if type(value) not in (int, float, bool) and not prefab_vector(value):
                 continue
             key = f"{group}.{node.name}"
@@ -890,10 +1044,10 @@ def bundle_ship_stats(path):
             if pid not in prefab.by_pid or prefab.by_pid[pid].classid != 114 or script_of(pid) != "SubMenuAction": continue
             count = launch_count(object_fields(pid).get("SubMenu", {}).get("m_PathID"))
             if count: squadron_groups.append(count)
-    return {"prefab": name, "abilities": abilities, "squadron_groups": squadron_groups,
+    return {"prefab": name, "abilities": abilities, "subsystems": EDITABLE_SHIP_SUBSYSTEMS, "squadron_groups": squadron_groups,
         "modifier_fields": [{"value": value, "label": label}
                             for value, label in CREW_MODIFIER_FIELDS.items()], "fields": [
-        {"key": key, "value": value, "kind": "bool" if storage == "bool" or key in PREFAB_BOOLEAN_BYTES else
+        {"key": key, "value": value, "kind": "bool" if storage == "bool" or key in PREFAB_BOOLEAN_BYTES or key in SUBSYSTEM_SWITCHES else
          "vector" if prefab_vector(value) else "float" if isinstance(value, float) else "int"}
         for key, (_, _, storage, value) in fields.items()
     ]}
@@ -913,7 +1067,7 @@ def apply_prefab_fields(prefab, changes, replaced):
         if prefab_vector(original):
             if not prefab_vector(value) or any(not math.isfinite(axis) for axis in value.values()):
                 raise ValueError(f"{key} requires finite X, Y, and Z coordinates")
-        elif storage == "bool" or key in PREFAB_BOOLEAN_BYTES:
+        elif storage == "bool" or key in PREFAB_BOOLEAN_BYTES or key in SUBSYSTEM_SWITCHES:
             if type(value) is not bool:
                 raise ValueError(f"{key} requires a checkbox value")
             if storage != "bool":
@@ -923,6 +1077,8 @@ def apply_prefab_fields(prefab, changes, replaced):
                 raise ValueError(f"{key} requires a whole number")
         elif type(value) not in (float, int) or not math.isfinite(value):
             raise ValueError(f"{key} requires a finite number")
+        if key.split(".", 1)[0] in EDITABLE_SHIP_SUBSYSTEMS and name == "MaxHealth" and value <= 0:
+            raise ValueError(f"{key} must be greater than 0")
         if name == "fullRepairPercent" and not 0 <= value <= 1:
             raise ValueError(f"{key} must be between 0 and 1")
         if name == "modifierField" and value not in CREW_MODIFIER_FIELDS:
@@ -958,6 +1114,175 @@ def apply_prefab_fields(prefab, changes, replaced):
             replaced[pid] = prefab.write(obj, fields)
         except (OverflowError, struct.error) as error:
             raise ValueError(f"prefab value outside its storage range: {', '.join(values)}") from error
+
+
+def apply_ship_scale(prefab, target, replaced):
+    """Set the whole ship's scale to target (1 = the stock size, 1.25 = 25% bigger; running it again with the same value
+    changes nothing): the root Transform of the ShipInfo GameObject, so the model,
+    turrets, launch bays, collision zones, engines, boarding points and hit/miss points (all children or local-space
+    data) grow together. Values the game uses as world distances are scaled as well:
+    ShipInfo.CollisionExclusionZoneRadius and WeaponsTarget.missSphereRadius. See docs/game/ship-scale.md."""
+    import math
+    if not (isinstance(target, (int, float)) and math.isfinite(target) and 0.1 <= target <= 10):
+        raise ValueError("--ship-scale must be between 0.1 and 10")
+    scripts = {obj.pid: prefab.read(obj)[0]["m_ClassName"] for obj in prefab.objs if obj.classid == 115}
+    def current(obj):
+        return prefab._rd(prefab.types[obj.tidx].nodes, 0, replaced[obj.pid], [0])[0] if obj.pid in replaced else prefab.read(obj)[0]
+    ships = [(obj, current(obj)) for obj in prefab.objs if obj.classid == 114
+             and scripts.get(prefab.read(obj)[0].get("m_Script", {}).get("m_PathID")) == "ShipInfo"]
+    if not ships:
+        raise ValueError("this bundle has no ShipInfo component to scale")
+    obj, ship = max(ships, key=lambda item: len(prefab.read(prefab.by_pid[item[1]["m_GameObject"]["m_PathID"]])[0]["m_Component"]))
+    owner_pid = ship["m_GameObject"]["m_PathID"]
+    owner = prefab.read(prefab.by_pid[owner_pid])[0]
+    root = next((prefab.by_pid[ref["component"]["m_PathID"]] for ref in owner["m_Component"]
+                 if ref["component"]["m_PathID"] in prefab.by_pid and prefab.by_pid[ref["component"]["m_PathID"]].classid == 4), None)
+    if root is None:
+        raise ValueError("the ship GameObject has no Transform")
+    transform = current(root)
+    old = dict(transform["m_LocalScale"])
+    if not all(abs(old[a] - old["x"]) < 1e-6 for a in "yz") or old["x"] <= 0:
+        raise ValueError("the ship root has a non-uniform scale %s; refusing to rescale it" % old)
+    factor = target / old["x"]
+    if abs(factor - 1) < 1e-9:
+        print("ship scale is already %g; nothing to change" % target)
+        return target
+    transform["m_LocalScale"] = {axis: target for axis in old}
+    replaced[root.pid] = prefab.write(root, transform)
+    ship["CollisionExclusionZoneRadius"] = ship["CollisionExclusionZoneRadius"] * factor
+    replaced[obj.pid] = prefab.write(obj, ship)
+    # Weapons keep their size: the game spawns each turret as a child of its WeaponMountPoint with
+    # localScale = MeshScale (ShipInfo spawn code), so it would inherit the root scale. Counter-scale every mount
+    # transform; mount POSITIONS still move outwards with the hull, MeshScale keeps meaning "turret size".
+    compensated = 0
+    for mount in prefab.objs:
+        if mount.classid != 114:
+            continue
+        mb = prefab.read(mount)[0]
+        if not all(key in mb for key in ("WeaponType", "Quadrant", "InitialAngles", "MeshScale")):
+            continue
+        go = prefab.read(prefab.by_pid[mb["m_GameObject"]["m_PathID"]])[0]
+        mount_tr = next((prefab.by_pid[ref["component"]["m_PathID"]] for ref in go["m_Component"]
+                         if ref["component"]["m_PathID"] in prefab.by_pid and prefab.by_pid[ref["component"]["m_PathID"]].classid == 4), None)
+        if mount_tr is None:
+            continue
+        fields = current(mount_tr)
+        fields["m_LocalScale"] = {axis: value / factor for axis, value in fields["m_LocalScale"].items()}
+        replaced[mount_tr.pid] = prefab.write(mount_tr, fields)
+        compensated += 1
+    log = ["%d weapon mount(s) counter-scaled so turrets keep their size" % compensated,
+           "root scale %s -> %s" % (",".join("%g" % old[a] for a in "xyz"), ",".join("%g" % transform["m_LocalScale"][a] for a in "xyz")),
+           "CollisionExclusionZoneRadius -> %g" % ship["CollisionExclusionZoneRadius"]]
+    transforms = {o.pid: prefab.read(o)[0] for o in prefab.objs if o.classid == 4}
+    in_ship, pending = set(), [root.pid]
+    while pending:                                          # every GameObject under the ship root
+        pid = pending.pop()
+        in_ship.add(transforms[pid]["m_GameObject"]["m_PathID"])
+        pending.extend(c["m_PathID"] for c in transforms[pid]["m_Children"] if c["m_PathID"] in transforms)
+    for component in prefab.objs:
+        if component.classid != 114 or prefab.read(component)[0]["m_GameObject"]["m_PathID"] not in in_ship:
+            continue
+        fields = current(component)
+        if scripts.get(fields.get("m_Script", {}).get("m_PathID")) == "WeaponsTarget":
+            fields["missSphereRadius"] = fields["missSphereRadius"] * factor
+            replaced[component.pid] = prefab.write(component, fields)
+            log.append("missSphereRadius -> %g" % fields["missSphereRadius"])
+    print("scaled ship %s to %g (x%g): %s" % (owner["m_Name"], target, factor, "; ".join(log)))
+    return target
+
+
+def respace_clones(prefab, RESS, replaced, selector, gap):
+    """Move the existing clones (mounts named <original>_x2, _x3 ...) of the turrets matching selector so that every
+    turret in the bow/quadrant is at least gap GAME units from every other (gap is divided by the ship's root scale, so it
+    is measured in game units after --ship-scale). Originals stay put. Each clone stays on the same hull surface as its
+    original (same height above the mesh), keeps the original's rotation, and mirror twins are placed together."""
+    import math, re as _re
+    def current(obj):
+        return prefab._rd(prefab.types[obj.tidx].nodes, 0, replaced[obj.pid], [0])[0] if obj.pid in replaced else prefab.read(obj)[0]
+    value = lambda pid: current(prefab.by_pid[pid])
+    hq = build_hull_query(prefab, RESS, lambda pid: prefab.read(prefab.by_pid[pid])[0])
+    if hq is None:
+        raise ValueError("--respace needs a readable hull mesh in the bundle")
+    quads = ["port", "starboard", "fore", "rear", "dorsal", "ventral"]
+    mounts = []
+    for mount in weapon_mounts(prefab, lambda pid: prefab.read(prefab.by_pid[pid])[0]):
+        owner, transform = mount_objects(prefab, lambda pid: prefab.read(prefab.by_pid[pid])[0], mount)
+        mb = value(mount.pid); name = value(owner.pid)["m_Name"]; tr = current(transform)
+        quad = quads[mb["Quadrant"]] if 0 <= mb["Quadrant"] < len(quads) else str(mb["Quadrant"])
+        p = tr["m_LocalPosition"]
+        mounts.append({"name": name, "quad": quad, "type": mb["WeaponType"], "transform": transform, "tr": tr, "pos": (p["x"], p["y"], p["z"])})
+    sel = selector.lower()
+    group = [m for m in mounts if sel in ("all", m["quad"]) or m["name"].lower().startswith(sel)]
+    if not group:
+        raise ValueError("--respace: no turrets match %r" % selector)
+    by_name = {m["name"]: m for m in mounts}
+    originals = [m for m in group if not _re.search(r"_x\d+$", m["name"])]
+    clones = [m for m in group if _re.search(r"_x\d+$", m["name"])]
+    if not clones:
+        print("respace %s: no clones to move" % selector); return
+    # root scale: the game-unit gap becomes a local gap
+    owner_scale = 1.0
+    for m in mounts[:1]:
+        pid = m["transform"].pid
+        while pid:
+            t = current(prefab.by_pid[pid]); owner_scale *= t["m_LocalScale"]["x"] if pid != m["transform"].pid else 1.0
+            pid = t["m_Father"]["m_PathID"]
+    local_gap = gap / owner_scale
+    def surface(x, y, z):
+        ys = hq(x, z)
+        return min(ys, key=lambda v: abs(v - y)) if ys else None
+    surf = {}
+    for m in originals:
+        sf = surface(*m["pos"]); surf[m["name"]] = (sf, m["pos"][1] - sf) if sf is not None else None
+    def twin(m):
+        x, y, z = m["pos"]
+        if abs(x) < 0.05: return None
+        return next((o for o in originals if o is not m and abs(o["pos"][0] + x) < 0.3 and abs(o["pos"][1] - y) < 0.3 and abs(o["pos"][2] - z) < 0.3), None)
+    occupied = [m["pos"] for m in mounts if m not in clones]
+    def valid(src, x, z, occ):
+        sv = surf.get(src["name"])
+        if not sv: return None
+        ys = hq(x, z)
+        if not ys: return None
+        sf = min(ys, key=lambda v: abs(v - sv[0]))
+        r = math.hypot(x - src["pos"][0], z - src["pos"][2])
+        if abs(sf - sv[0]) > min(0.5 + 0.35 * r, 3.0): return None
+        cand = (x, sf + sv[1], z)
+        return None if any(math.dist(cand, q) < local_gap - 1e-6 for q in occ) else cand
+    moved, done = {}, set()
+    for clone in sorted(clones, key=lambda m: (-by_name[_re.sub(r"_x\d+$", "", m["name"])]["pos"][2], m["name"])):
+        if clone["name"] in done: continue
+        src = by_name.get(_re.sub(r"_x\d+$", "", clone["name"]))
+        if src is None: continue
+        suffix = clone["name"][len(src["name"]):]
+        tw = twin(src); mate = by_name.get(tw["name"] + suffix) if tw else None
+        centre = abs(src["pos"][0]) < 0.05
+        best = None
+        for ri in range(1, 200):
+            r = 0.25 * ri
+            for k in range(48):
+                a = 2 * math.pi * k / 48
+                dx, dz = r * math.cos(a), r * math.sin(a)
+                if centre and abs(dx) > 1e-6: continue
+                cand = valid(src, src["pos"][0] + dx, src["pos"][2] + dz, occupied)
+                if not cand: continue
+                if mate is not None:
+                    mirror = (-cand[0], cand[1], cand[2])
+                    if math.dist(cand, mirror) < local_gap - 1e-6 or not valid(tw, mirror[0], mirror[2], occupied + [cand]): continue
+                best = cand; break
+            if best: break
+        if not best:
+            raise ValueError("--respace: no free hull spot %.2f units from every turret for %s; use a smaller gap" % (gap, clone["name"]))
+        moved[clone["name"]] = best; occupied.append(best); done.add(clone["name"])
+        if mate is not None:
+            mirror = (-best[0], best[1], best[2]); moved[mate["name"]] = mirror; occupied.append(mirror); done.add(mate["name"])
+    for name, (x, y, z) in moved.items():
+        m = by_name[name]; tr = m["tr"]
+        tr["m_LocalPosition"] = {"x": x, "y": y, "z": z}
+        replaced[m["transform"].pid] = prefab.write(m["transform"], tr)
+    final = [moved.get(m["name"], m["pos"]) for m in group]
+    closest = min(math.dist(a, b) for i, a in enumerate(final) for b in final[i + 1:]) * owner_scale
+    print("respaced %d %s clone(s): closest turret pair now %.2f game units (asked %.2f)" % (len(moved), selector, closest, gap))
 
 
 def print_bundle_settings(objects, value):
@@ -1042,6 +1367,62 @@ def bay_alignment(launch_bays, fighter_slots, utility_slots):
     if (fighter_slots and not fighter) or (utility_slots and not utility):
         raise ValueError("the ship needs an existing compatibility list for each requested slot class")
     return fighter, utility
+
+
+def mirror_fighter_bays(prefab, fighter_slots):
+    """Mirror adjacent fighter bay pairs in their common launch-point frame."""
+    if fighter_slots is None or fighter_slots < 2:
+        raise ValueError("Mirroring fighter launch bays requires at least two fighter slots.")
+    bays = {}
+    def read(pid):
+        return prefab.read(prefab.by_pid[pid])[0]
+
+    for obj in prefab.objs:
+        if obj.classid != 114:
+            continue
+        fields = read(obj.pid)
+        slot = fields.get("SlotNo")
+        if slot not in range(fighter_slots) or not fields.get("CanLaunch") or "LaunchPoints" not in fields:
+            continue
+        if slot in bays:
+            raise ValueError(f"Fighter slot {slot} has multiple launch bays.")
+        _, transform = mount_objects(prefab, read, obj)
+        bays[slot] = obj, fields, transform, read(transform.pid)
+
+    changes = {}
+    occupied = set()
+    for slot in range(0, fighter_slots - 1, 2):
+        if slot not in bays or slot + 1 not in bays:
+            raise ValueError(f"Cannot mirror missing launch bays for fighter slots {slot} and {slot + 1}.")
+        left, right = bays[slot], bays[slot + 1]
+        if left[3]["m_Father"] != right[3]["m_Father"]:
+            raise ValueError(f"Fighter slots {slot} and {slot + 1} do not share a launch-point frame.")
+        candidates = sorted((left, right), key=lambda bay: bay[3]["m_LocalPosition"]["x"] >= 0)
+        for candidate in candidates:
+            pos = candidate[3]["m_LocalPosition"]
+            key = tuple(round(value, 4) for value in (abs(pos["x"]), pos["y"], pos["z"]))
+            if key not in occupied:
+                break
+        occupied.add(key)
+        source, source_transform = copy.deepcopy((candidate[1], candidate[3]))
+        if abs(pos["x"]) < 1e-5:
+            raise ValueError(f"Fighter slots {slot} and {slot + 1} need an off-centre launch bay.")
+        for side, (obj, fields, transform, tr) in ((-1, left), (1, right)):
+            mirrored = side * pos["x"] < 0
+            tr["m_LocalPosition"] = dict(pos, x=side * abs(pos["x"]))
+            rotation = source_transform["m_LocalRotation"]
+            tr["m_LocalRotation"] = {axis: (-value if mirrored and axis in ("y", "z") else value)
+                                     for axis, value in rotation.items()}
+            tr["m_LocalScale"] = source_transform["m_LocalScale"]
+            fields["LaunchPoints"] = [dict(point, x=-point["x"]) if mirrored else point
+                                      for point in source["LaunchPoints"]]
+            fields["OverrideLaunchPointRotation"] = source["OverrideLaunchPointRotation"]
+            fields["LaunchPointRotation"] = [dict(point, y=-point["y"], z=-point["z"])
+                                             if mirrored else point for point in source["LaunchPointRotation"]]
+            changes[obj.pid] = prefab.write(obj, fields)
+            changes[transform.pid] = prefab.write(transform, tr)
+        print(f"mirrored fighter launch bays for slots {slot} and {slot + 1}")
+    return prefab.rebuild(replaced=changes)
 
 
 def parse_bay_icons(entries):
@@ -1188,7 +1569,7 @@ def layout_mount_edits(spec, bundle, prefab, mounts, value, new_pid):
     return replaced, additions, children
 
 
-def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=None, fighter_slots=None, utility_slots=None, bay_offset=(0.0, 3.0, 4.0), hull_regen=None, armour_regen=False, clones=(), list_mounts=False, clone_scale=None, scales=(), layout="offset", gap=1.5, mirror=True, munition_factory=False, squadron_revive=False, hull_follow=True, min_gap=None, mini_jump=None, augury=None, stealth=None, slot_parts="buttons,bays,icons", ability_submenu=False, stealth_mesh="ship", squadron_groups=None, icon_offset=(12.0, 0.0, -4.0), inspect=False, support_abilities=None, align_launch_bays=False, bay_icons=None, support_settings=None, prefab_fields=None, turnaround_repair_actions=1, custom_modules=(), mount_layout=None, normalize_ability_submenu=False):
+def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=None, fighter_slots=None, utility_slots=None, bay_offset=(0.0, 3.0, 4.0), hull_regen=None, clones=(), list_mounts=False, clone_scale=None, scales=(), layout="offset", gap=1.5, mirror=True, munition_factory=False, hull_follow=True, min_gap=None, mini_jump=None, augury=None, stealth=None, slot_parts="buttons,bays,icons", ability_submenu=False, stealth_mesh="ship", squadron_groups=None, icon_offset=(12.0, 0.0, -4.0), inspect=False, support_abilities=None, align_launch_bays=False, bay_icons=None, support_settings=None, prefab_fields=None, ship_scale=None, respace=(), turnaround_repair_actions=1, custom_modules=(), mount_layout=None, normalize_ability_submenu=False, mirror_launch_bays=False):
     B = read_bundle(src)
     (O1, S1, F1, N1), (O2, S2, F2, N2) = B["nodes"]
     CAB = B["data"][O1:O1 + S1]; RESS = B["data"][O2:O2 + S2]
@@ -1426,29 +1807,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
         for o in hit:
             mbv = copy.deepcopy(val(o.pid)); mbv["MeshScale"] = sc; replaced[o.pid] = F.write(o, mbv)
         print(f"scaled {len(hit)} existing mount(s) matching '{sel}' to {sc:g}")
-    # ---- extra munition slots: the battle UI shows min(FireMissileAction components on the prefab, MunitionSlots) ----
-    if munition_slots:
-        MB = [o for o in F.objs if o.classid == 114 and list(val(o.pid))[4:] == ["radialMenuPosition", "hideInMenu"]]
-        by_go = {}
-        for o in MB: by_go.setdefault(val(o.pid)["m_GameObject"]["m_PathID"], []).append(o)
-        mun = [g for g in by_go if F.by_pid[g].classid == 1 and val(g)["m_Name"] == "Munitions"]
-        assert len(mun) == 1, "expected one 'Munitions' menu object on this prefab, found %d" % len(mun)
-        mgo = mun[0]
-        others = {val(o.pid)["m_Script"]["m_PathID"] for g, l in by_go.items() if g != mgo for o in l}
-        fire = [o for o in by_go[mgo] if val(o.pid)["m_Script"]["m_PathID"] not in others]
-        print(f"prefab has {len(fire)} munition slot action(s) (FireMissileAction); target {munition_slots}")
-        assert fire, "could not identify the FireMissileAction components"
-        used = {val(o.pid)["radialMenuPosition"] for o in by_go[mgo]}
-        gov = copy.deepcopy(val(mgo)); added = 0
-        for _ in range(max(0, munition_slots - len(fire))):
-            nmb = newpid(); mbv = copy.deepcopy(val(fire[-1].pid))
-            pos = next(k for k in range(0, 8) if k not in used); used.add(pos); mbv["radialMenuPosition"] = pos
-            appended.append((nmb, fire[-1].tidx, F.write(fire[-1].tidx, mbv)))
-            gov["m_Component"].append({"component": {"m_FileID": 0, "m_PathID": nmb}})
-            new_pids.append(nmb); added += 1
-            print(f"  + munition slot {len(fire) + added}: radial menu position {pos}")
-        if added: replaced[mgo] = F.write(F.by_pid[mgo], gov)
-    late_children = {}                                  # father transform pid -> [transform pids to hang under it at the end]
+    late_children = {}  # parent transform -> new child transforms
     # ---- extra carrier (fighter / support squadron) slots ----------------------------------------------------------
     # game rules (from the code): slots 0..FighterSlots-1 are fighter slots, the next UtilityFighterSlots are support slots;
     # the prefab needs ONE LaunchFightersAction per slot (UI/launch) and a LaunchPoint bay per SlotNo (falls back to any compatible bay).
@@ -1467,7 +1826,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
                     if target in candidates: roots.add(target)
         return next(iter(roots)) if len(roots) == 1 else None
 
-    def launch_actions(menu_pid, seen=None):
+    def menu_actions(menu_pid, script_name, seen=None):
         seen = set() if seen is None else seen
         if menu_pid in seen or menu_pid not in F.by_pid: return []
         seen.add(menu_pid); found = []
@@ -1475,11 +1834,112 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             pid = component["component"]["m_PathID"]
             if pid not in F.by_pid or F.by_pid[pid].classid != 114: continue
             fields = val(pid); script = fields.get("m_Script", {}).get("m_PathID")
-            if script_names.get(script) == "LaunchFightersAction": found.append(F.by_pid[pid])
+            if script_names.get(script) == script_name: found.append(F.by_pid[pid])
             elif script_names.get(script) == "SubMenuAction":
-                found.extend(launch_actions(fields.get("SubMenu", {}).get("m_PathID"), seen))
+                found.extend(menu_actions(fields.get("SubMenu", {}).get("m_PathID"), script_name, seen))
         return found
+    def launch_actions(menu_pid):
+        return menu_actions(menu_pid, "LaunchFightersAction")
+
+    if munition_slots:
+        mgo = named_menu("Munitions")
+        fire = menu_actions(mgo, "FireMissileAction")
+        if not fire:
+            raise ValueError("could not find FireMissileAction components in the Munitions menu")
+        print(f"prefab has {len(fire)} munition slot action(s) (FireMissileAction); target {munition_slots}")
+        ptr = lambda pid: {"m_FileID": 0, "m_PathID": pid}
+        component = lambda pid: {"component": ptr(pid)}
+        if munition_slots > len(fire):
+            owner = val(fire[-1].pid)["m_GameObject"]["m_PathID"]
+            go = copy.deepcopy(val(owner))
+            objects = [F.by_pid[c["component"]["m_PathID"]] for c in go["m_Component"]]
+            actions = [obj for obj in objects if obj.classid == 114 and "radialMenuPosition" in val(obj.pid)]
+            used = {val(obj.pid)["radialMenuPosition"] for obj in actions if not val(obj.pid)["hideInMenu"]}
+            free = [k for k in range(8) if k not in used]
+            remaining = munition_slots - len(fire)
+            if remaining > len(free):
+                root_submenu = next((obj for obj in F.objs if obj.classid == 114
+                    and script_names.get(val(obj.pid).get("m_Script", {}).get("m_PathID")) == "SubMenuAction"), None)
+                back = next((obj for obj in actions
+                    if script_names.get(val(obj.pid)["m_Script"]["m_PathID"]) == "BackAction"), None)
+                if root_submenu is None or back is None:
+                    raise ValueError("The Munitions radial needs a submenu and Back action template to add another page.")
+                transform = next(obj for obj in objects if obj.classid == 4)
+                # Reserve one position for the next page; move the last existing slot
+                # to it if this page is already full. Unity uses hierarchy order for slot IDs.
+                move = None
+                if not free:
+                    move = fire[-1]
+                    free = [val(move.pid)["radialMenuPosition"]]
+                    go["m_Component"] = [c for c in go["m_Component"] if c != component(move.pid)]
+                for pos in free[:-1]:
+                    pid = newpid()
+                    fields = dict(val(fire[-1].pid), m_GameObject=ptr(owner), radialMenuPosition=pos)
+                    appended.append((pid, fire[-1].tidx, F.write(fire[-1], fields)))
+                    go["m_Component"].append(component(pid))
+                    new_pids.append(pid)
+                    remaining -= 1
+
+                parent_transform = transform.pid
+                parent_owner, parent_fields = owner, go
+                next_position = free[-1]
+                while remaining or move is not None:
+                    page, child, back_pid, sub_pid = (newpid() for _ in range(4))
+                    submenu = dict(val(root_submenu.pid), m_GameObject=ptr(parent_owner),
+                                   SubMenu=ptr(page), radialMenuPosition=next_position, hideInMenu=False,
+                                   descriptionID=54, Icon=10)
+                    parent_fields["m_Component"].append(component(sub_pid))
+                    appended.append((sub_pid, root_submenu.tidx, F.write(root_submenu, submenu)))
+                    if parent_owner == owner:
+                        replaced[owner] = F.write(F.by_pid[owner], parent_fields)
+                        late_children.setdefault(parent_transform, []).append(child)
+                    else:
+                        pending_transform["m_Children"].append(ptr(child))
+                        appended.extend([(parent_owner, F.by_pid[owner].tidx, F.write(F.by_pid[owner], parent_fields)),
+                                         (parent_transform, transform.tidx, F.write(transform, pending_transform))])
+                    page_fields = dict(val(owner), m_Name="Munitions (continued)",
+                                       m_Component=[component(child), component(back_pid)])
+                    pending_transform = dict(val(transform.pid), m_GameObject=ptr(page),
+                                             m_Father=ptr(parent_transform), m_Children=[])
+                    back_fields = dict(val(back.pid), m_GameObject=ptr(page), radialMenuPosition=0)
+                    appended.append((back_pid, back.tidx, F.write(back, back_fields)))
+                    new_pids.extend([page, child, back_pid, sub_pid])
+                    position = 1
+                    if move is not None:
+                        fields = dict(val(move.pid), m_GameObject=ptr(page), radialMenuPosition=position)
+                        replaced[move.pid] = F.write(move, fields)
+                        page_fields["m_Component"].append(component(move.pid))
+                        move = None
+                        position += 1
+                    limit = 6 if remaining > 8 - position else 7
+                    for pos in range(position, limit + 1):
+                        if not remaining: break
+                        pid = newpid()
+                        fields = dict(val(fire[-1].pid), m_GameObject=ptr(page), radialMenuPosition=pos)
+                        appended.append((pid, fire[-1].tidx, F.write(fire[-1], fields)))
+                        page_fields["m_Component"].append(component(pid))
+                        new_pids.append(pid)
+                        remaining -= 1
+                    parent_owner, parent_transform, parent_fields = page, child, page_fields
+                    next_position = 7
+                appended.extend([(parent_owner, F.by_pid[owner].tidx, F.write(F.by_pid[owner], parent_fields)),
+                                 (parent_transform, transform.tidx, F.write(transform, pending_transform))])
+                print("  added continuation pages to the Munitions radial menu")
+            else:
+                for pos in free[:remaining]:
+                    pid = newpid()
+                    fields = dict(val(fire[-1].pid), m_GameObject=ptr(owner), radialMenuPosition=pos)
+                    appended.append((pid, fire[-1].tidx, F.write(fire[-1], fields)))
+                    go["m_Component"].append(component(pid))
+                    new_pids.append(pid)
+                replaced[owner] = F.write(F.by_pid[owner], go)
+
     bay_icons = dict(bay_icons or {})
+    if squadron_groups and (fighter_slots is None) != (utility_slots is None):
+        if fighter_slots is None:
+            fighter_slots = sum(squadron_groups) - utility_slots
+        else:
+            utility_slots = sum(squadron_groups) - fighter_slots
     if align_launch_bays and (fighter_slots is None or utility_slots is None):
         raise ValueError("--align-launch-bays requires both --fighter-slots and --utility-slots")
     existing_bays = [obj for obj in F.objs if obj.classid == 114 and
@@ -1516,6 +1976,8 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
 
     if fighter_slots is not None or utility_slots is not None:
         assert fighter_slots is not None and utility_slots is not None, "give BOTH --fighter-slots and --utility-slots (the final values you set in the level files)"
+        if min(fighter_slots, utility_slots) < 0:
+            raise ValueError("Fighter and support slot counts must be nonnegative.")
         total = fighter_slots + utility_slots
         MB2 = [o for o in F.objs if o.classid == 114 and list(val(o.pid))[4:] == ["radialMenuPosition", "hideInMenu"]]
         by_go2 = {}
@@ -1527,9 +1989,15 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
         launch = launch_actions(fgo)
         assert launch, "could not find LaunchFightersAction components in the Fighters menu or its squadron submenus"
         print(f"prefab has {len(launch)} fighter/support launch action(s); target {total} ({fighter_slots} fighter + {utility_slots} support)")
-        assert total <= 8 and total - len(launch) <= len({0,1,2,3,4,5,6,7} - {val(o.pid)["radialMenuPosition"] for o in by_go2[fgo]}), \
-            "the Fighters radial menu has no room for %d more launch buttons (only %d free positions)" % (total - len(launch), len({0,1,2,3,4,5,6,7} - {val(o.pid)["radialMenuPosition"] for o in by_go2[fgo]}))
         used = {val(o.pid)["radialMenuPosition"] for o in by_go2[fgo]}
+        free = [k for k in range(8) if k not in used]
+        if not squadron_groups and max(0, total - len(launch)) > len(free):
+            squadron_groups = [count for count in (fighter_slots, utility_slots) if count]
+        if squadron_groups:
+            if any(count <= 0 for count in squadron_groups):
+                raise ValueError("Squadron groups must have positive slot counts.")
+            squadron_groups = [min(7, count - start) for count in squadron_groups
+                              for start in range(0, count, 7)]
         gov = copy.deepcopy(val(fgo)); added = 0; new_launch = {}
         for _ in range(max(0, total - len(launch)) if "buttons" in slot_parts else 0):
             nmb = newpid(); mbv = copy.deepcopy(val(launch[-1].pid))
@@ -1537,11 +2005,11 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             # attached to fgo, so keep its owner reference consistent until grouping rewrites it.
             mbv["m_GameObject"] = {"m_FileID": 0, "m_PathID": fgo}
             new_launch[nmb] = (launch[-1].tidx, mbv)
-            pos = next(k for k in range(0, 8) if k not in used); used.add(pos); mbv["radialMenuPosition"] = pos
+            mbv["radialMenuPosition"] = 0 if squadron_groups else free[added]
             appended.append((nmb, launch[-1].tidx, F.write(launch[-1].tidx, mbv)))
             gov["m_Component"].append({"component": {"m_FileID": 0, "m_PathID": nmb}})
             new_pids.append(nmb); added += 1
-            print(f"  + launch button for carrier slot {len(launch) + added - 1}: radial menu position {pos}")
+            print(f"  + launch button for carrier slot {len(launch) + added - 1}")
         if squadron_groups:
             order_all = [o.pid for o in launch] + list(new_launch)                          # slot order = component order on the Fighters object
             assert sum(squadron_groups) == len(order_all), "--squadron-groups must add up to %d launch buttons (got %d)" % (len(order_all), sum(squadron_groups))
@@ -1557,6 +2025,9 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             generated_group_names = {"Fighter Squadrons", "Support Squadrons"} | {
                 "Squadrons%d" % i for i in range(1, 7)
             }
+            def is_generated_group(name):
+                return name in generated_group_names or name.rsplit(" ", 1)[0] in {
+                    "Fighter Squadrons", "Support Squadrons", "Squadrons"}
             for entry in val(fgo)["m_Component"]:
                 pid = entry["component"]["m_PathID"]
                 if pid not in F.by_pid or F.by_pid[pid].classid != 114: continue
@@ -1564,11 +2035,13 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
                 if scr_n2.get(fields.get("m_Script", {}).get("m_PathID")) != "SubMenuAction": continue
                 target = fields.get("SubMenu", {}).get("m_PathID")
                 if target in F.by_pid and launch_actions(target):
-                    if val(target).get("m_Name") in generated_group_names:
+                    if is_generated_group(val(target).get("m_Name", "")):
                         old_group_menus.add(pid)
                         old_group_targets.add(target)
             moved.update(old_group_menus)
             keep_pos = {val(o.pid)["radialMenuPosition"] for o in by_go2[fgo] if o.pid not in moved}
+            if len(squadron_groups) > 8 - len(keep_pos):
+                raise ValueError("The Fighters radial has no room for all squadron groups.")
             gov["m_Component"] = [c for c in gov["m_Component"] if c["component"]["m_PathID"] not in moved]
             # Retire old generated squadron menus, including remnants from earlier regrouping
             # runs. Their GameObjects may still list LaunchFightersAction components after the
@@ -1576,7 +2049,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             launch_pids = set(order_all)
             retire_targets = set(old_group_targets)
             for old_go in F.objs:
-                if old_go.classid == 1 and val(old_go.pid).get("m_Name") in generated_group_names:
+                if old_go.classid == 1 and is_generated_group(val(old_go.pid).get("m_Name", "")):
                     retire_targets.add(old_go.pid)
             for target in retire_targets:
                 if target == fgo or target not in F.by_pid:
@@ -1600,7 +2073,13 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
                 if len(clean_components) != len(old_components):
                     old_fields["m_Component"] = clean_components
                     replaced[old_go.pid] = F.write(old_go, old_fields)
-            names = ["Fighter Squadrons", "Support Squadrons"] + ["Squadrons%d" % (i + 1) for i in range(2, 6)] if len(squadron_groups) == 2 else ["Squadrons%d" % (i + 1) for i in range(6)]
+            names = []
+            offset = 0
+            for count in squadron_groups:
+                label = ("Fighter Squadrons" if offset + count <= fighter_slots else
+                         "Support Squadrons" if offset >= fighter_slots else "Squadrons")
+                names.append(label if label not in names else f"{label} {len(names) + 1}")
+                offset += count
             at = 0
             for gi, cnt in enumerate(squadron_groups):
                 ngo, ntr, nback, nsub = newpid(), newpid(), newpid(), newpid()
@@ -1610,8 +2089,8 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
                 b2 = copy.deepcopy(val(back_.pid)); b2["m_GameObject"] = {"m_FileID": 0, "m_PathID": ngo}; b2["radialMenuPosition"] = 0
                 spos = next(k for k in range(8) if k not in keep_pos); keep_pos.add(spos)
                 s2 = copy.deepcopy(val(smb_.pid)); s2["SubMenu"] = {"m_FileID": 0, "m_PathID": ngo}; s2["radialMenuPosition"] = spos; s2["m_GameObject"] = {"m_FileID": 0, "m_PathID": fgo}
-                if len(squadron_groups) == 2:
-                    s2["descriptionID"] = (1040, 251)[gi]  # Fighters, Support
+                if names[gi].startswith(("Fighter Squadrons", "Support Squadrons")):
+                    s2["descriptionID"] = 251 if names[gi].startswith("Support") else 1040
                 for mi, p_ in enumerate(members):
                     if p_ in new_launch: ti_, v_ = new_launch[p_]; v_["m_GameObject"] = {"m_FileID": 0, "m_PathID": ngo}; v_["radialMenuPosition"] = 1 + mi
                     else:
@@ -1799,33 +2278,23 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             print(f"added {CUSTOM_MODULE_DEFINITIONS[cls]['label']} module")
     custom_armour_active = custom_present["CustomArmourRepairModule"]
     custom_squadron_active = custom_present["CustomSquadronReplacementModule"]
-    if custom_armour_active and armour_regen:
-        raise ValueError("custom armour repair replaces the Hull Resin armour-regeneration flag; do not use --armour-regen")
-    if custom_squadron_active and squadron_revive:
-        raise ValueError("custom squadron replacement replaces the Munition Factory revive hook; do not use --squadron-revive")
-    if armour_regen and hull_regen is not None:
-        assert hull_regen > 0, "--armour-regen needs a hull regen value above 0 (the sign of hullPerTick is the flag)"
     if hull_regen is not None:
+        if hull_regen < 0:
+            raise ValueError("--hull-regen cannot be negative (the old negative-rate armour flag was removed; use --custom-armour-repair)")
         existing_resin = [obj for obj in F.objs if obj.classid == 114 and "hullPerTick" in val(obj.pid)]
         if len(existing_resin) > 1:
             raise ValueError("the bundle has multiple Hull Resin modules")
         if existing_resin:
             obj = existing_resin[0]
             fields = val(obj.pid)
-            rate = -abs(hull_regen) if armour_regen or fields["hullPerTick"] < 0 else hull_regen
+            rate = hull_regen
             replaced[obj.pid] = F.write(obj, dict(fields, hullPerTick=rate))
             print(f"updated Hull Resin rate to {rate:g}")
         else:
-            rate = -hull_regen if armour_regen else hull_regen
+            rate = hull_regen
             add_script_component("RegenerativeHullResinModule", RESIN_TYPE_RAW, RESIN_MS_RAW, RESIN_MB_RAW,
                                  root.pid, lambda data: struct.pack_into("<f", data, 32, rate))
             print(f"added Hull Resin at {rate:g} per tick")
-    elif armour_regen:
-        mods = [o for o in F.objs if o.classid == 114 and "hullPerTick" in val(o.pid)]
-        assert mods, "this ship has no Regenerative Hull Resin module: add one with --hull-regen X --armour-regen"
-        for o in mods:
-            v = copy.deepcopy(val(o.pid)); assert v["hullPerTick"] != 0, "hullPerTick is 0"; v["hullPerTick"] = -abs(v["hullPerTick"]); replaced[o.pid] = F.write(o, v)
-        print(f"flagged the existing Regenerative Hull Resin module for armour regeneration (hullPerTick {v['hullPerTick']}) - needs dll patch --armour-factor")
     if munition_factory:
         has_factory = any(o.classid == 115 and val(o.pid)["m_ClassName"] == "MunitionFactoryModule" for o in F.objs)
         if not has_factory:
@@ -2441,12 +2910,9 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             print(f"added {ability.replace('_', ' ')}" +
                   (f" with {len(positions)} repair actions" if ability == "turnaround_repair_bay" else ""))
 
-    if squadron_revive:
-        assert munition_factory or any(o.classid == 115 and val(o.pid)["m_ClassName"] == "MunitionFactoryModule" for o in F.objs), "--squadron-revive needs the Munition Factory module: add it with --munition-factory (this ship has none)"
-        ships_ = [o for o in F.objs if o.classid == 114 and "ShowExclusionInEditor" in val(o.pid) and val(o.pid)["m_GameObject"]["m_PathID"] == root.pid]
-        assert len(ships_) == 1, "could not find the ship's ShipInfo component"
-        v = copy.deepcopy(val(ships_[0].pid)); v["ShowExclusionInEditor"] = 1; replaced[ships_[0].pid] = F.write(ships_[0], v)
-        print("flagged the ship to rebuild destroyed squadrons (needs dll patch --revive-turns in the DLL)")
+    # Bundles saved by older versions may carry the removed legacy hooks: a negative Hull Resin
+    # rate (armour regeneration) or ShipInfo.ShowExclusionInEditor (squadron revive). Clear them
+    # when the replacement custom module is installed.
     if custom_armour_active:
         for resin in (o for o in F.objs if o.classid == 114 and
                       "hullPerTick" in val(o.pid) and val(o.pid)["m_GameObject"]["m_PathID"] == root.pid):
@@ -2506,7 +2972,15 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
     replaced[ab.pid] = F.write(ab, abv)
     if prefab_fields:
         apply_prefab_fields(F, prefab_fields, replaced)
+    if ship_scale:
+        apply_ship_scale(F, ship_scale, replaced)
+    for spec in respace or ():
+        selector, _, gap_text = spec.rpartition("=")
+        if not selector: raise ValueError("--respace needs SELECTOR=GAP, e.g. fore=4")
+        respace_clones(F, RESS, replaced, selector, float(gap_text))
     new_cab = F.rebuild(replaced=replaced, appended=appended)
+    if mirror_launch_bays:
+        new_cab = mirror_fighter_bays(SerFile(new_cab), fighter_slots)
     write_bundle(dst, B, [(F1, N1, new_cab), (F2, N2, RESS + bytes(res_extra))])
     # verify by re-reading
     B2 = read_bundle(dst); (P1, Q1, _, _), _ = B2["nodes"]
@@ -2536,11 +3010,11 @@ def build_parser():
     ap.epilog = """EXAMPLES
   Mercury, everything (writes to the configured work tree, encrypted and ready for the game):
     python -m deadlock_tools weapons colonialmercury --clone fore=3 --layout free --scale fore=0.7 --clone-scale 0.7 \\
-        --fighter-slots 4 --utility-slots 2 --split-squadrons --munition-slots 4 --hull-regen 0.1 --armour-regen --munition-factory --squadron-revive \\
+        --fighter-slots 4 --utility-slots 2 --split-squadrons --munition-slots 4 --hull-regen 0.1 --munition-factory --custom-armour-repair --custom-squadron-replacement \\
         --mini-jump --augury --stealth colonialorion --ability-submenu
   List the turrets:        python -m deadlock_tools weapons colonialmercury --list-mounts
   Slot counts here must match the level files:  python -m deadlock_tools shipdb set "Colonial Mercury" FighterSlots 4
-  Needed in the DLL ('dll'):  --armour-regen -> patch --armour-factor, --squadron-revive -> patch --revive-turns
+  Custom modules (--custom-*) need the custom-module DLL; the editor rebuilds it when it saves the bundle.
 LIMITS
   Radial menus hold 8 buttons (positions 0-7): Fighters launch buttons <= 8 in total, munition slots <= 7 (plus Back), Actions menu 8 (use --ability-submenu)."""
     ap.formatter_class = argparse.RawDescriptionHelpFormatter
@@ -2555,6 +3029,8 @@ LIMITS
     g_weap.add_argument("--min-gap", type=float, help="--layout free: smallest distance between a clone and any other turret (default: 0.9 x the closest turret spacing on that side, scaled by --clone-scale)")
     g_weap.add_argument("--gap", type=float, default=1.5, help="--layout mid: how far (units) a single clone slides towards the next turret in its row (default 1.5, half the usual 3-unit turret spacing)")
     g_weap.add_argument("--no-mirror", action="store_true", help="--layout offset: apply --offset as-is to every mount (old behaviour, not symmetric)")
+    g_weap.add_argument("--respace", action="append", default=[], metavar="SELECTOR=GAP", help="move the existing clones (..._x2, _x3) of the matching turrets so every turret there is at least GAP game units from every other (after --ship-scale), on the same hull surface, mirrored; originals stay put. Stock spacing is 4 between full-size turrets, e.g. --respace fore=4 --scale fore=1")
+    g_weap.add_argument("--ship-scale", type=float, metavar="S", help="set the WHOLE ship's size (model, turrets, launch bays, collision zones, hit points) to S times the stock size, e.g. 1.25 = 25%% bigger; repeating it is harmless. Also scales its collision exclusion radius and miss-sphere radius; set the same CollisionExclusionZoneRadius on the Ships page so fleet deployment spacing matches")
     g_weap.add_argument("--clone-scale", type=float, metavar="S", help="size of the CLONED turrets (1 = same as the original, 0.6 = 60%% - mesh, barrel position and collider all shrink). Helps clones fit beside their neighbours")
     g_weap.add_argument("--scale", action="append", default=[], metavar="SELECTOR=S", help="resize EXISTING turrets matching SELECTOR (same selectors as --clone), repeatable, e.g. --scale fore=0.7. Visual/physical size only; damage and range are unchanged")
     g_weap.add_argument("--list-mounts", action="store_true", help="print every weapon mount (name, quadrant, weapon type, position) and the groups usable with --clone, then exit")
@@ -2563,9 +3039,7 @@ LIMITS
     g_slot.add_argument("--utility-slots", type=int, help="final UtilityFighterSlots value (support squadrons). Mercury default is 1")
     g_slot.add_argument("--bay-offset", default="0,3,4", help="x,y,z shift applied to each new launch bay (default 0,3,4)")
     g_sys.add_argument("--hull-regen", type=float, help="add a Regenerative Hull Resin module (passive hull repair, scaled by Engineering) with this hullPerTick; the Cylon modern basestar uses 0.2")
-    g_sys.add_argument("--munition-factory", action="store_true", help="add the Munition Factory module (passive munition resupply, as on the Cylon Argos). Its speed comes from the ship's Armory MunitionResupplyRange; add --squadron-revive (and dll patch --revive-turns) to also rebuild destroyed squadrons")
-    g_sys.add_argument("--squadron-revive", action="store_true", help="flag the ship so its Munition Factory module rebuilds DESTROYED squadrons (needs dll patch --revive-turns in the DLL; the ship needs the module: add it with --munition-factory)")
-    g_sys.add_argument("--armour-regen", action="store_true", help="flag the ship's Regenerative Hull Resin module so it also regenerates ARMOUR (needs dll patch --armour-factor in the DLL). With --hull-regen X it adds the module; alone it flags the module the ship already has")
+    g_sys.add_argument("--munition-factory", action="store_true", help="add the Munition Factory module (passive munition resupply, as on the Cylon Argos). Its speed comes from the ship's Armory MunitionResupplyRange; use --custom-squadron-replacement to rebuild destroyed squadrons")
     g_custom.add_argument("--custom-instant-plating", action="store_true", help="add Instant Plating to Actions; applies 200 stacking extra armour per facing on activation; requires the custom-module DLL")
     g_custom.add_argument("--custom-armour-repair", action="store_true", help="add the standalone armour repair module; switches Hull Resin back to positive hull-only repair and disables the old sign-based armour hook; requires the custom-module DLL")
     g_custom.add_argument("--custom-squadron-replacement", action="store_true", help="add the standalone destroyed-squadron replacement module and clear the legacy ShipInfo revive flag; keep Munition Factory for ordinary ammo resupply; requires the custom-module DLL")
@@ -2606,6 +3080,7 @@ LIMITS
     g_abil.add_argument("--defender-donor", help="bundle path or name to use for abilities sourced from a Defender")
     g_abil.add_argument("--celestra-donor", help="bundle path or name to use for abilities sourced from a Celestra")
     g_slot.add_argument("--align-launch-bays", action="store_true", help="match launch bay compatibility to the requested fighter and utility slot counts")
+    g_slot.add_argument("--mirror-launch-bays", action="store_true", help="mirror adjacent fighter launch bays across the ship in port/starboard pairs")
     g_slot.add_argument("--bay-icon", action="append", default=[], metavar="SLOT=X,Y,Z", help="set the local icon marker position for an existing or newly cloned bay (repeatable; use --inspect to see current coordinates)")
     g_slot.add_argument("--slot-parts", default="buttons,bays,icons", help="(for testing) which parts --fighter-slots adds: any of buttons, bays, icons")
     g_out.add_argument("--mount-layout", help=argparse.SUPPRESS)
@@ -2653,12 +3128,12 @@ def main():
             offset=off, copies=a.copies,
             munition_slots=a.munition_slots, fighter_slots=a.fighter_slots, utility_slots=a.utility_slots,
             bay_offset=tuple(map(float, a.bay_offset.split(","))),
-            hull_regen=a.hull_regen, armour_regen=a.armour_regen,
+            hull_regen=a.hull_regen,
             clones=[(selector, int(count)) for selector, count in (item.rsplit("=", 1) for item in a.clone)],
             list_mounts=a.list_mounts, clone_scale=a.clone_scale,
             scales=[(selector, float(scale)) for selector, scale in (item.rsplit("=", 1) for item in a.scale)],
             layout=a.layout, gap=a.gap, mirror=not a.no_mirror,
-            munition_factory=a.munition_factory, squadron_revive=a.squadron_revive,
+            munition_factory=a.munition_factory,
             custom_modules=[cls for cls, enabled in (
                 ("CustomArmourRepairModule", a.custom_armour_repair),
                 ("CustomInstantPlatingModule", a.custom_instant_plating),
@@ -2681,8 +3156,8 @@ def main():
             squadron_groups=([a.fighter_slots, a.utility_slots] if a.split_squadrons else
                              [int(value) for value in a.squadron_groups.split(",")] if a.squadron_groups else None),
             icon_offset=tuple(map(float, a.icon_offset.split(","))),
-            inspect=a.inspect, support_abilities=support_abilities, prefab_fields=a.prefab_fields,
-            align_launch_bays=a.align_launch_bays, bay_icons=parse_bay_icons(a.bay_icon),
+            inspect=a.inspect, support_abilities=support_abilities, prefab_fields=a.prefab_fields, ship_scale=a.ship_scale, respace=a.respace,
+            align_launch_bays=a.align_launch_bays, mirror_launch_bays=a.mirror_launch_bays, bay_icons=parse_bay_icons(a.bay_icon),
             normalize_ability_submenu=a.normalize_ability_submenu,
             support_settings=configured_support_settings(a) if not (a.list_mounts or a.inspect) else {},
             turnaround_repair_actions=a.turnaround_repair_actions, mount_layout=mount_layout,

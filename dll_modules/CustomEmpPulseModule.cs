@@ -16,6 +16,8 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
 
     protected int lastUsedRound = int.MinValue;
     protected int lastPulseMissilesDestroyed;
+    protected int lastPulseFightersStunned;
+    protected int lastPulseFightersJammed;
     private int squadronTicksLeft;
     private int detonationTicksLeft;
     private bool awaitingStartSimulation;
@@ -28,6 +30,8 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
     private readonly Dictionary<ShipInfo, int> jammedFighters = new Dictionary<ShipInfo, int>();
     private static FieldInfo activeMissilesField;
     private static bool activeMissilesFieldChecked;
+    private static FieldInfo battleShipsField;
+    private static bool battleShipsFieldChecked;
     protected virtual string AbilityLabel => "Experimental EMP";
 
     protected override void Awake()
@@ -116,8 +120,14 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
             ? radius : Mathf.Max(radius, shipQueryRange);
         // Include capital ships. The fourth selector argument excludes them
         // when false, which made battleship EMP pulses appear to do nothing.
-        List<DestructableAssetInfo> targets = battle.GetShipTargets(source, true, queryRange, true, true);
+        // GetShipTargets excludes every ShipInfo marked IsChild. Fighter craft
+        // are child ships, so that query silently skipped them. Start with the
+        // normal query, then add the battle's complete ship list so child
+        // squadrons can receive the same enemy/range checks below.
+        List<DestructableAssetInfo> targets = GetEmpShipTargets(battle, source, queryRange);
         int affected = 0;
+        int fightersStunned = 0;
+        int fightersJammed = 0;
 
         if (targets != null)
         {
@@ -150,6 +160,7 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
                         squadron.HKEFOEDOADO = true;
                         if (!stunnedSquadrons.Contains(squadron)) stunnedSquadrons.Add(squadron);
                         squadronTicksLeft = Mathf.Max(squadronTicksLeft, disableSquadronTicks);
+                        fightersStunned++;
                         hit = true;
                     }
                     if (fighterEvadeDebuffTicks > 0 &&
@@ -162,12 +173,15 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
                         jammedFighters[target] = Mathf.Max(
                             jammedFighters.TryGetValue(target, out int remaining) ? remaining : 0,
                             fighterEvadeDebuffTicks);
+                        fightersJammed++;
                         hit = true;
                     }
                 }
                 if (hit) affected++;
             }
         }
+        lastPulseFightersStunned = fightersStunned;
+        lastPulseFightersJammed = fightersJammed;
 
         // Missiles are tracked separately by MissileEventProxy; they are not
         // included in BattleManager.NonShipDestructables. Read that live list,
@@ -212,10 +226,60 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
         // Show every detonation point, even when no enemy happens to be in
         // range, so a multi-point salvo visibly produces one burst per point.
         PlayPulseVisual(centre, radius);
-        var panel = RefMan.GetBehaviour<ShipInfoPanel>(false, false, false);
-        if (consumeCooldown && panel != null)
-            panel.DisplayNotification(AbilityLabel + " destroyed " + missilesDestroyed + " enemy missile(s).");
         return affected;
+    }
+
+    private static List<DestructableAssetInfo> GetEmpShipTargets(BattleManager battle,
+        ShipInfo source, float queryRange)
+    {
+        var result = new List<DestructableAssetInfo>();
+        var seen = new HashSet<int>();
+        AddShipTargets(result, seen, battle.GetShipTargets(source, true, queryRange, true, true));
+
+        // Public GetAllShips can include child ships in this game build, but
+        // excludes proxies. The private list is the same complete ShipInfo
+        // collection used internally by BattleManager.GetTargets, so prefer it
+        // when available and retain the public method as a build fallback.
+        if (!battleShipsFieldChecked)
+        {
+            battleShipsField = typeof(BattleManager).GetField(
+                "FBAEBBODOMB", BindingFlags.Instance | BindingFlags.NonPublic);
+            battleShipsFieldChecked = true;
+        }
+        var allShips = battleShipsField == null
+            ? null
+            : battleShipsField.GetValue(battle) as IEnumerable<ShipInfo>;
+        if (allShips != null)
+        {
+            foreach (ShipInfo ship in allShips)
+                AddShipTarget(result, seen, ship);
+        }
+        else
+        {
+            List<ShipInfo> childShips = battle.GetAllShips(true, false);
+            if (childShips != null)
+                foreach (ShipInfo ship in childShips)
+                    AddShipTarget(result, seen, ship);
+        }
+        return result;
+    }
+
+    private static void AddShipTargets(List<DestructableAssetInfo> targets,
+        HashSet<int> seen, IEnumerable<DestructableAssetInfo> additions)
+    {
+        if (additions == null) return;
+        foreach (DestructableAssetInfo target in additions)
+        {
+            ShipInfo ship = target as ShipInfo;
+            if (ship != null) AddShipTarget(targets, seen, ship);
+        }
+    }
+
+    private static void AddShipTarget(List<DestructableAssetInfo> targets,
+        HashSet<int> seen, ShipInfo ship)
+    {
+        if (ship == null || !seen.Add(ship.GetInstanceID())) return;
+        targets.Add(ship);
     }
 
     private void AddMissileCandidate(ShipInfo source, Vector3 centre, float radius, Missile missile, HashSet<int> seen, List<Missile> candidates)
@@ -258,11 +322,10 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
         CancelPending();
         if (source == null || battle == null || !source.LGGHLAEAKEP) return;
         int affected = ApplyPulse(source, battle, battle.PCFKLFGBAHP);
-        if (affected > 0)
-        {
-            var panel = RefMan.GetBehaviour<ShipInfoPanel>(false, false, false);
-            if (panel != null) panel.DisplayNotification(AbilityLabel + " affected " + affected + " enemy target(s).");
-        }
+        var panel = RefMan.GetBehaviour<ShipInfoPanel>(false, false, false);
+        if (panel != null) panel.DisplayNotification(AbilityLabel + " affected " + affected +
+            " enemy target(s): stunned " + lastPulseFightersStunned + " fighter squadron(s), applied evade debuff to " +
+            lastPulseFightersJammed + " fighter(s), destroyed " + lastPulseMissilesDestroyed + " missile(s).");
     }
 
     private void CancelPending()

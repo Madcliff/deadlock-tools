@@ -7,3 +7,7 @@ dist/
 tests/regression_inputs.json
 *.egg-info/
 build/
+.deadlock-backups/
+*.log
+venv/
+.venv/

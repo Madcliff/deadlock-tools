@@ -50,7 +50,15 @@ BLUEPRINTS / RESEARCH
 
 SQUADRONS (fighter hull strength, in the game's sharedassets9.assets - not in the level files)
   python -m deadlock_tools shipdb squadrons                (list: fighters, hull pool, hull per fighter, loss thresholds)
+  python -m deadlock_tools shipdb squadrons    "Viper Mk VII"                       (every field of one squadron)
   python -m deadlock_tools shipdb setsquadron  "Viper Mk VII" HullFactor 2
+  python -m deadlock_tools shipdb setsquadron  "Viper Mk VII" MaxShipCount 12 MaxVelocity 4.5 ShipLoss 2,4,8,12,18,24,32,40,48,52,56
+
+SQUADRON ALLOCATIONS (which squadron types each capital ship may carry; SquadronDataTable in level5-9/85)
+  python -m deadlock_tools shipdb allocations   ["Jupiter Mk2"]                       (fighter / utility slot choices per carrier)
+  python -m deadlock_tools shipdb setallocation "Colonial Viper Mk VII" allow "jupiter-battlestar,artemis"
+  python -m deadlock_tools shipdb setallocation "taipan" IsUtility true PointValue 80   (fields: IsUtility Faction DLCRequired PointValue
+        SupplyCostPerFighter SurvivalCostPerFighter XP DefaultGroup MoveOnLaunch includedInMultiplayer IncludedInCodex MaxShipCount MaxHullPoints)
         HullFactor F = pool and every fighter-loss threshold x F;  MaxHullPoints N = set the pool;  FighterHull N = hull per fighter.
         Name is part of the squadron name ("assault", "raptor", or "all"). A folder works too (files without squadrons are skipped).
 
@@ -60,7 +68,7 @@ FLEET LIMITS (campaign)
 
 FLEET MAP ICONS
   python -m deadlock_tools shipdb fleeticons                             (list the war-room icon tables)
-  python -m deadlock_tools shipdb fleeticon    "Colonial Mercury,Colonial Valkyrie" "Jupiter Mk2"
+  python -m deadlock_tools shipdb fleeticon    "Colonial Mercury,Colonial Valkyrie" "Jupiter Mk2" [--add-missing]
         Copies a ship's fleet icon to other ships in every scene that has the table. (--factory all is not recommended.)
 
 COMBINING EDITS
@@ -541,7 +549,13 @@ class Db:
 
 def load_factory(db, scene_path, factory):
     """find the <factory> MonoBehaviour in a scene file (by its GameObject's name) and parse it."""
-    d = bytes(open(scene_path, "rb").read()); S = db.S
+    d = bytes(open(scene_path, "rb").read())
+    return parse_factory(db, d, factory)
+
+
+def parse_factory(db, d, factory):
+    """Parse a factory MonoBehaviour directly from serialized file bytes."""
+    S = db.S
     ti = S.typedef_index(factory)
     try:
         if struct.unpack(">I", d[4:8])[0] != len(d): raise LookupError("not a serialized file")
@@ -562,7 +576,156 @@ def load_factory(db, scene_path, factory):
         try: res = r.obj(ti)
         except Exception: continue
         if r.p == size: return bytearray(d), off, res
-    raise LookupError("no %s in %s" % (factory, scene_path))
+    raise LookupError("no %s factory object in serialized data" % factory)
+
+
+def append_factory_entry(db, data, factory, target_id, target_name, donor_entry):
+    """Append a new ship ID to a factory, reusing the donor's prefab pointer."""
+    data = bytes(data)
+    _buf, base, parsed = parse_factory(db, data, factory)
+    if any(int(entry["id"]) == int(target_id) for entry in parsed["objects"]):
+        return data, False
+
+    mono_obj = next((entry for entry in read_objects(data)
+                     if entry[1] == base and entry[3] == 114), None)
+    if mono_obj is None:
+        raise ValueError("could not identify the %s component object" % factory)
+    pid, _offset, mono_size, _class_id, _entry_offset = mono_obj
+    mono = bytearray(data[base:base + mono_size])
+    array_start = parsed["_off"]["objects"][0]
+    count = len(parsed["objects"])
+    later_fields = [position for name, (position, _code) in parsed["_off"].items()
+                    if name != "objects" and position > array_start]
+    array_end = min(later_fields, default=mono_size)
+    if not parsed["objects"]:
+        raise ValueError("the %s factory has no template entries" % factory)
+    last = parsed["objects"][-1]
+    row_end = last["_off"]["prefab"][0] + 12
+    if row_end > array_end:
+        raise ValueError("the %s factory array layout is not supported" % factory)
+
+    encoded = str(target_name).encode("utf-8")
+    name_field = struct.pack("<i", len(encoded)) + encoded
+    name_field += b"\0" * ((-len(name_field)) % 4)
+    prefab_file, prefab_path = donor_entry["prefab"][1]
+    row = name_field + struct.pack("<i", int(target_id)) + struct.pack("<iq", prefab_file, prefab_path)
+    updated_mono = bytearray(mono[:array_end] + row + mono[array_end:])
+    struct.pack_into("<i", updated_mono, array_start, int(count) + 1)
+    updated = resize_object(data, pid, bytes(updated_mono))
+
+    _b2, _off2, verified = parse_factory(db, updated, factory)
+    added = next((entry for entry in verified["objects"] if int(entry["id"]) == int(target_id)), None)
+    if added is None or added["name"] != str(target_name) or added["prefab"][1] != (prefab_file, prefab_path):
+        raise ValueError("new %s entry failed verification for ship ID %s" % (factory, target_id))
+    return updated, True
+
+
+def append_ship_image_entry(db, data, target_id, target_name, donor_id):
+    """Register a ship in the scene's ShipImageDataTable, reusing donor art."""
+    data = bytes(data)
+    S = db.S
+    ti = S.typedef_index("ShipImageDataTable")
+    table = None
+    for pid, off, size, cid, _ in read_objects(data):
+        if cid != 114:
+            continue
+        try:
+            reader = Reader(S, data[off:off + size], 32)
+            parsed = reader.obj(ti)
+        except Exception:
+            continue
+        if reader.p == size and isinstance(parsed.get("objects"), list) and parsed["objects"]:
+            table = (pid, off, size, parsed)
+            break
+    if table is None:
+        raise LookupError("no ShipImageDataTable in this scene")
+    pid, base, mono_size, parsed = table
+    entries = parsed["objects"]
+    existing = next((e for e in entries if int(e["id"]) == int(target_id)), None)
+    if existing is not None:
+        return data, False
+    donor = next((e for e in entries if int(e["id"]) == int(donor_id)), None)
+    if donor is None:
+        raise ValueError("ShipImageDataTable has no art entry for donor ID %s" % donor_id)
+
+    mono = bytearray(data[base:base + mono_size])
+    array_start = parsed["_off"]["objects"][0]
+    later_fields = [position for name, (position, _code) in parsed["_off"].items()
+                    if name != "objects" and position > array_start]
+    array_end = min(later_fields, default=mono_size)
+    last = entries[-1]
+    row_end = last["_off"]["BlueprintImage"][0] + 12
+    if row_end > array_end:
+        raise ValueError("ShipImageDataTable array layout is not supported")
+
+    encoded = str(target_name).encode("utf-8")
+    row = struct.pack("<i", len(encoded)) + encoded
+    row += b"\0" * ((-len(row)) % 4)
+    row += struct.pack("<i", int(target_id))
+    for field in ("IconSide", "IconTop", "MinimapIcon", "HeroImage", "BlueprintImage"):
+        row += struct.pack("<iq", *donor[field][1])
+    updated_mono = bytearray(mono[:array_end] + row + mono[array_end:])
+    struct.pack_into("<i", updated_mono, array_start, len(entries) + 1)
+    updated = resize_object(data, pid, bytes(updated_mono))
+
+    for _pid, off, size, cid, _ in read_objects(updated):
+        if cid != 114:
+            continue
+        try:
+            reader = Reader(S, updated[off:off + size], 32)
+            verified = reader.obj(ti)
+        except Exception:
+            continue
+        if reader.p == size and any(int(e["id"]) == int(target_id) and e["name"] == str(target_name)
+                                    for e in verified.get("objects", [])):
+            return updated, True
+    raise ValueError("new ShipImageDataTable entry failed verification for ship ID %s" % target_id)
+
+
+def append_ship_factory_entry(db, data, target_id, target_name, asset_name):
+    """Register the battle ship prefab bundle in the scene's ShipFactory."""
+    data = bytes(data)
+    try:
+        _buf, base, parsed = parse_factory(db, data, "ShipFactory")
+    except LookupError:
+        return data, False
+    entries = parsed.get("objects", [])
+    existing = next((entry for entry in entries if int(entry["id"]) == int(target_id)), None)
+    if existing is not None:
+        if existing.get("assetName") != str(asset_name):
+            raise ValueError("ShipFactory already maps ship ID %s to bundle %r, not %r" %
+                             (target_id, existing.get("assetName"), asset_name))
+        return data, False
+    if not entries:
+        raise ValueError("ShipFactory has no template entries")
+
+    mono_obj = next((entry for entry in read_objects(data)
+                     if entry[1] == base and entry[3] == 114), None)
+    if mono_obj is None:
+        raise ValueError("could not identify the ShipFactory component object")
+    pid, _offset, mono_size, _class_id, _entry_offset = mono_obj
+    mono = bytearray(data[base:base + mono_size])
+    array_start = parsed["_off"]["objects"][0]
+    count = len(entries)
+    last = entries[-1]
+
+    def string_field(value):
+        encoded = str(value).encode("utf-8")
+        result = struct.pack("<i", len(encoded)) + encoded
+        return result + b"\0" * ((-len(result)) % 4)
+
+    row_end = last["_off"]["assetName"][0] + len(string_field(last["assetName"]))
+    name = str(target_name)
+    row = string_field(name) + struct.pack("<i", int(target_id)) + string_field(asset_name)
+    updated_mono = bytearray(mono[:row_end] + row + mono[row_end:])
+    struct.pack_into("<i", updated_mono, array_start, count + 1)
+    updated = resize_object(data, pid, bytes(updated_mono))
+
+    _b2, _off2, verified = parse_factory(db, updated, "ShipFactory")
+    added = next((entry for entry in verified["objects"] if int(entry["id"]) == int(target_id)), None)
+    if not added or added["name"] != name or added["assetName"] != str(asset_name):
+        raise ValueError("new ShipFactory entry failed verification for ship ID %s" % target_id)
+    return updated, True
 
 
 def chain_source(a, f_, outdir, *, quiet=False):
@@ -914,14 +1077,22 @@ def squadron_cmd(a):
         else: files += pth.split(",") if not os.path.exists(pth) else [pth]
     if not files: raise SystemExit("give sharedassets9.assets (or the game's Data folder)")
     S = Schema(dll); outdir = a.out
+    from deadlock_tools import squadrons as sqmod
     key = lambda t: t.lower().replace(" ", "").replace("_", "")
-    edits = []
+    LEGACY = ("HullFactor", "FighterHull")
+    edits, sel, show = [], None, None
+    if a.cmd == "squadrons" and rest:
+        show = rest[0]
     if a.cmd == "setsquadron":
         if len(rest) < 3 or len(rest) % 2 == 0:
-            raise SystemExit('usage: shipdb setsquadron "Viper Mk VII" HullFactor 2   (or MaxHullPoints 120 / FighterHull 12; name "all" = every squadron)')
-        sel = rest[0]; edits = [(rest[i], float(rest[i + 1])) for i in range(1, len(rest), 2)]
+            raise SystemExit('usage: shipdb setsquadron "Viper Mk VII" Field value [Field value ...]   (name "all" = every squadron)\n'
+                             '  fields: MaxShipCount N, ShipLoss 2,4,8,..., HullFactor F, FighterHull N, or any of: '
+                             + ", ".join(f for _c, f, _k, _l, _h in sqmod.FIELDS))
+        sel = rest[0]; edits = [(rest[i], rest[i + 1]) for i in range(1, len(rest), 2)]
         for f_, _v in edits:
-            if f_ not in ("HullFactor", "MaxHullPoints", "FighterHull"): raise SystemExit("editable: HullFactor (x pool and thresholds), MaxHullPoints (pool), FighterHull (hull per fighter at full strength)")
+            if f_ not in LEGACY + ("MaxShipCount", "ShipLoss"):
+                try: sqmod.field_key(f_)
+                except ValueError as e: raise SystemExit(str(e))
         os.makedirs(outdir, exist_ok=True)
     done = []
     for f_ in files:
@@ -929,38 +1100,95 @@ def squadron_cmd(a):
         try:
             raw = open(src, "rb").read()
             if len(raw) < 20 or struct.unpack(">I", raw[4:8])[0] != len(raw): continue
-            sq = squadron_list(raw, S)
+            sq = sqmod.load(S, raw)
         except Exception: continue
         if not sq: continue
         tag = os.path.basename(f_)
+        if show:
+            d = sqmod.describe(sqmod.find(sq, show))
+            print("== %s: %s  (fighter ShipType %d, squadron ShipType %d)" % (tag, d["name"], d["shipType"], d["squadronShipType"]))
+            print("  %-34s %s" % ("MaxShipCount (fighters)", d["count"]))
+            print("  %-34s %s" % ("ShipLoss (hull thresholds)", d["shipLoss"]))
+            for fld in d["fields"]: print("  %-34s %-10s %s" % (fld["field"], fld["value"], fld["label"]))
+            continue
         if not edits:
-            print("== %s\n%-30s%9s%11s%13s   ShipLoss thresholds" % (tag, "squadron", "fighters", "hull pool", "per fighter"))
+            print("== %s\n%-30s%9s%11s%13s%11s   ShipLoss thresholds" % (tag, "squadron", "fighters", "hull pool", "per fighter", "max speed"))
             for q in sq:
-                mc = q["fs"][1]["MaxShipCount"]; hp = q["si"][1]["MaxHullPoints"]
-                print("%-30s%9d%11g%13.2f   %s" % (q["name"], mc, hp, hp / mc, [round(x, 2) for x in q["fs"][1]["ShipLoss"]]))
+                c = q["components"]; mc = c["FighterSquadron"][3]["MaxShipCount"]; hp = c["ShipInfo"][3]["MaxHullPoints"]
+                speed = c["PropulsionInfo"][3]["MaxVelocity"] if "PropulsionInfo" in c else float("nan")
+                print("%-30s%9d%11g%13.2f%11.2f   %s" % (q["name"], mc, hp, hp / mc, speed, [round(x, 2) for x in c["FighterSquadron"][3]["ShipLoss"]]))
             continue
         hit = [q for q in sq if key(sel) == "all" or key(sel) in key(q["name"])]
         if not hit: raise SystemExit("no squadron matches %r. Squadrons: %s" % (sel, ", ".join(q["name"] for q in sq)))
-        buf = bytearray(raw); print("== " + tag)
+        buf = raw; print("== " + tag)
         for q in hit:
-            co, res = q["fs"]; so, sres = q["si"]; old = sres["MaxHullPoints"]; mc = res["MaxShipCount"]; f = 1.0
+            c = q["components"]; hull = c["ShipInfo"][3]["MaxHullPoints"]; mc = c["FighterSquadron"][3]["MaxShipCount"]
+            changes = {}
             for fld, v in edits:
-                if v <= 0: raise SystemExit("values must be positive")
-                f *= v if fld == "HullFactor" else (v / old if fld == "MaxHullPoints" else v * mc / old)
-                old = old if fld == "HullFactor" else old
-            o_hp = sres["_off"]["MaxHullPoints"][0]; struct.pack_into("<f", buf, so + o_hp, sres["MaxHullPoints"] * f)
-            base = co + res["_off"]["ShipLoss"][0] + 4
-            for i, v in enumerate(res["ShipLoss"]): struct.pack_into("<f", buf, base + 4 * i, v * f)
-            print("[ok] %-30s hull pool %g -> %g (x%g), per fighter %.2f -> %.2f, %d thresholds scaled" % (q["name"], sres["MaxHullPoints"], sres["MaxHullPoints"] * f, f, sres["MaxHullPoints"] / mc, sres["MaxHullPoints"] * f / mc, len(res["ShipLoss"])))
-        chk = {q["name"]: q for q in squadron_list(bytes(buf), S)}
-        for q in hit: assert abs(chk[q["name"]]["si"][1]["MaxHullPoints"] - q["si"][1]["MaxHullPoints"] * 0 - chk[q["name"]]["si"][1]["MaxHullPoints"]) < 1e-9 and q["name"] in chk, "verification failed"
+                if fld == "HullFactor": changes["MaxHullPoints"] = hull * float(v)
+                elif fld == "FighterHull": changes["MaxHullPoints"] = float(v) * int(changes.get("MaxShipCount", mc))
+                elif fld == "MaxShipCount": changes["MaxShipCount"] = int(v)
+                elif fld == "ShipLoss": changes["ShipLoss"] = [float(x) for x in str(v).split(",") if x.strip()]
+                else: changes[fld] = v
+            try: buf, log = sqmod.apply(S, buf, q["name"], changes)
+            except ValueError as e: raise SystemExit("%s: %s" % (q["name"], e))
+            print("\n".join("[ok] " + line for line in log) or "[ok] %s: no change" % q["name"])
         open(os.path.join(outdir, tag), "wb").write(bytes(buf)); done.append(tag)
     if edits:
         print("\npatched %d file(s): %s\nPatched copies are in %s/ (same file names). Back up the originals, then copy them over." % (len(done), ", ".join(done) or "none", outdir))
         print("NOTE: level data shows its own hull number for the UI only; battles use these prefab values.")
-    elif not files or True:
-        pass
 
+
+def allocation_cmd(a):
+    """allocations [carrier]: what each carrier may launch;  setallocation TYPE allow|deny CARRIER[,CARRIER] | Field value ..."""
+    from deadlock_tools import squadron_table as st
+    S = Schema(a.dll); outdir = a.out
+    rest = [x for x in a.args if not os.path.exists(x)]
+    files = [f for p_ in [a.level0] + [x for x in a.args if os.path.exists(x)] for f in files_of(p_)]
+    db = None
+    for f_ in files:
+        if not os.path.basename(f_).startswith("level") or f_.endswith(".resS"): continue
+        try: db = Db(a.dll, chain_source(a, f_, outdir, quiet=True), S); break
+        except BaseException: continue
+    if db is None: raise SystemExit("no ship database found in %s" % a.level0)
+    ship = lambda key: db.find(key)
+    tables = []
+    for f_ in files:
+        src = chain_source(a, f_, outdir, quiet=a.cmd == "allocations")
+        if not os.path.basename(f_).startswith("level") or f_.endswith(".resS"): continue
+        try: data = open(src, "rb").read(); found = st.find(S, data)
+        except BaseException: continue                       # not a stripped level file (e.g. assets with a type tree)
+        if found: tables.append((f_, data, found[3]))
+    if not tables: raise SystemExit("no level file with the SquadronDataTable in %s" % a.level0)
+    res = tables[0][2]
+    if a.cmd == "allocations":
+        carriers = [x for x in db.ships if x.get("FighterSlots", 0) or x.get("UtilityFighterSlots", 0)]
+        if rest: carriers = [ship(rest[0])]
+        for c in carriers:
+            fighter = [st.entry(res, i)["name"] for i in st.allowed(res, c["id"], c["Faction"])]
+            utility = [st.entry(res, i)["name"] for i in st.allowed(res, c["id"], c["Faction"], True)]
+            print("%s (%s, %d fighter / %d utility slots)\n  fighter slots: %s\n  utility slots: %s" % (c["name"], db.faction.get(c["Faction"]),
+                  c["FighterSlots"], c["UtilityFighterSlots"], ", ".join(fighter) or "-", ", ".join(utility) or "-"))
+        print("\n(%d squadron types in %s; DLC ownership and campaign unlocks also apply in game)" % (len(res["objects"]), ", ".join(os.path.basename(t[0]) for t in tables)))
+        return
+    if len(rest) < 3: raise SystemExit('usage: shipdb setallocation "viper mk VII" allow|deny "Jupiter Mk2[,artemis]"   or   shipdb setallocation "taipan" IsUtility true [PointValue 80 ...]')
+    try: e = st.entry(res, rest[0])
+    except ValueError as err: raise SystemExit(str(err))
+    if rest[1].lower() in ("allow", "deny"):
+        ids = {ship(n.strip())["id"] for n in rest[2].split(",") if n.strip()}
+        excl = set(e["shipExclusionList"])
+        excl = excl - ids if rest[1].lower() == "allow" else excl | ids
+        changes = {"shipExclusionList": sorted(excl)}
+    else:
+        if len(rest) % 2 == 0: raise SystemExit("give Field value pairs after the squadron type")
+        changes = {rest[i]: rest[i + 1] for i in range(1, len(rest), 2)}
+    os.makedirs(outdir, exist_ok=True); done = []
+    for f_, data, _res in tables:
+        try: new, log = st.apply(S, data, {e["id"]: changes})
+        except ValueError as err: raise SystemExit(str(err))
+        if new != data: open(os.path.join(outdir, os.path.basename(f_)), "wb").write(new); done.append(os.path.basename(f_))
+    print("\n".join("[ok] " + line for line in log) or "no change")
+    print("patched %d file(s): %s -> %s/" % (len(done), ", ".join(done) or "none", outdir))
 
 
 # ---------------------------------------------------------------- commanders (ranks / fleet-size traits) ----------------
@@ -1058,7 +1286,7 @@ def commanders_cmd(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["list", "vet", "show", "set", "setvet", "setxp", "copyvet", "fleeticons", "fleeticon", "munitions", "setmunition", "blueprints", "addblueprint", "addvet", "removevet", "fleetinfo", "setfleetinfo", "commanders", "setcommanders", "fixspecs", "squadrons", "setsquadron"])
+    ap.add_argument("cmd", choices=["list", "vet", "show", "set", "setvet", "setxp", "copyvet", "fleeticons", "fleeticon", "munitions", "setmunition", "blueprints", "addblueprint", "addvet", "removevet", "fleetinfo", "setfleetinfo", "commanders", "setcommanders", "fixspecs", "squadrons", "setsquadron", "allocations", "setallocation"])
     ap.prog = "deadlock shipdb"
     ap.add_argument("args", nargs="*", help="the command's own arguments (ship name, field, value ...)")
     config.add_path_args(ap, "levels", "dll", "out")
@@ -1076,10 +1304,14 @@ def main():
     ap.add_argument("--every-level", action="store_true", help="setcommanders: leadership interval 1 and one fleet-size trait per rank")
     ap.add_argument("--fresh", action="store_true", help="ignore earlier work-tree edits and start again from the original files")
     ap.add_argument("--factory", default="FleetModelFactory", help="FleetModelFactory (war-room fleet icon, default) or ProjectionFactory")
+    ap.add_argument("--add-missing", action="store_true", help="fleeticon: append a missing target ship entry, copying the donor prefab pointer")
+    ap.add_argument("--bundle-name", help="fleeticon: battle ShipFactory asset bundle name for the target ship (default: lowercase ship name without spaces)")
     a = ap.parse_args()
     _normalise(a)
     if a.cmd in ("commanders", "setcommanders", "fixspecs"):
         commanders_cmd(a); return
+    if a.cmd in ("allocations", "setallocation"):
+        allocation_cmd(a); return
     if a.cmd in ("squadrons", "setsquadron"):
         squadron_cmd(a); return
     if a.cmd in ("fleetinfo", "setfleetinfo"):
@@ -1256,10 +1488,12 @@ def run(a, level0, out):
         paths = []
         rest = list(a.args)
         while rest and os.path.exists(rest[0]): paths.append(rest.pop(0))
-        if level0 and os.path.exists(level0) and not paths: paths.append(level0)
+        if level0 and os.path.exists(level0) and os.path.abspath(level0) not in {os.path.abspath(path) for path in paths}:
+            paths.insert(0, level0)
         files = []
         for pth in paths:
-            if os.path.isdir(pth): files += [os.path.join(r_, f_) for r_, _d, fs in os.walk(pth) for f_ in sorted(fs)]
+            if os.path.isdir(pth): files += [os.path.join(pth, name) for name in sorted(os.listdir(pth))
+                                            if os.path.isfile(os.path.join(pth, name))]
             else: files.append(pth)
         factories = ["FleetModelFactory", "ProjectionFactory"] if a.factory.lower() == "all" else [a.factory]
         schema = Schema(a.dll)
@@ -1286,12 +1520,50 @@ def run(a, level0, out):
                 if src["id"] not in by: print("[skip] %s: %s has no %s entry" % (f_, src["name"], fac_name)); continue
                 for tn in names_t:
                     tgt = fdb.find(tn)
-                    if tgt["id"] not in by: print("[skip] %s: %s has no %s entry (adding one needs a resize; not supported)" % (f_, tgt["name"], fac_name)); continue
+                    if tgt["id"] not in by:
+                        if not a.add_missing:
+                            print("[skip] %s: %s has no %s entry (use --add-missing to create one)" % (f_, tgt["name"], fac_name)); continue
+                        buf_, added = append_factory_entry(fdb, buf_, fac_name, tgt["id"], tgt["name"], by[src["id"]])
+                        if added:
+                            print("[add]  %s  %-18s %-24s from %s (id %s, prefab %s)" % (
+                                os.path.basename(f_), fac_name, tgt["name"], src["name"], tgt["id"], by[src["id"]]["prefab"][1]))
+                        else:
+                            print("[skip] %s: %s already has a %s entry" % (f_, tgt["name"], fac_name))
+                        _updated_buf, base, updated_factory = parse_factory(fdb, buf_, fac_name)
+                        by = {int(entry["id"]): entry for entry in updated_factory["objects"]}
+                        continue
                     pos = base + by[tgt["id"]]["_off"]["prefab"][0]
                     old = struct.unpack_from("<iq", buf_, pos)
                     struct.pack_into("<iq", buf_, pos, *by[src["id"]]["prefab"][1])
                     print("[ok]   %s  %-18s %-24s prefab %s -> %s" % (os.path.basename(f_), fac_name, tgt["name"], old, by[src["id"]]["prefab"][1]))
                 open(os.path.join(outdir, os.path.basename(f_)), "wb").write(buf_); buf = buf_
+            if a.cmd == "fleeticon" and a.add_missing:
+                src = fdb.find(name_s)
+                image_data = bytes(buf) if buf is not None else open(f_, "rb").read()
+                image_changed = False
+                for tn in names_t:
+                    tgt = fdb.find(tn)
+                    try:
+                        image_data, added = append_ship_image_entry(fdb, image_data, tgt["id"], tgt["name"], src["id"])
+                    except LookupError:
+                        continue
+                    if added:
+                        image_changed = True
+                        print("[add]  %s  ShipImageDataTable %-24s art from %s" %
+                              (os.path.basename(f_), tgt["name"], src["name"]))
+                    asset_name = a.bundle_name or "".join(tgt["name"].lower().split())
+                    try:
+                        image_data, factory_added = append_ship_factory_entry(
+                            fdb, image_data, tgt["id"], tgt["name"], asset_name)
+                    except LookupError:
+                        factory_added = False
+                    if factory_added:
+                        image_changed = True
+                        print("[add]  %s  ShipFactory %-24s bundle %s" %
+                              (os.path.basename(f_), tgt["name"], asset_name))
+                if image_changed:
+                    buf = image_data
+                    open(os.path.join(outdir, os.path.basename(f_)), "wb").write(image_data)
             if buf is not None: patched.append(os.path.basename(f_))
         if a.cmd == "fleeticon":
             print("\npatched %d file(s): %s" % (len(patched), ", ".join(patched) or "none"))

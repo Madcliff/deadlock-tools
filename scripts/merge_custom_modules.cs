@@ -322,14 +322,11 @@ static class MergePrototype
                                            MethodReference getRank, MethodDefinition method, int abilityLocal,
                                            int indexLocal, bool readAbilityFromChoiceArray)
     {
+        if (method.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference mr &&
+            mr.DeclaringType.FullName == helper.FullName && mr.Name == getRank.Name)) return;
+
         var fields = method.Body.Instructions.Where(i => i.OpCode == OpCodes.Ldsfld && i.Operand is FieldReference fr &&
             fr.Name == ranks.Name && fr.DeclaringType.FullName == tree.FullName).ToList();
-        if (fields.Count == 0)
-        {
-            if (method.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference mr &&
-                mr.DeclaringType.FullName == helper.FullName && mr.Name == getRank.Name)) return;
-            throw new InvalidOperationException("could not find the commander ability level lookup in " + method.FullName);
-        }
         if (fields.Count != 1) throw new InvalidOperationException("unexpected number of ability level lookups in " + method.FullName);
         var fieldLoad = fields[0]; var indexLoad = fieldLoad.Next; var arrayRead = indexLoad == null ? null : indexLoad.Next;
         if (indexLoad == null || arrayRead == null || arrayRead.OpCode != OpCodes.Ldelem_I4)
@@ -358,6 +355,62 @@ static class MergePrototype
         method.Body.MaxStackSize = Math.Max(method.Body.MaxStackSize, 4);
     }
 
+    static void FixCommanderNodeLoop(MethodDefinition method)
+    {
+        var instructions = method.Body.Instructions;
+        var choices = instructions.Single(i => i.OpCode == OpCodes.Ldfld &&
+            i.Operand is FieldReference field && field.Name == "Specialisations" &&
+            field.DeclaringType.Name == "CommanderSpecialisationBySubSystem");
+        var enter = choices.Next.Next.Next.Next;
+        var firstNode = enter.Next;
+        var repeat = instructions.Last().Previous.Previous;
+        var condition = repeat.Previous.Previous.Previous.Previous;
+        if ((enter.OpCode != OpCodes.Br_S && enter.OpCode != OpCodes.Br) ||
+            firstNode.OpCode != OpCodes.Newobj ||
+            (repeat.OpCode != OpCodes.Blt_S && repeat.OpCode != OpCodes.Blt) ||
+            repeat.Previous.OpCode != OpCodes.Conv_I4 ||
+            repeat.Previous.Previous.OpCode != OpCodes.Ldlen)
+            throw new InvalidOperationException("unexpected commander node loop IL in " + method.FullName);
+
+        // The longer rank lookup can exceed an 8-bit branch in either direction.
+        // Rebuild both targets from the loop structure to repair existing DLLs too.
+        enter.OpCode = OpCodes.Br;
+        enter.Operand = condition;
+        repeat.OpCode = OpCodes.Blt;
+        repeat.Operand = firstNode;
+    }
+
+    static void SetComponentBoostLimit(Instruction instruction, int limit, OpCode original)
+    {
+        if (instruction.OpCode != original &&
+            (instruction.OpCode != OpCodes.Ldc_I4_S || (sbyte)instruction.Operand != limit))
+            throw new InvalidOperationException("unexpected ship component boost limit");
+        instruction.OpCode = OpCodes.Ldc_I4_S;
+        instruction.Operand = (sbyte)limit;
+    }
+
+    static void ExpandComponentBoost(ModuleDefinition module, TypeDefinition helper,
+        TypeDefinition tree, MethodDefinition nodes)
+    {
+        int limit = (int)helper.Fields.Single(f => f.Name == "ComponentBoostLevels").Constant;
+        var rankLoad = nodes.Body.Instructions.Single(i => i.OpCode == OpCodes.Ldfld &&
+            i.Operand is FieldReference field && field.Name == "FleetSpecialisationRank");
+        var loopEnd = nodes.Body.Instructions.Single(i => i.OpCode == OpCodes.Ble_S &&
+            i.Offset > rankLoad.Offset);
+        SetComponentBoostLimit(loopEnd.Previous, limit, OpCodes.Ldc_I4_5);
+
+        var offers = tree.Methods.Single(m => m.Name == "NJDJOFENMNG" && m.Parameters.Count == 2);
+        var offerLimit = offers.Body.Instructions.First(i => i.OpCode == OpCodes.Bgt_S).Previous;
+        SetComponentBoostLimit(offerLimit, limit, OpCodes.Ldc_I4_5);
+
+        var commander = module.Types.Single(t => t.Name == "FleetCommander");
+        var apply = commander.Methods.Single(m => m.Name == "ApplyFleetGroupSpecialisation");
+        var clamp = apply.Body.Instructions.Single(i => i.OpCode == OpCodes.Call &&
+            i.Operand is MethodReference call && call.Name == "Clamp" &&
+            call.DeclaringType.FullName == "UnityEngine.Mathf");
+        SetComponentBoostLimit(clamp.Previous, limit, OpCodes.Ldc_I4_5);
+    }
+
     static void InjectCommanderAbilityLevelHooks(ModuleDefinition module, TypeDefinition helper)
     {
         var tree = module.Types.Single(t => t.Name == "OPHEFGLELFC");
@@ -366,7 +419,57 @@ static class MergePrototype
         var offers = tree.Methods.Single(m => m.Name == "JABBOLKFKOL" && m.Parameters.Count == 2);
         ReplaceCommanderRankLookup(tree, helper, ranks, getRank, offers, 4, 3, false);
         var nodes = tree.Methods.Single(m => m.Name == "DKAFHNBPEMM" && m.Parameters.Count == 2);
+        FixCommanderNodeLoop(nodes);
+        ExpandComponentBoost(module, helper, tree, nodes);
         ReplaceCommanderRankLookup(tree, helper, ranks, getRank, nodes, 0, 0, true);
+        var widget = module.Types.Single(t => t.Name == "SkillSelectWidget");
+        var findSkill = helper.Methods.Single(m => m.Name == "FindCaptainSkill");
+        var lookups = widget.Methods.Where(m => m.HasBody).SelectMany(m => m.Body.Instructions)
+            .Where(i => (i.OpCode == OpCodes.Ldelem_Any &&
+                i.Operand is TypeReference type && type.FullName == "CaptainSkill") ||
+                (i.OpCode == OpCodes.Call && i.Operand is MethodReference call &&
+                call.DeclaringType.FullName == helper.FullName && call.Name == findSkill.Name)).ToList();
+        if (lookups.Count == 0) throw new InvalidOperationException("could not find the captain skill widget lookup");
+        foreach (var lookup in lookups)
+        {
+            lookup.OpCode = OpCodes.Call;
+            lookup.Operand = findSkill;
+        }
+        var panel = module.Types.Single(t => t.Name == "CommanderInfoPanel");
+        var awake = panel.Methods.Single(m => m.Name == "Awake" && m.Parameters.Count == 0);
+        var scroll = helper.Methods.Single(m => m.Name == "ConfigureSkillsScroll");
+        if (!awake.Body.Instructions.Any(i => i.OpCode == OpCodes.Call &&
+            i.Operand is MethodReference reference && reference.FullName == scroll.FullName))
+        {
+            var list = panel.Fields.Single(f => f.Name == "specialisationWidgetList");
+            var ret = awake.Body.Instructions.Single(i => i.OpCode == OpCodes.Ret);
+            var il = awake.Body.GetILProcessor();
+            il.InsertBefore(ret, Instruction.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(ret, Instruction.Create(OpCodes.Ldfld, list));
+            il.InsertBefore(ret, Instruction.Create(OpCodes.Call, scroll));
+        }
+        var promotion = module.Types.Single(t => t.Name == "PromotionSelectWidget");
+        var promotionAwake = promotion.Methods.Single(m => m.Name == "Awake" && m.Parameters.Count == 0);
+        var promotionScroll = helper.Methods.Single(m => m.Name == "ConfigurePromotionScroll");
+        if (!promotionAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Call &&
+            i.Operand is MethodReference reference && reference.FullName == promotionScroll.FullName))
+        {
+            var ret = promotionAwake.Body.Instructions.Single(i => i.OpCode == OpCodes.Ret);
+            var il = promotionAwake.Body.GetILProcessor();
+            il.InsertBefore(ret, Instruction.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(ret, Instruction.Create(OpCodes.Call, promotionScroll));
+        }
+        var academy = module.Types.Single(t => t.Name == "FleetGroupAcademyPanel");
+        var academyAwake = academy.Methods.Single(m => m.Name == "Awake" && m.Parameters.Count == 0);
+        var rosterScroll = helper.Methods.Single(m => m.Name == "ConfigureRosterScroll");
+        if (!academyAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Call &&
+            i.Operand is MethodReference reference && reference.FullName == rosterScroll.FullName))
+        {
+            var ret = academyAwake.Body.Instructions.Single(i => i.OpCode == OpCodes.Ret);
+            var il = academyAwake.Body.GetILProcessor();
+            il.InsertBefore(ret, Instruction.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(ret, Instruction.Create(OpCodes.Call, rosterScroll));
+        }
         Console.WriteLine("Replaced fixed three-choice commander level lookups with per-ability unlock ranks");
     }
 

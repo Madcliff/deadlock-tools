@@ -25,11 +25,11 @@ class ConfigTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_defaults_and_relative_paths(self):
-        self.assertEqual(config.load()["out"], "out")
-        self.assertEqual(config.out_dir("levels", create=False), os.path.join(self.tmp.name, "out", "levels"))
+        self.assertEqual(config.load()["work"], "work")
+        self.assertEqual(config.out_dir("levels", create=False), os.path.join(self.tmp.name, "work", "BSG_Data"))
 
     def test_saved_settings_and_override(self):
-        config.save({"dll": "/game/Assembly-CSharp.dll", "out": "results"})
+        config.save({"dll": "/game/Assembly-CSharp.dll", "work": "results"})
         self.assertEqual(config.setting("dll"), "/game/Assembly-CSharp.dll")
         self.assertEqual(config.out_root(), os.path.join(self.tmp.name, "results"))
         self.assertEqual(config.setting("dll", "/other.dll"), "/other.dll")
@@ -37,7 +37,7 @@ class ConfigTest(unittest.TestCase):
     def test_old_gui_settings_are_used_until_deadlock_json_exists(self):
         put(config.OLD_SETTINGS_FILE, json.dumps({"levels": "/old/levels", "out": "/old/out"}).encode())
         self.assertEqual(config.load()["levels"], "/old/levels")
-        self.assertEqual(config.load()["out"], "out")              # the old 'out' was the level folder itself: not carried over
+        self.assertEqual(config.load()["work"], "work")            # the old 'out' was the level folder itself: not carried over
         config.save({"levels": "/new/levels"})
         self.assertEqual(config.load()["levels"], "/new/levels")
 

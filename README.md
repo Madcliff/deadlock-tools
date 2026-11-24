@@ -45,8 +45,8 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
 | `gui` | ship, bundle, DLL, and database editing in your browser (127.0.0.1 only) | configured work folder, mirroring `BSG_Data/` |
 | `shipdb` | ship stats, veterancy, XP, munitions, research/blueprints, fleet limits, fleet icons, commanders, squadron hull | `work/BSG_Data/` |
 | `weapons` | edit a ship bundle: clone/resize turrets, slots, vanilla systems, custom modules, abilities, and configurable turnaround repair actions | `work/BSG_Data/StreamingAssets/` |
-| `dll` | patch `Assembly-CSharp.dll`: armour regen, squadron revive, commander max rank, command-tree nodes, munition load, indexed repair-bay shortcuts; `check` / `revert` | `work/BSG_Data/Managed/` and `work/BSG_Data/` assets |
-| `ui fix-overflows` | make expanded ship slot lists size themselves for extra rows in construction, research, and battle panels | `work/BSG_Data/` |
+| `dll` | patch `Assembly-CSharp.dll`: commander max rank, command-tree nodes, munition load, indexed repair-bay shortcuts; `check` / `revert` | `work/BSG_Data/Managed/` and `work/BSG_Data/` assets |
+| `ui fix-overflows` | size expanded ship slot lists and enable scrolling for the commander skills list, construction, research, and battle panels | `work/BSG_Data/` |
 | `xor` | decrypt / encrypt / check ship bundles | `work/.deadlock-tools/decrypted/`, `work/BSG_Data/StreamingAssets/` |
 
 ## Command-line inputs and outputs
@@ -68,7 +68,7 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
 
 The configured work folder is the single continuing edit location. Merge its `BSG_Data/` tree into the game installation when ready. The settings let you choose level data, ship bundles, the DLL, and work folder independently. See [Editing and installing a mod](docs/workflows.md).
 
-The UI asset command uses UnityPy. Install the optional support with `python -m pip install '.[ui-assets]'`; the Windows standalone build includes it. Run `python -m deadlock_tools ui fix-overflows` to stage construction, research, battle, deployment, and ship-card layout corrections in `work/BSG_Data/`.
+The UI asset command uses UnityPy. Install the optional support with `python -m pip install '.[ui-assets]'`; the Windows standalone build and the combined editor (`deadlock.pyz`, which always bundles all its dependencies) include it. Run `python -m deadlock_tools ui fix-overflows` to stage commander skills scrolling, construction, research, battle, deployment, and ship-card layout corrections in `work/BSG_Data/`.
 
 Back up the game's files before copying command-line results over them.
 

@@ -17,13 +17,54 @@ LABELS = {
 }
 
 
+def _object_sizes(data):
+    from deadlock_tools.shipdb import read_objects
+    return {pid: size for pid, _start, size, _cid, _meta in read_objects(data)}
+
+
+def _file_key(env, path):
+    """the env.files key of the file loaded from path (dependencies such as globalgamemanagers.assets
+    can be pulled into the same environment, so 'the first file' is not reliable)"""
+    name = os.path.basename(path)
+    matches = [key for key in env.files if os.path.basename(str(key)) == name]
+    if len(matches) != 1:
+        raise RuntimeError("could not identify %s among the loaded asset files: %s" % (name, list(env.files)))
+    return matches[0]
+
+
+def save_asset(serialized_file, source_path, target_path):
+    """Serialise a UnityPy file and write it to target_path without ever damaging the source.
+
+    UnityPy reads object data lazily from source_path, so the output bytes must be complete before
+    any file is opened for writing (source and target may be the same file). The result must keep
+    every object of the source, and no object may lose its data; otherwise nothing is written."""
+    with open(source_path, "rb") as stream:
+        before = _object_sizes(stream.read())
+    data = serialized_file.save()
+    after = _object_sizes(data)
+    lost = [pid for pid, size in before.items() if size and not after.get(pid)]
+    if set(before) != set(after) or lost:
+        raise RuntimeError("refusing to write %s: the rewritten asset lost %d of %d objects (source %s)"
+                           % (os.path.basename(target_path), len(lost) or len(set(before) ^ set(after)), len(before), source_path))
+    directory = os.path.dirname(os.path.abspath(target_path))
+    temporary = os.path.join(directory, ".%s.tmp-%d" % (os.path.basename(target_path), os.getpid()))
+    try:
+        with open(temporary, "wb") as stream:
+            stream.write(data)
+        os.replace(temporary, target_path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return len(data)
+
+
 def update_key_assets(levels, output_root, action_count):
     """Stage level3 key mappings and their localized labels for repair actions."""
     if not 0 <= action_count <= MAX_REPAIR_ACTIONS:
         raise ValueError(f"repair action count must be between 0 and {MAX_REPAIR_ACTIONS}")
     try:
-        import UnityPy
-        from UnityPy.helpers.TypeTreeGenerator import TypeTreeGenerator
+        from deadlock_tools.bundled_assets import load_asset_tools
+        UnityPy, TypeTreeGenerator = load_asset_tools()
     except ImportError as exc:
         raise RuntimeError("repair-bay shortcuts need the optional UnityPy asset support") from exc
 
@@ -79,9 +120,7 @@ def update_key_assets(levels, output_root, action_count):
             entry["functionDescriptionID"] = FIRST_DESCRIPTION + index
             mappings.append(entry)
     obj.save_typetree(fields)
-    staged_level = os.path.join(output_root, "level3")
-    with open(staged_level, "wb") as stream:
-        stream.write(next(iter(env.files.values())).save())
+    save_asset(env.files[_file_key(env, key_source)], key_source, os.path.join(output_root, "level3"))
 
     resources_source = source_path("resources.assets")
     if not os.path.isfile(resources_source):
@@ -118,17 +157,15 @@ def update_key_assets(levels, output_root, action_count):
     if set(descriptions) != set(LABELS):
         missing = sorted(set(LABELS) - set(descriptions))
         raise ValueError("missing localized keymapping text assets: " + ", ".join(missing))
-    staged_resources = os.path.join(output_root, "resources.assets")
-    with open(staged_resources, "wb") as stream:
-        stream.write(next(iter(resources.files.values())).save())
+    save_asset(resources.files[_file_key(resources, resources_source)], resources_source, os.path.join(output_root, "resources.assets"))
     print(f"staged {action_count} indexed repair-bay shortcut(s) in level3 and localized key mappings")
 
 
 def key_action_count(levels, overlay=None):
     """Read the highest indexed repair shortcut already represented in level3 assets."""
     try:
-        import UnityPy
-        from UnityPy.helpers.TypeTreeGenerator import TypeTreeGenerator
+        from deadlock_tools.bundled_assets import load_asset_tools
+        UnityPy, TypeTreeGenerator = load_asset_tools()
     except ImportError as exc:
         raise RuntimeError("repair-bay shortcut inspection needs the optional UnityPy asset support") from exc
     managed = os.path.join(levels, "Managed")

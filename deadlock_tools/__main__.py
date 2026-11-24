@@ -5,7 +5,7 @@ tools:
   xor       decrypt / encrypt ship bundles
   weapons   edit a ship bundle: turrets, carrier/munition slots, systems, abilities
   shipdb    read and edit the ship / munition / research / commander tables in the level files
-  dll       patch Assembly-CSharp.dll (armour regen, squadron revive, max rank, command nodes, munition load)
+  dll       patch Assembly-CSharp.dll (max rank, command nodes, munition load, repair shortcuts)
   ui        adjust game UI assets for ships with expanded slot lists
   gui       the graphical editor in your web browser (all of the above as forms)
 

@@ -18,7 +18,7 @@ TABS
   Ships    pick a ship, edit its stats (hull, armour per side, speed, turn rate, DRADIS range, build cost/time/rush, fleet
            points, carrier slots, flags ...), press Apply: changed level files are written into the work tree.
            Bundle controls appear alongside the ship's stats, with a file picker and inspection controls above.
-  DLL      the 'dll' patches (armour regen, squadron revive, max rank, command nodes, munition load).
+  DLL      the 'dll' patches (max rank, command nodes, munition load, repair shortcuts; revert of removed legacy patches).
   Commanders allocate built-in abilities across commander tree subsystems and edit their bonus/display settings.
   Database related 'shipdb' command as a form: commanders (ranks, fixspecs), ship list, XP per rank, copy veterancy,
            munitions, research lists, fleet limits, fleet map icons, squadron hull. Research for ONE ship is on its Ships page.
@@ -172,6 +172,9 @@ class Project:
             raise ValueError("Ship and bundle names must be plain names without path separators.")
         if bundle_name.lower().endswith(".dec"):
             raise ValueError("Enter a game bundle name without the .dec extension.")
+        # Game ship bundles use lowercase StreamingAssets names. Normalize on
+        # disk so newly cloned ships resolve on case-sensitive filesystems.
+        bundle_name = bundle_name.lower()
         if research_list not in sd.UNLOCK_KEYS:
             raise ValueError("Choose a valid research list.")
         with self.lock:
@@ -273,6 +276,25 @@ class Project:
                     if os.path.isfile(research_file):
                         shutil.copy2(research_file, os.path.join(staged, filename))
                 shutil.rmtree(research_out, ignore_errors=True)
+
+                # Fleet/skirmish selection resolves ship IDs through the scene
+                # factories as well as the ship and research tables. Add the
+                # donor's prefab references for the new ID in every scene file.
+                factory_out = os.path.join(staged, "factory-output")
+                factory_cmd = tool_cmd("shipdb") + ["fleeticon", staged, new_name, donor_name,
+                    "--factory", "all", "--add-missing", "--bundle-name", bundle_name,
+                    "--dll", self.dll, "-o", factory_out]
+                factory_result = run_cmd(factory_cmd, 120)
+                if factory_result.returncode:
+                    raise RuntimeError("Fleet/skirmish factory entries could not be added; nothing was saved:\n" +
+                                        (factory_result.stdout + factory_result.stderr)[-6000:])
+                factory_levels = os.path.join(factory_out, "levels")
+                factory_files = [name for name in os.listdir(factory_levels)
+                                 if os.path.isfile(os.path.join(factory_levels, name))] if os.path.isdir(factory_levels) else []
+                for filename in factory_files:
+                    shutil.copy2(os.path.join(factory_levels, filename), os.path.join(staged, filename))
+                shutil.rmtree(factory_out, ignore_errors=True)
+
                 for filename in os.listdir(staged):
                     path = os.path.join(staged, filename)
                     if os.path.isfile(path):
@@ -290,6 +312,7 @@ class Project:
                         raise ValueError("Selected .dec donor is not a UnityFS bundle.")
                     from deadlock_tools.bundle_xor import DEFAULT_KEY, xor
                     raw = xor(raw, DEFAULT_KEY)
+                raw = wmod.rename_bundle_asset(raw, bundle_name, next_id)
                 bundle_stage = os.path.join(staged, "ship-bundle")
                 with open(bundle_stage, "wb") as stream: stream.write(raw)
                 outputs.append((bundle_stage, bundle_target))
@@ -297,13 +320,46 @@ class Project:
                 with open(loc_stage, "wb") as stream: stream.write(catalogue.data)
                 outputs.append((loc_stage, loc_target))
 
+                # Fleet placement builds its collision-radius map by iterating
+                # the ShipType enum. A new database row alone is not enough:
+                # add the same ship ID to the working DLL so Skirmish and
+                # campaign fleet placement can resolve its radius.
+                enum_work_dll = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
+                enum_source = enum_work_dll if os.path.isfile(enum_work_dll) else self.dll
+                managed_candidates = [os.path.join(levels_root, "Managed"), os.path.dirname(self.dll)]
+                if self.bundles:
+                    managed_candidates.insert(1, os.path.join(os.path.dirname(self.bundles), "Managed"))
+                managed = next((p for p in managed_candidates
+                                if os.path.isfile(os.path.join(p, "UnityEngine.CoreModule.dll"))), None)
+                if not managed:
+                    raise ValueError("Could not find the game's Managed folder needed to register the new ship type.")
+                build_root = config.PROJECT_DIR
+                if config.ZIPAPP:
+                    from zipfile import ZipFile
+                    build_root = os.path.join(staged, "ship-enum-builder")
+                    with ZipFile(config.ZIPAPP) as archive:
+                        for name in ("scripts/add_ship_type_enum.sh", "scripts/add_ship_type_enum.cs"):
+                            archive.extract(name, build_root)
+                enum_candidate = os.path.join(staged, "Assembly-CSharp.ship-enum.dll")
+                enum_script = os.path.join(build_root, "scripts", "add_ship_type_enum.sh")
+                enum_result = run_cmd(["bash", enum_script, managed, enum_source, enum_candidate,
+                                       str(next_id), "CustomShip%d" % next_id], 600)
+                if enum_result.returncode or not os.path.isfile(enum_candidate):
+                    raise RuntimeError("could not register the new ship type in the DLL; no files were saved:\n" +
+                                       (enum_result.stdout + enum_result.stderr)[-8000:])
+                outputs.append((enum_candidate, enum_work_dll))
+
                 backup_root = os.path.join(self.game_data, ".deadlock-backups", "ship-clone-" + stamp)
                 backups, promoted = {}, []
                 try:
                     for _, target in outputs:
                         os.makedirs(os.path.dirname(target), exist_ok=True)
                         if os.path.isfile(target):
-                            backup = os.path.join(backup_root, os.path.relpath(target, self.game_data))
+                            if os.path.commonpath([os.path.abspath(target), os.path.abspath(self.game_data)]) == os.path.abspath(self.game_data):
+                                backup = os.path.join(backup_root, os.path.relpath(target, self.game_data))
+                            else:
+                                backup = os.path.join(self.work, ".deadlock-backups", os.path.basename(backup_root),
+                                                      os.path.relpath(target, self.work))
                             os.makedirs(os.path.dirname(backup), exist_ok=True); shutil.copy2(target, backup); backups[target] = backup
                     for source, target in outputs:
                         temp = target + ".ship-clone-tmp"; shutil.copy2(source, temp); os.replace(temp, target); promoted.append(target)
@@ -340,8 +396,8 @@ class Project:
                 continue
         raise ValueError("No commander skill-tree tables were found in the configured level data.")
 
-    def _commander_dll_candidate(self, transaction_dir, has_custom, unlock_ranks):
-        if not has_custom and not unlock_ranks:
+    def _commander_dll_candidate(self, transaction_dir, has_custom, unlock_ranks, needs_level_lookup=False):
+        if not has_custom and not unlock_ranks and not needs_level_lookup:
             work_dll = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
             with open(work_dll if os.path.isfile(work_dll) else self.dll, "rb") as stream:
                 if b"CustomCommanderAbilityLevels" not in stream.read(): return None
@@ -374,7 +430,7 @@ class Project:
                 raise RuntimeError("could not build commander stat effects; no level changes were saved:\n" + (result.stdout + result.stderr)[-10000:])
             current = output
         existing_levels = b"CustomCommanderAbilityLevels" in source_bytes
-        if unlock_ranks or existing_levels:
+        if unlock_ranks or needs_level_lookup or existing_levels:
             template_path = os.path.join(build_root, "dll_modules", "CustomCommanderAbilityLevels.cs")
             template = open(template_path, encoding="utf-8").read()
             cases = "\n".join("            case %d: return %d;" % (int(ability_id), int(rank))
@@ -477,7 +533,14 @@ class Project:
             for ability in new_abilities:
                 aid = int(ability["id"])
                 if aid not in unlock_ranks: unlock_ranks[aid] = 1
-            dll_candidate = self._commander_dll_candidate(transaction_dir, has_custom, unlock_ranks)
+            # The game's rank gate array has only three slots. Trees with more
+            # than three choices need the per-ability lookup even when every
+            # ability is still using its default unlock rank. Otherwise one
+            # out-of-range CIC choice can prevent that branch from rendering.
+            needs_level_lookup = any(len(choices) > 3 for choices in assignments.values())
+            dll_candidate = self._commander_dll_candidate(
+                transaction_dir, has_custom, unlock_ranks, needs_level_lookup
+            )
             level_outputs = []
             staged = self.stage_dir("levels")
             for filename in os.listdir(staged):
@@ -528,6 +591,199 @@ class Project:
                 "tables": changed, "dll": os.path.join(self.work_paths["dll"], os.path.basename(self.dll)) if dll_candidate else None,
                 "localisation": os.path.join(self.game_data, "resources.assets") if localisation_output else None,
                 "unlockRanks": unlock_ranks, "backup": backup_root if backups else None}
+
+    # ---- squadrons (fighter squadron prefabs in sharedassets9.assets) ----
+    def _squadron_source(self, fresh=False):
+        from deadlock_tools import squadrons as sqmod
+        original = os.path.join(self.levels if os.path.isdir(self.levels) else os.path.dirname(self.levels), sqmod.ASSET_FILE)
+        if not os.path.isfile(original):
+            raise ValueError("%s was not found in the level data folder" % sqmod.ASSET_FILE)
+        return original, self.src_for(original, fresh)
+
+    def squadrons(self, fresh=False):
+        """every squadron with its editable fields, plus the ship-database names of its fighter type"""
+        from deadlock_tools import squadrons as sqmod
+        _original, source = self._squadron_source(fresh)
+        with open(source, "rb") as stream:
+            data = stream.read()
+        names = {s["id"]: s["name"] for s in self.view(fresh).ships}
+        out = []
+        for squadron in sqmod.load(self.S, data):
+            d = sqmod.describe(squadron)
+            d["fighterShip"] = names.get(d["shipType"])           # SquadronShipType is a separate squadron enum, not a ship ID
+            out.append(d)
+        return {"source": source, "maxFighters": sqmod.MAX_FIGHTERS, "squadrons": out}
+
+    def _promote(self, outputs, label):
+        """copy [(staged bytes, target path)] into the work tree atomically, backing up what they replace;
+        on any failure every target is restored. Returns the backup folder (or None)."""
+        import datetime, shutil
+        backup_root = os.path.join(self.game_data, ".deadlock-backups", label + "-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+        backups, promoted = {}, []
+        try:
+            for _data, target in outputs:
+                if os.path.isfile(target):
+                    backup = os.path.join(backup_root, os.path.basename(target))
+                    os.makedirs(backup_root, exist_ok=True); shutil.copy2(target, backup); backups[target] = backup
+            for data, target in outputs:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                temporary = target + "." + label + "-tmp"
+                with open(temporary, "wb") as stream:
+                    stream.write(data)
+                os.replace(temporary, target); promoted.append(target)
+        except BaseException:
+            for target in reversed(promoted):
+                if target in backups: shutil.copy2(backups[target], target)
+                elif os.path.exists(target): os.unlink(target)
+            raise
+        return backup_root if backups else None
+
+    def _squadron_table_files(self, fresh=False):
+        """[(original path, source path, bytes)] of every level file holding the SquadronDataTable"""
+        from deadlock_tools import squadron_table as st
+        out = []
+        for original in sd.files_of(self.levels if os.path.isdir(self.levels) else os.path.dirname(self.levels)):
+            if not os.path.basename(original).startswith("level") or original.endswith(".resS"): continue
+            source = self.src_for(original, fresh)
+            with open(source, "rb") as stream:
+                data = stream.read()
+            try:
+                if st.find(self.S, data): out.append((original, source, data))
+            except Exception:
+                continue
+        if not out: raise ValueError("no level file holds the SquadronDataTable")
+        return out
+
+    def save_squadrons(self, body):
+        """apply {name: {field key: value, 'MaxShipCount': n, 'ShipLoss': [..]}} to the prefabs in sharedassets9.assets,
+        mirror fighter count / hull into the level SquadronDataTable, and promote everything together"""
+        from deadlock_tools import squadrons as sqmod, squadron_table as st
+        edits = body.get("edits") or {}
+        if not isinstance(edits, dict) or not edits:
+            raise ValueError("no squadron changes to save")
+        fresh = bool(body.get("fresh"))
+        _original, source = self._squadron_source(fresh)
+        with self.lock:
+            with open(source, "rb") as stream:
+                data = stream.read()
+            log, table_edits = [], {}
+            for name, changes in edits.items():
+                if not isinstance(changes, dict): raise ValueError("bad changes for %s" % name)
+                data, lines = sqmod.apply(self.S, data, name, changes, scale_thresholds=bool(body.get("scale", True)))
+                log += lines
+                d = sqmod.describe(sqmod.find(sqmod.load(self.S, data), name))
+                table_edits[d["squadronShipType"]] = {"MaxShipCount": d["count"], "MaxHullPoints": d["hull"]}
+            outputs = [(data, os.path.join(self.work_paths["levels"], sqmod.ASSET_FILE))]
+            for original, _src, level in self._squadron_table_files(fresh):
+                pid_table = st.find(self.S, level)[3]
+                wanted = {k: v for k, v in table_edits.items() if any(e["id"] == k for e in pid_table["objects"])}
+                if not wanted: continue
+                new, lines = st.apply(self.S, level, wanted)
+                if new != level:
+                    outputs.append((new, os.path.join(self.work_paths["levels"], os.path.basename(original))))
+                    if not any(l.startswith("level copies") for l in log) and lines:
+                        log.append("level copies (SquadronDataTable): " + "; ".join(lines))
+            backup = self._promote(outputs, "squadrons")
+        return {"ok": True, "dst": outputs[0][1], "files": [os.path.basename(t) for _d, t in outputs], "backup": backup, "log": log or ["no changes"]}
+
+    # ---- launch bays / munition slots (visual bay editor) ----
+    def bay_bundles(self):
+        """ship bundles to edit: work-tree copies first (edits stack), then the configured bundle folder"""
+        out, seen = [], set()
+        for folder, work in ((self.work_paths["bundles"], True), (self.bundles, False)):
+            if not folder or not os.path.isdir(folder): continue
+            for name in sorted(os.listdir(folder)):
+                path = os.path.join(folder, name)
+                stem = name[:-4] if name.endswith(".dec") else name
+                if not os.path.isfile(path) or stem in seen or name.startswith(".") or name.endswith((".manifest", ".tmp")): continue
+                seen.add(stem); out.append({"name": stem, "path": path, "work": work})
+        return out
+
+    def _bundle_ship(self, path):
+        """the ship-database entry whose name matches the bundle name (colonialmercurymk2 -> Colonial Mercury MK2)"""
+        stem = os.path.basename(path); stem = stem[:-4] if stem.endswith(".dec") else stem
+        key = lambda t: "".join(ch for ch in t.lower() if ch.isalnum())
+        return next((s for s in self.view().ships if key(s["name"]) == key(stem)), None)
+
+    def bays(self, path):
+        from deadlock_tools import bays as bymod
+        if not os.path.isfile(path): raise ValueError("bundle not found: %s" % path)
+        layout = bymod.read_layout(path)
+        ship = self._bundle_ship(path)
+        layout["ship"] = {"name": ship["name"], "fighterSlots": ship["FighterSlots"], "utilitySlots": ship["UtilityFighterSlots"],
+                          "munitionSlots": ship["MunitionSlots"], "id": ship["id"]} if ship else None
+        layout["path"] = path
+        return layout
+
+    def save_bays(self, body):
+        """apply a bay layout to the bundle, promote it into the work tree and lower the ship's slot counts for removals"""
+        import datetime, shutil, tempfile
+        from deadlock_tools import bays as bymod
+        path = body["path"]
+        if not os.path.isfile(path): raise ValueError("bundle not found: %s" % path)
+        stem = os.path.basename(path); stem = stem[:-4] if stem.endswith(".dec") else stem
+        target = os.path.join(self.work_paths["bundles"], stem)
+        ship = self._bundle_ship(path)
+        with self.lock:
+            fd, staged = tempfile.mkstemp(prefix=".bays-", dir=self.stage_root if os.path.isdir(self.stage_root) else None); os.close(fd)
+            try:
+                result = bymod.apply(path, staged, body.get("layout") or {})
+                backup = None
+                if os.path.isfile(target):
+                    backup_root = os.path.join(self.game_data, ".deadlock-backups", "bays-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+                    os.makedirs(backup_root, exist_ok=True); backup = os.path.join(backup_root, stem); shutil.copy2(target, backup)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copy2(staged, target + ".bays-tmp"); os.replace(target + ".bays-tmp", target)
+            finally:
+                if os.path.exists(staged): os.unlink(staged)
+        edits = []
+        if ship and (result["removedSlots"] or result["removedMunitions"]):
+            fighter, utility = ship["FighterSlots"], ship["UtilityFighterSlots"]
+            for k in result["removedSlots"]:                     # fighter slots come first, then utility slots
+                if k < fighter: fighter -= 1
+                else: utility -= 1
+            edits = [{"ship": ship["name"], "field": "FighterSlots", "value": max(0, fighter)},
+                     {"ship": ship["name"], "field": "UtilityFighterSlots", "value": max(0, utility)},
+                     {"ship": ship["name"], "field": "MunitionSlots", "value": max(0, ship["MunitionSlots"] - result["removedMunitions"])}]
+            edits = [e for e in edits if e["value"] != ship[e["field"]]]
+            if edits: result["log"] += self.apply(edits)[-len(edits):]
+        elif result["removedSlots"] or result["removedMunitions"]:
+            result["log"].append("WARNING: no ship-database entry matches %s; lower its FighterSlots / UtilityFighterSlots / MunitionSlots on the Ships page" % stem)
+        result.update(dst=target, backup=backup)
+        return result
+
+    def allocations(self, fresh=False):
+        """squadron types (SquadronDataTable) and every carrier, with what each carrier may launch"""
+        from deadlock_tools import squadron_table as st
+        files = self._squadron_table_files(fresh)
+        res = st.find(self.S, files[0][2])[3]
+        db = self.view(fresh)
+        carriers = [{"id": s["id"], "name": s["name"], "faction": s["Faction"], "factionName": db.faction.get(s["Faction"], str(s["Faction"])),
+                     "fighterSlots": s["FighterSlots"], "utilitySlots": s["UtilityFighterSlots"]}
+                    for s in db.ships if s.get("FighterSlots", 0) or s.get("UtilityFighterSlots", 0)]
+        types = []
+        for e in st.entries(res):
+            e = dict(e); e.pop("Icon", None)
+            e["fighterShip"] = next((s["name"] for s in db.ships if s["id"] == e["ShipType"]), None)
+            types.append(e)
+        return {"files": [os.path.basename(o) for o, _s, _d in files], "source": files[0][1], "factions": {str(k): v for k, v in db.faction.items()},
+                "fields": {k: {"kind": v[0], "label": v[1], "help": v[2]} for k, v in st.FIELDS.items()},
+                "types": types, "carriers": carriers, "ships": [{"id": s["id"], "name": s["name"]} for s in db.ships]}
+
+    def save_allocations(self, body):
+        """apply {type id: {field: value, 'shipExclusionList': [ids]}} to every SquadronDataTable copy"""
+        from deadlock_tools import squadron_table as st
+        edits = {int(k): v for k, v in (body.get("edits") or {}).items()}
+        if not edits: raise ValueError("no squadron allocation changes to save")
+        with self.lock:
+            outputs, log = [], []
+            for original, _src, level in self._squadron_table_files(bool(body.get("fresh"))):
+                new, lines = st.apply(self.S, level, edits)
+                log = log or lines
+                if new != level: outputs.append((new, os.path.join(self.work_paths["levels"], os.path.basename(original))))
+            backup = self._promote(outputs, "squadron-allocations") if outputs else None
+            self._view = None
+        return {"ok": True, "files": [os.path.basename(t) for _d, t in outputs], "backup": backup, "log": log or ["no changes"]}
 
     # ---- research (the war-room blueprint lists: which campaign can research the ship, for how many RP) ----
     def _war_path(self, fresh=False):
@@ -1036,7 +1292,7 @@ class Project:
     def dll_patch(self, o):
         dst = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
         cmd = tool_cmd("dll") + ["patch", self.dll, "--levels", self.levels, "-o", self.stage_root]; base = len(cmd)
-        for key, flag in (("armour_factor", "--armour-factor"), ("revive_turns", "--revive-turns"), ("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"),
+        for key, flag in (("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"),
                           ("command_step", "--command-step"), ("command_first_rank", "--command-first-rank")):
             if str(o.get(key, "")).strip(): cmd += [flag, str(o[key]).strip()]
         if o.get("munition_load") in (True, "true", 1, "1"): cmd.append("--munition-load")
@@ -1116,12 +1372,6 @@ class Project:
             if status.returncode:
                 raise RuntimeError("could not read existing work-tree DLL settings; refusing to replace them:\n" + (status.stdout + status.stderr)[-8000:])
             text = status.stdout + status.stderr
-            found = re.search(r"armour regeneration patch: INSTALLED, factor ([0-9.eE+-]+)", text)
-            if found and not str(effective.get("armour_factor", "")).strip():
-                effective["armour_factor"] = found.group(1)
-            found = re.search(r"squadron revive patch: INSTALLED, ([0-9.eE+-]+) turns at full rate", text)
-            if found and not str(effective.get("revive_turns", "")).strip():
-                effective["revive_turns"] = found.group(1)
             found = re.search(r"commander max rank: (\d+)", text)
             if found and int(found.group(1)) != 10 and not str(effective.get("max_rank", "")).strip():
                 effective["max_rank"] = found.group(1)
@@ -1145,15 +1395,14 @@ class Project:
 
         dll_out_root = os.path.join(transaction_root, "dll-stage")
         dll_args = tool_cmd("dll") + ["patch", base_dll, "--levels", self.levels, "-o", dll_out_root]
-        for key, flag in (("armour_factor", "--armour-factor"), ("revive_turns", "--revive-turns"),
-                          ("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"),
+        for key, flag in (("max_rank", "--max-rank"), ("command_nodes", "--command-nodes"),
                           ("command_step", "--command-step"), ("command_first_rank", "--command-first-rank")):
             if str(effective.get(key, "")).strip():
                 dll_args += [flag, str(effective[key]).strip()]
         if effective.get("munition_load") in (True, "true", 1, "1"):
             dll_args.append("--munition-load")
         has_dll_options = any(str(effective.get(key, "")).strip() for key in
-                              ("armour_factor", "revive_turns", "max_rank", "command_nodes")) or \
+                              ("max_rank", "command_nodes")) or \
                           effective.get("munition_load") in (True, "true", 1, "1")
         logs = ""
         if has_dll_options:
@@ -1393,6 +1642,13 @@ class Handler(BaseHTTPRequestHandler):
             if u.path in ("/api/state", "/api/config"): return self.send(config_info())
             if u.path == "/api/browse": return self.send(browse(q.get("path", [""])[0], q.get("files", ["0"])[0] == "1"))
             if u.path == "/api/ships": return self.send(self.need().ships())
+            if u.path == "/api/bays/bundles":
+                return self.send(self.need().bay_bundles())
+            if u.path == "/api/allocations":
+                return self.send(self.need().allocations(q.get("fresh") == ["1"]))
+            if u.path == "/api/squadrons":
+                project = self.need()
+                return self.send(project.squadrons(q.get("fresh") == ["1"]))
             if u.path == "/api/commanders":
                 project = self.need()
                 with project.lock:
@@ -1417,6 +1673,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/apply": return self.send({"log": P.apply(body["edits"], body.get("fresh", False))})
             if self.path == "/api/ships/clone": return self.send(P.clone_ship(body))
             if self.path == "/api/commanders/save": return self.send(P.save_commanders(body))
+            if self.path == "/api/squadrons/save": return self.send(P.save_squadrons(body))
+            if self.path == "/api/allocations/save": return self.send(P.save_allocations(body))
+            if self.path == "/api/bays": return self.send(P.bays(body["path"]))
+            if self.path == "/api/bays/save": return self.send(P.save_bays(body))
             if self.path == "/api/armaments": return self.send(P.armaments(body))
             if self.path == "/api/localisation": return self.send(P.localisation(body))
             if self.path == "/api/bundle/import": return self.send(P.import_bundle(body["bundle"]))
@@ -1486,7 +1746,7 @@ main{display:grid;grid-template-columns:270px 1fr;gap:0;min-height:calc(100vh - 
 #side input{width:100%;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);margin-bottom:8px}
 .ship{padding:6px 8px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;gap:6px}.ship:hover{background:var(--bg)}.ship.on{background:var(--chg);outline:1px solid var(--accent)}
 .ship small{color:var(--muted)}.dot{color:var(--accent)}
-#view{padding:16px 20px;max-width:980px}.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:14px}
+#view{padding:16px 20px;max-width:980px}table.alloc{border-collapse:collapse}table.alloc td,table.alloc th{border-bottom:1px solid var(--line);padding:3px 6px}.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:14px}
 .card h3{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px 18px}
 label.f{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--muted)}label.f input,label.f select{padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:14px system-ui}
@@ -1524,13 +1784,14 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 @media(max-width:770px){.localisation-editor{grid-template-columns:1fr}.localisation-results{max-height:28vh}}
 </style></head><body>
 <header><h1>Deadlock Ship Editor</h1>
-<nav><button data-t="ships" class="on">Ships</button><button data-t="dll">DLL</button><button data-t="commanders">Commanders</button><button data-t="tools">Database</button><button data-t="localisation">Localisation</button><button data-t="armaments">Armaments</button><button data-t="settings">Settings</button></nav>
+<nav><button data-t="ships" class="on">Ships</button><button data-t="dll">DLL</button><button data-t="commanders">Commanders</button><button data-t="squadrons">Squadrons</button><button data-t="tools">Database</button><button data-t="localisation">Localisation</button><button data-t="armaments">Armaments</button><button data-t="settings">Settings</button></nav>
 <span class="sp"></span><span id="pend" class="hint"></span>
 <label class="hint"><input type="checkbox" id="fresh"> start from the originals</label>
 <button class="sec" id="discard" disabled>Discard</button><button class="pri" id="apply" disabled>Apply</button></header>
 <main id="tab-ships"><aside id="side"><input id="q" placeholder="Search ships" autocomplete="off"><button class="sec" id="load-bundle">Load bundle…</button><button class="sec" id="copy-ship">Copy and add a ship…</button><button class="sec" id="ship-tools">Ship database tools</button><div id="list"></div></aside><section id="view"><p class="hint">Pick a ship or load a bundle.</p></section></main>
 <section id="tab-dll" hidden style="padding:16px 20px;max-width:980px"></section>
 <section id="tab-commanders" hidden style="padding:16px 20px;max-width:1250px"></section>
+<section id="tab-squadrons" hidden style="padding:16px 20px;max-width:1250px"></section>
 <section id="tab-tools" hidden style="padding:16px 20px;max-width:1100px"></section>
 <section id="tab-armaments" hidden style="padding:16px 20px;max-width:1250px"></section>
 <section id="tab-localisation" hidden style="padding:16px 20px;max-width:1250px"></section>
@@ -1744,7 +2005,7 @@ $('#apply').onclick=async()=>{
   alert('Applied. '+(bundleSaved?'Linked ship bundle saved.\n':'')+r.log.slice(0,6).join('\n')+(r.log.length>6?'\n...':'')+'\n\nSaved in '+state.info.work+' (level data and bundle). Merge this tree into the game folder when ready.');
  }catch(e){alert((bundleSaved?'The linked bundle was saved, but another part of the apply failed: ':'Failed: ')+e.message);b.disabled=false}
 };
-document.querySelectorAll('header nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('on',x===b));for(const t of ['ships','dll','commanders','tools','localisation','armaments','settings'])$('#tab-'+t).hidden=t!==b.dataset.t;if(b.dataset.t==='dll')loadDll();if(b.dataset.t==='commanders')loadCommanders();if(b.dataset.t==='tools')loadTools();if(b.dataset.t==='localisation')loadLocalisation();if(b.dataset.t==='armaments')loadArmaments();if(b.dataset.t==='settings')loadSettings()});
+document.querySelectorAll('header nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('on',x===b));for(const t of ['ships','dll','commanders','squadrons','tools','localisation','armaments','settings'])$('#tab-'+t).hidden=t!==b.dataset.t;if(b.dataset.t==='dll')loadDll();if(b.dataset.t==='commanders')loadCommanders();if(b.dataset.t==='squadrons')loadSquadrons();if(b.dataset.t==='tools')loadTools();if(b.dataset.t==='localisation')loadLocalisation();if(b.dataset.t==='armaments')loadArmaments();if(b.dataset.t==='settings')loadSettings()});
 let bundleForm;
 let activeBundle;
 const openedBundles=new Map();
@@ -2087,19 +2348,15 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      const stored=Object.fromEntries(result.fields.map(field=>[field.key,field.value]));
      const setOption=(name,value)=>{const input=bundle.sections.querySelector('[data-d="'+name+'"]');if(input&&value!==undefined)input.type==='checkbox'?input.checked=Boolean(value):input.value=String(value)};
      const hullRate=stored['RegenerativeHullResinModule.hullPerTick'];
-     if(hullRate!==undefined){setOption('hull_regen',Math.abs(Number(hullRate)));setOption('armour_regen',Number(hullRate)<0)}
+     if(hullRate!==undefined)setOption('hull_regen',Math.abs(Number(hullRate)));
      setOption('munition_factory',Boolean(result.abilities.MunitionFactoryModule));
-     setOption('squadron_revive',Boolean(stored['ShipInfo.ShowExclusionInEditor']));
      for(const [dest,script] of [['custom_armour_repair','CustomArmourRepairModule'],
        ['custom_squadron_replacement','CustomSquadronReplacementModule'],
        ['custom_drone_resupply','CustomDroneResupplyModule'],
        ['custom_magazine_capacity','CustomMagazineCapacityModule'],['custom_instant_plating','CustomInstantPlatingModule'],
        ['custom_emp_pulse','CustomEmpPulseModule'],['custom_targeted_emp','CustomTargetedEmpModule']]){
        const input=bundle.sections.querySelector('[data-d="'+dest+'"]');
-       if(input){const installed=Boolean(result.abilities[script]);input.checked=installed;input.disabled=installed;
-         const legacy=dest==='custom_armour_repair'?'armour_regen':dest==='custom_squadron_replacement'?'squadron_revive':null;
-         if(installed&&legacy){const old=bundle.sections.querySelector('[data-d="'+legacy+'"]');if(old){old.checked=false;old.disabled=true;}}
-       }
+       if(input){const installed=Boolean(result.abilities[script]);input.checked=installed;input.disabled=installed}
      }
      const groupsInput=bundle.slots.querySelector('[data-d="squadron_groups"]');
      if(groupsInput&&!groupsInput.dataset.manual)groupsInput.value=(result.squadron_groups||[]).join(',');
@@ -2159,13 +2416,19 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      };
      const rateNote=el('p',{class:'hint'},'One turn is 120 ticks, or 12 simulation seconds. Instant Plating and both EMP abilities queue for turn start; their activation delays are configurable in ticks.');
      const primary=[],advanced=[];
+     const subsystemGroups=new Map(Object.entries(result.subsystems||{}).map(([script,title])=>[script,{title,controls:[]}]));
+     const subsystemLabel=name=>name.split('.').map(part=>part
+       .replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/ Range(?: Range)?$/,'')
+       .replace(/^./,letter=>letter.toUpperCase())).join(' · ');
      const abilities=new Map(Object.keys(result.abilities).map(script=>[script,[]]));
      const numberInput=(attrs,value,step)=>el('input',{...attrs,type:'number',required:true,step,value});
      for(const field of result.fields){
        if(field.key==='CustomTargetedEmpModule.cooldownTurns')continue;
        const separator=field.key.indexOf('.');
        const script=field.key.slice(0,separator),name=field.key.slice(separator+1);
-       const label=labels[name]||fieldLabels[field.key]||fieldLabels[name]||name;
+       const subsystem=subsystemGroups.get(script);
+       const label=labels[name]||fieldLabels[field.key]||fieldLabels[name]||
+         (subsystem?(name==='MaxHealth'?'Maximum health':subsystemLabel(name)):name);
        const original=field.kind==='bool'?Boolean(field.value):field.value;
        const attrs={'data-prefab-field':field.key,'data-original':JSON.stringify(original)};
        let control;
@@ -2212,7 +2475,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
          editable.addEventListener('input',()=>{holder.querySelector('[data-rate-hint]').textContent=rateDescription(script,name,editable.value)});
          control=holder;
        }
-       const group=abilities.get(script)||(labels[name]?primary:advanced);
+       const group=abilities.get(script)||subsystem?.controls||(labels[name]?primary:advanced);
        group.push(control);
      }
      const squadronFields=abilities.get('CustomSquadronReplacementModule');
@@ -2251,9 +2514,14 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      }else{
        bundle.installedAbilities.replaceChildren(el('p',{class:'hint'},'No supported ability modules in this bundle.'));
      }
+     const subsystemPanels=Array.from(subsystemGroups.values()).filter(group=>group.controls.length)
+       .map(({title,controls})=>el('details',{class:'ability-options'},el('summary',{},title),el('div',{class:'grid'},controls)));
      bundle.stats.replaceChildren(el('h4',{},'Bundle hull & armour'),
        el('p',{class:'hint'},result.prefab?result.prefab+' · '+file:file),
        el('div',{class:'grid'},primary),
+       subsystemPanels.length?el('section',{},el('h4',{},'Ship subsystems'),
+         el('p',{class:'hint'},'Edit the values stored in this ship’s prefab. Min and Max are the game’s configured endpoints.'),
+         ...subsystemPanels):null,
        advanced.length?el('details',{class:'ability-options'},el('summary',{},'Other prefab ship fields'),
          el('div',{class:'grid'},advanced)):null,
        result.fields.length?null:el('p',{class:'hint'},'No editable prefab ship fields found.'));
@@ -2418,14 +2686,6 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
  }
  const actionsAbilityFlags=new Set(['mini_jump','augury','stealth','targeted_resupply','deploy_plating','technical_support','marine_reinforcement','custom_instant_plating','custom_emp_pulse','custom_targeted_emp']);
  bundle.sections.addEventListener('change',event=>{
-   const paired={custom_armour_repair:'armour_regen',custom_squadron_replacement:'squadron_revive'};
-   if(paired[event.target.dataset.d]&&event.target.checked){
-     const legacy=bundle.sections.querySelector('[data-d="'+paired[event.target.dataset.d]+'"]');if(legacy)legacy.checked=false;
-   }
-   const replacement={armour_regen:'custom_armour_repair',squadron_revive:'custom_squadron_replacement'};
-   if(replacement[event.target.dataset.d]&&event.target.checked){
-     const custom=bundle.sections.querySelector('[data-d="'+replacement[event.target.dataset.d]+'"]');if(custom&&!custom.disabled)custom.checked=false;
-   }
    if(!actionsAbilityFlags.has(event.target.dataset.d))return;
    const enabled=[...bundle.sections.querySelectorAll('input[type=checkbox][data-d]')].filter(input=>actionsAbilityFlags.has(input.dataset.d)&&input.checked).length;
    const submenu=bundle.sections.querySelector('[data-d="ability_submenu"]');
@@ -2462,8 +2722,6 @@ async function inspectBundle(get){
 async function bundlePatchOptions(options){
  if(options.list_mounts)return {};
  const required=[
-   {option:'armour_regen',name:'armour regeneration',field:'armour_factor',label:'Armour regeneration factor',value:'1',min:0,allowMin:false},
-   {option:'squadron_revive',name:'squadron revive',field:'revive_turns',label:'Squadron revive delay in turns (0 revives immediately)',value:'0',min:0,allowMin:true}
  ].filter(patch=>options[patch.option]);
  const patches={};
  if(options.turnaround_repair_bay){
@@ -2554,12 +2812,12 @@ async function runBundle(bundle,get,overwrite=false){
 }
 async function loadDll(){const box=$('#tab-dll');if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}const fld=(id,l,h)=>el('label',{class:'f'},l,el('input',{type:'number',id,step:'any'}),el('span',{class:'orig'},h));
  if(!box.dataset.ok){box.dataset.ok=1;box.replaceChildren(el('div',{class:'card'},el('h3',{},'Current DLL'),el('pre',{id:'dchk'},'checking...')),
-  el('div',{class:'card'},el('h3',{},'Patch'),el('div',{class:'grid'},fld('d_armour','Armour regen factor','Ships built with --armour-regen (armour per tick = hull rate x factor)'),fld('d_revive','Squadron revive (turns)','0 = rebuild at once'),fld('d_rank','Commander max rank','Game default 10'),fld('d_nodes','Command-tree nodes','Game default 4; 10 = one per rank 1-10'),fld('d_step','Ranks between nodes','default 1'),fld('d_first','First node at rank','default 1'),fld('d_repair_actions','Repair action shortcuts','Unique, automatically indexed shortcuts (1–16)'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches continue from the edited work-tree DLL unless you choose otherwise'},el('input',{type:'checkbox',id:'d_fresh',onchange:loadDll}),'Start from the original DLL (drops earlier patches)')),
+  el('div',{class:'card'},el('h3',{},'Patch'),el('p',{class:'hint'},'Commander max rank and command-tree nodes are set on the Commanders tab. Custom-module and commander DLL code is rebuilt automatically when you save a bundle or the commander tree.'),el('div',{class:'grid'},fld('d_repair_actions','Repair action shortcuts','Unique, automatically indexed shortcuts (1–16)'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches continue from the edited work-tree DLL unless you choose otherwise'},el('input',{type:'checkbox',id:'d_fresh',onchange:loadDll}),'Start from the original DLL (drops earlier patches)')),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'pri',id:'dgo',onclick:patchDll},'Patch DLL'),el('span',{id:'dmsg',class:'hint'}))),
-  el('div',{class:'card'},el('h3',{},'Revert'),el('div',{class:'grid'},...[['r_armour','Armour regen'],['r_revive','Squadron revive'],['r_rank','Max rank (back to 10)'],['r_nodes','Command-tree nodes'],['r_mun','Munition load fix'],['r_repair_key','Indexed repair action shortcuts']].map(([id,l])=>el('label',{class:'f chk'},el('input',{type:'checkbox',id}),l))),
+  el('div',{class:'card'},el('h3',{},'Revert'),el('div',{class:'grid'},...[['r_armour','Legacy armour regen (removed feature)'],['r_revive','Legacy squadron revive (removed feature)'],['r_mun','Munition load fix'],['r_repair_key','Indexed repair action shortcuts']].map(([id,l])=>el('label',{class:'f chk'},el('input',{type:'checkbox',id}),l))),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'sec',id:'rgo',onclick:revertDll},'Revert ticked (none ticked = all)'),el('span',{id:'rmsg',class:'hint'}))),el('pre',{id:'dout',hidden:true}))}
  try{const r=await api('/api/dll/check'+($('#d_fresh').checked?'?fresh=1':''));$('#dchk').textContent=r.output+'\n(source: '+r.source+')'}catch(e){$('#dchk').textContent=e.message}}
-async function patchDll(){$('#dgo').disabled=true;try{const r=await api('/api/dll/patch',{armour_factor:$('#d_armour').value,revive_turns:$('#d_revive').value,max_rank:$('#d_rank').value,command_nodes:$('#d_nodes').value,command_step:$('#d_step').value,command_first_rank:$('#d_first').value,repair_bay_actions:$('#d_repair_actions').value,munition_load:$('#d_mun').checked,fresh:$('#d_fresh').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;$('#dmsg').textContent=r.ok?'written to '+r.dst+' and work-tree key mapping assets':'failed';$('#dmsg').className=r.ok?'msg-ok':'msg-bad';if(r.ok)$('#d_fresh').checked=false;loadDll()}catch(e){$('#dmsg').textContent=e.message;$('#dmsg').className='msg-bad'}$('#dgo').disabled=false}
+async function patchDll(){$('#dgo').disabled=true;try{const r=await api('/api/dll/patch',{repair_bay_actions:$('#d_repair_actions').value,munition_load:$('#d_mun').checked,fresh:$('#d_fresh').checked});$('#dout').hidden=false;$('#dout').textContent=r.output;$('#dmsg').textContent=r.ok?'written to '+r.dst+' and work-tree key mapping assets':'failed';$('#dmsg').className=r.ok?'msg-ok':'msg-bad';if(r.ok)$('#d_fresh').checked=false;loadDll()}catch(e){$('#dmsg').textContent=e.message;$('#dmsg').className='msg-bad'}$('#dgo').disabled=false}
 
 const joinPath=(a,b)=>a.endsWith('/')?a+b:a+'/'+b;
 function showTab(t){document.querySelector('header nav button[data-t='+t+']').click()}
@@ -2804,6 +3062,181 @@ async function saveSettings(){const m=$('#s_msg');$('#s_save').disabled=true;m.c
   shipRequest++;activeBundle=undefined;openedBundles.clear();state.pending={};state.cur=null;state.data=null;$('#view').replaceChildren(el('p',{class:'hint'},'Pick a ship on the left.'));
   for(const t of ['dll','tools'])delete $('#tab-'+t).dataset.ok;await loadShips();updPend();m.className='msg-ok';m.textContent='loaded '+state.info.tables+' level file(s) with the ship table.';showTab('ships')}
  catch(e){m.className='msg-bad';m.textContent=e.message}$('#s_save').disabled=false}
+async function loadSquadrons(message){
+ const box=$('#tab-squadrons');
+ if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}
+ box.replaceChildren(el('p',{class:'hint'},'Loading squadrons…'));
+ let data;
+ try{data=await api('/api/squadrons?fresh='+($('#fresh').checked?'1':'0'))}catch(e){box.replaceChildren(el('p',{class:'msg-bad'},e.message));return}
+ const pending={};let current=data.squadrons[0]?.name;
+ const list=el('div',{class:'sq-list',style:'display:flex;flex-direction:column;gap:4px;min-width:230px'});
+ const detail=el('div',{style:'flex:1;min-width:0'});
+ const status=el('span',{class:message?'msg-ok':'hint'},message||'');
+ const scale=el('input',{type:'checkbox',checked:true});
+ const save=el('button',{class:'pri',onclick:saveSquadrons},'Save squadron changes');
+ const intro=el('div',{class:'card'},el('h2',{},'Fighter squadrons'),
+  el('p',{class:'hint'},'Every squadron prefab in '+data.source+'. A squadron shares one hull pool; the game counts active fighters as 1 + the loss thresholds below the current hull (full hull = all fighters), so the order of the thresholds does not matter. Changing the fighter count also resizes the thresholds and formation slots (up to '+data.maxFighters+' fighters, the largest squadron the game ships with).'),
+  el('p',{class:'hint'},'Per-fighter combat stats (weapons, veterancy) are in the ship database: use the link on each squadron to open its fighter on the Ships page. How many squadrons a carrier launches is its FighterSlots / UtilityFighterSlots there.'),
+  el('div',{class:'row'},el('label',{class:'chk'},scale,' Scale loss thresholds when the hull pool changes'),save,status));
+ function changes(name){return pending[name]||(pending[name]={})}
+ function drawList(){
+  list.replaceChildren(...data.squadrons.map(q=>el('button',{class:q.name===current?'pri':'sec',style:'text-align:left',onclick:()=>{current=q.name;drawList();drawDetail()}},
+   q.name.replace(/Squadron$/,'')+(pending[q.name]&&Object.keys(pending[q.name]).length?' *':''),el('span',{class:'hint'},'  '+q.count+'× · hull '+q.hull))));
+ }
+ function input(q,key,kind,value){
+  const c=changes(q.name);const cur=key in c?c[key]:value;
+  if(kind==='bool'){const i=el('input',{type:'checkbox'});i.checked=!!cur;i.onchange=()=>{if(i.checked===!!value)delete c[key];else c[key]=i.checked;drawList()};return i}
+  const i=el('input',{type:'number',step:kind==='int'?'1':'any',value:cur});
+  i.onchange=()=>{const v=Number(i.value);if(i.value===''||v===Number(value))delete c[key];else c[key]=v;drawList()};return i;
+ }
+ function drawDetail(){
+  const q=data.squadrons.find(x=>x.name===current);if(!q){detail.replaceChildren();return}
+  const c=changes(q.name);
+  const count=el('input',{type:'number',min:1,max:data.maxFighters,step:1,value:c.MaxShipCount??q.count});
+  const losses=el('input',{type:'text',value:(c.ShipLoss??q.shipLoss).join(', '),style:'width:100%'});
+  count.onchange=()=>{const n=Number(count.value);if(n===q.count)delete c.MaxShipCount;else c.MaxShipCount=n;if(!c.ShipLoss)losses.value=n===q.count?q.shipLoss.join(', '):'(recalculated on save from the current curve)';drawList()};
+  losses.onchange=()=>{const v=losses.value.trim();if(!v||v.startsWith('('))delete c.ShipLoss;else c.ShipLoss=v.split(/[ ,]+/).filter(Boolean).map(Number);drawList()};
+  const link=q.fighterShip?el('button',{class:'sec',onclick:async()=>{showTab('ships');await openShip(q.fighterShip)}},'Open fighter "'+q.fighterShip+'" on the Ships page'):el('span',{class:'hint'},'fighter ship type '+q.shipType);
+  const groups={};for(const f of q.fields)(groups[f.component]=groups[f.component]||[]).push(f);
+  const titles={ShipInfo:'Hull, handling and sensors (ShipInfo)',PropulsionInfo:'Speed (PropulsionInfo)',FighterSquadron:'Behaviour and ranges (FighterSquadron)',SquadronMovementAgent:'Launch, landing and collisions (SquadronMovementAgent)',WeaponsTarget:'Targeting (WeaponsTarget)'};
+  detail.replaceChildren(
+   el('div',{class:'card'},el('h3',{},q.name),el('div',{class:'row'},link,el('span',{class:'hint'},'Components: '+q.components.join(', '))),
+    el('div',{class:'grid'},el('label',{class:'f'},'Fighters',count,el('span',{class:'orig'},'Game value '+q.count)),
+     el('label',{class:'f',style:'grid-column:span 2'},'Loss thresholds ('+'count − 1 hull values)',losses,el('span',{class:'orig'},'Game value '+q.shipLoss.join(', '))))),
+   ...['ShipInfo','PropulsionInfo','FighterSquadron','SquadronMovementAgent','WeaponsTarget'].filter(g=>groups[g]).map(g=>el('div',{class:'card'},el('h3',{},titles[g]),
+    el('div',{class:'grid'},groups[g].map(f=>el('label',{class:f.kind==='bool'?'f chk':'f',title:f.help},f.label,input(q,f.key,f.kind,f.value),el('span',{class:'orig'},(f.help?f.help+' · ':'')+'game value '+f.value)))))));
+ }
+ async function saveSquadrons(){
+  const edits={};for(const [n,c] of Object.entries(pending))if(Object.keys(c).length)edits[n]=c;
+  if(!Object.keys(edits).length){status.textContent='No changes to save.';status.className='hint';return}
+  save.disabled=true;status.className='hint';status.textContent='Saving…';
+  try{const r=await api('/api/squadrons/save',{edits,scale:scale.checked,fresh:$('#fresh').checked});
+   await loadSquadrons('Saved to '+r.dst+(r.backup?' (backup: '+r.backup+')':'')+'. '+r.log.join(' | '));}
+  catch(e){status.className='msg-bad';status.textContent=e.message}
+  finally{save.disabled=false}
+ }
+ drawList();drawDetail();
+ const views=el('div',{class:'row'},el('button',{class:'pri'},'Squadron prefabs'),el('button',{class:'sec',onclick:()=>loadAllocations()},'Carrier allocations'));
+ box.replaceChildren(views,intro,el('div',{class:'row',style:'align-items:flex-start;gap:16px'},list,detail));
+}
+async function loadAllocations(message){
+ const box=$('#tab-squadrons');box.replaceChildren(el('p',{class:'hint'},'Loading squadron allocations…'));
+ let data;try{data=await api('/api/allocations?fresh='+($('#fresh').checked?'1':'0'))}catch(e){box.replaceChildren(el('p',{class:'msg-bad'},e.message));return}
+ const carrierIds=new Set(data.carriers.map(c=>c.id));
+ const excl=Object.fromEntries(data.types.map(t=>[t.id,new Set(t.shipExclusionList)]));
+ const fieldEdits={};
+ const shipName=id=>(data.ships.find(s=>s.id===id)||{}).name||('ship '+id);
+ let faction=String(data.carriers[0]?.faction??0);
+ const status=el('span',{class:message?'msg-ok':'hint'},message||'');
+ const save=el('button',{class:'pri',onclick:saveAllocations},'Save allocations');
+ const pick=el('select',{onchange:()=>{faction=pick.value;draw()}},Object.entries(data.factions).filter(([k])=>data.carriers.some(c=>String(c.faction)===k)||data.types.some(t=>String(t.Faction)===k)).map(([k,v])=>el('option',{value:k},v)));
+ pick.value=faction;
+ const body=el('div',{});
+ const views=el('div',{class:'row'},el('button',{class:'sec',onclick:()=>loadSquadrons()},'Squadron prefabs'),el('button',{class:'pri'},'Carrier allocations'));
+ const intro=el('div',{class:'card'},el('h2',{},'Carrier squadron allocations'),
+  el('p',{class:'hint'},'Which squadron types each capital ship may carry (the level-data SquadronDataTable, saved to '+data.files.join(', ')+'). The game offers a squadron type in a carrier slot when the carrier is not on its exclusion list, the faction matches, its DLC is owned and it is unlocked in the campaign. Fighter slots take any type; utility slots only take utility types (marked U). Types marked † are story-only (not in multiplayer or the codex).'),
+  el('p',{class:'hint'},'How many slots a carrier has is FighterSlots / UtilityFighterSlots on the Ships page.'),
+  el('div',{class:'row'},el('label',{},'Faction ',pick),save,status));
+ function changed(t){return fieldEdits[t.id]||(fieldEdits[t.id]={})}
+ function draw(){
+  const types=data.types.filter(t=>String(t.Faction)===faction);
+  const carriers=data.carriers.filter(c=>String(c.faction)===faction);
+  const story=t=>!t.includedInMultiplayer&&!t.IncludedInCodex;
+  const head=el('tr',{},el('th',{style:'text-align:left'},'Carrier (fighter / utility slots)'),...types.map(t=>el('th',{title:(t.fighterShip||'')+' · id '+t.id,style:'writing-mode:vertical-rl;transform:rotate(180deg);padding:4px;font-weight:normal'},t.name+(t.IsUtility?' U':'')+(story(t)?' †':''))));
+  const rows=carriers.map(c=>el('tr',{},el('td',{},c.name+' ',el('span',{class:'hint'},c.fighterSlots+' / '+c.utilitySlots)),...types.map(t=>{
+   const box=el('input',{type:'checkbox',title:t.name+' on '+c.name});box.checked=!excl[t.id].has(c.id);
+   box.onchange=()=>{if(box.checked)excl[t.id].delete(c.id);else excl[t.id].add(c.id);status.textContent='Unsaved changes';status.className='hint'};
+   return el('td',{style:'text-align:center'},box)})));
+  const allCol=el('tr',{},el('td',{class:'hint'},'all carriers of this faction'),...types.map(t=>el('td',{style:'text-align:center'},
+   el('button',{class:'sec',title:'Allow on every carrier',onclick:()=>{for(const c of carriers)excl[t.id].delete(c.id);draw()}},'✓'),
+   el('button',{class:'sec',title:'Deny on every carrier',onclick:()=>{for(const c of carriers)excl[t.id].add(c.id);draw()}},'✗'))));
+  const matrix=el('div',{class:'card',style:'overflow:auto'},el('h3',{},'Allowed squadron types per carrier'),el('table',{class:'alloc'},el('thead',{},head),el('tbody',{},...rows,allCol)));
+  const fieldNames=Object.keys(data.fields);
+  const fhead=el('tr',{},el('th',{style:'text-align:left'},'Squadron type'),...fieldNames.map(f=>el('th',{title:data.fields[f].help,style:'font-weight:normal;padding:2px 6px'},data.fields[f].label)));
+  const frows=types.map(t=>el('tr',{},el('td',{title:'id '+t.id+(t.fighterShip?' · fighter: '+t.fighterShip:'')},t.name),...fieldNames.map(f=>{
+   const kind=data.fields[f].kind,c=changed(t),cur=f in c?c[f]:t[f];let i;
+   if(kind==='bool'){i=el('input',{type:'checkbox'});i.checked=!!cur;i.onchange=()=>{if(i.checked===!!t[f])delete c[f];else c[f]=i.checked;status.textContent='Unsaved changes'}}
+   else if(f==='Faction'){i=el('select',{},...Object.entries(data.factions).map(([k,v])=>el('option',{value:k},v)));i.value=String(cur);i.onchange=()=>{const v=Number(i.value);if(v===t[f])delete c[f];else c[f]=v;status.textContent='Unsaved changes'}}
+   else{i=el('input',{type:'number',step:kind==='int'?'1':'any',value:cur,style:'width:6em'});i.onchange=()=>{const v=Number(i.value);if(i.value===''||v===t[f])delete c[f];else c[f]=v;status.textContent='Unsaved changes'}}
+   return el('td',{},i)})));
+  const fields=el('div',{class:'card',style:'overflow:auto'},el('h3',{},'Squadron type settings'),el('table',{class:'alloc'},el('thead',{},fhead),el('tbody',{},...frows)),
+   el('p',{class:'hint'},'Changing a type’s faction moves it to that faction’s grid after saving. “Fighters/Hull (level copy)” are kept in step automatically when you save in Squadron prefabs.'));
+  const others=types.map(t=>[t,[...excl[t.id]].filter(id=>!carrierIds.has(id))]).filter(([,ids])=>ids.length);
+  body.replaceChildren(matrix,fields,others.length?el('p',{class:'hint'},'Also excluded (ships that currently have no squadron slots): '+others.map(([t,ids])=>t.name+': '+ids.map(shipName).join(', ')).join(' · ')):'');
+ }
+ async function saveAllocations(){
+  const edits={};
+  for(const t of data.types){
+   const now=[...excl[t.id]].sort((a,b)=>a-b),was=[...t.shipExclusionList].sort((a,b)=>a-b);
+   const e=Object.assign({},fieldEdits[t.id]||{});
+   if(now.join()!==was.join())e.shipExclusionList=now;
+   if(Object.keys(e).length)edits[t.id]=e;
+  }
+  if(!Object.keys(edits).length){status.textContent='No changes to save.';status.className='hint';return}
+  save.disabled=true;status.textContent='Saving…';status.className='hint';
+  try{const r=await api('/api/allocations/save',{edits,fresh:$('#fresh').checked});await loadAllocations('Saved '+r.files.join(', ')+(r.backup?' (backup: '+r.backup+')':'')+'. '+r.log.join(' | '))}
+  catch(e){status.textContent=e.message;status.className='msg-bad'}finally{save.disabled=false}
+ }
+ draw();
+ box.replaceChildren(views,intro,body);
+}
+async function runCommanderTool(id,values){
+ const r=await api('/api/tools/run',{id,values,fresh:$('#fresh').checked});
+ if(!r.ok)throw new Error(r.output||'shipdb '+id+' failed');
+ return r;
+}
+function specListControls(){
+ const msg=el('span',{class:'hint'});
+ const run=async(revert)=>{
+  if(!confirm(revert?'Put the game’s original subsystem lists back in the work-tree level files? Unsaved tree edits on this page are discarded.':'Set each subsystem’s list to its own three skills in the work-tree level files? Unsaved tree edits on this page are discarded.'))return;
+  msg.className='hint';msg.textContent='Writing…';
+  try{await runCommanderTool('fixspecs',{revert});await loadCommanders()}catch(e){msg.className='msg-bad';msg.textContent=e.message}
+ };
+ return el('div',{class:'row',style:'margin:6px 0 10px'},
+  el('button',{class:'sec',title:'shipdb fixspecs',onclick:()=>run(false)},'Reset lists: each subsystem’s own three skills'),
+  el('button',{class:'sec',title:'shipdb fixspecs --revert-specs',onclick:()=>run(true)},'Restore the game’s original lists'),msg);
+}
+function commanderRankCard(data){
+ const num=(value,attrs={})=>el('input',{type:'number',step:1,value,...attrs});
+ const add=num(0,{min:0}),growth=el('input',{type:'number',step:'any',value:'1.2',min:1}),every=el('input',{type:'checkbox',checked:true});
+ const maxRank=num(data.rankCount,{min:1}),nodes=num('',{min:1,placeholder:'unchanged'}),step=num(1,{min:1}),first=num(1,{min:1});
+ const dllState=el('pre',{},'Reading the DLL…'),msg=el('span',{class:'hint'}),table=el('pre',{},'');
+ let dllMax=null,dllNodes=null;
+ add.addEventListener('input',()=>{const n=Number(add.value)||0;maxRank.value=String(data.rankCount+Math.max(0,n))});
+ api('/api/dll/check'+($('#fresh').checked?'?fresh=1':'')).then(r=>{
+  const lines=r.output.split('\n').filter(line=>/^command/.test(line));
+  dllMax=Number((r.output.match(/commander max rank: (\d+)/)||[])[1])||null;
+  dllNodes=Number((r.output.match(/command skill nodes: (\d+)/)||[])[1])||null;
+  if(dllNodes){nodes.placeholder=String(dllNodes);const m=r.output.match(/one every (\d+) rank\(s\) from rank (\d+)/);if(m){step.value=m[1];first.value=m[2]}}
+  const warn=dllMax!==null&&dllMax!==data.rankCount?'\n⚠ The level data has '+data.rankCount+' ranks but the DLL caps commanders at '+dllMax+'. Save with Max rank = '+data.rankCount+' to make them agree.':'';
+  dllState.textContent='Level data: '+data.rankCount+' commander ranks\n'+lines.join('\n')+'\n(DLL: '+r.source+')'+warn;
+ }).catch(e=>{dllState.textContent=e.message});
+ const details=el('details',{class:'ability-options',ontoggle:async()=>{if(!details.open||table.textContent)return;table.textContent='Reading…';try{table.textContent=(await runCommanderTool('commanders',{})).output}catch(e){table.textContent=e.message}}},el('summary',{},'Rank, XP and leadership table (shipdb commanders)'),table);
+ const save=el('button',{class:'pri',onclick:async()=>{
+  save.disabled=true;msg.className='hint';
+  try{
+   const extra=Math.max(0,Number(add.value)||0),log=[];
+   if(extra){msg.textContent='Adding '+extra+' ranks to the level data…';await runCommanderTool('setcommanders',{add:String(extra),xp_growth:growth.value,every_level:every.checked});log.push('added '+extra+' ranks')}
+   const patch={};
+   if(maxRank.value&&Number(maxRank.value)!==dllMax)patch.max_rank=maxRank.value;
+   if(nodes.value)Object.assign(patch,{command_nodes:nodes.value,command_step:step.value,command_first_rank:first.value});
+   if(Object.keys(patch).length){msg.textContent='Patching the DLL…';const r=await api('/api/dll/patch',patch);if(!r.ok)throw new Error(r.output);log.push('DLL patched')}
+   if(!log.length){msg.textContent='Nothing to change.';return}
+   await loadCommanders();
+  }catch(e){msg.className='msg-bad';msg.textContent=e.message}finally{save.disabled=false}
+ }},'Save ranks & command tree');
+ const revert=el('button',{class:'sec',title:'dll revert --max-rank --command-nodes',onclick:async()=>{
+  if(!confirm('Put the DLL back to the game’s 10-rank cap and 4 command nodes? Extra ranks in the level data stay but cannot be reached.'))return;
+  try{const r=await api('/api/dll/revert',{max_rank:true,command_nodes:true});if(!r.ok)throw new Error(r.output);await loadCommanders()}catch(e){msg.className='msg-bad';msg.textContent=e.message}
+ }},'Restore DLL defaults (rank 10, 4 nodes)');
+ const field=(label,input,help)=>el('label',{class:'f',title:help||''},label,input,help?el('span',{class:'orig'},help):null);
+ return el('div',{class:'card'},el('h3',{},'Ranks & command tree'),
+  el('p',{class:'hint'},'Ranks live in the level data; the rank cap and Command-column node count are hard-coded in the DLL. Saving here does both so they stay in step.'),
+  dllState,
+  el('h4',{},'Level data'),el('div',{class:'grid'},field('Ranks to add',add,'0 keeps the current '+data.rankCount),field('XP growth per new rank',growth,'Each new rank costs this much more XP than the previous'),el('label',{class:'f chk'},every,'Fleet-size trait at every rank (leadership interval 1)')),
+  el('h4',{},'DLL'),el('div',{class:'grid'},field('Max rank',maxRank,'Follows the level rank count'),field('Command-tree nodes',nodes,'Game default 4; 10 = one per rank 1–10'),field('Ranks between nodes',step),field('First node at rank',first)),
+  el('div',{class:'row',style:'margin-top:10px'},save,revert,msg),details);
+}
 async function loadCommanders(){
  const box=$('#tab-commanders');box.replaceChildren(el('p',{class:'hint'},'Loading commander skill trees…'));
  try{
@@ -2818,9 +3251,9 @@ async function loadCommanders(){
    el('p',{class:'hint'},'Create new commander abilities as flat or percentage ship-stat modifiers. Their custom DLL bridge uses the selected stat and bonus, and saves new ability records into the level-data work folder.'),
    el('div',{class:'row'},el('button',{class:'sec',onclick:()=>{for(const s of data.subsystems)allocations[s.id]=[...originalAllocations[s.id]];drawTrees()}},'Restore loaded tree mapping')));
   const preview=el('div',{class:'cmd-tree-scroll'}),trees=el('div',{class:'cmd-choice-scroll'}),abilityCards=el('div',{class:'cmd-ability-scroll'});
-  const save=el('button',{class:'pri',onclick:saveCommanders},'Save commander settings');
+  const save=el('button',{class:'pri',onclick:saveCommanders},'Save commander tree');
   const customAbilityCard=buildCustomAbilityForm();
-  editor.append(intro,customAbilityCard,el('div',{class:'card'},el('h3',{},'Commander tree preview'),preview,el('h3',{},'Edit subsystem choices ('+data.abilities.length+' known abilities)'),el('p',{class:'hint'},'The game data stores which abilities each subsystem can offer. Set each ability’s unlock rank in the ability list; assignments are saved with the work DLL.'),trees),el('div',{class:'card'},el('h3',{},'Ability effect values ('+data.abilities.length+')'),el('p',{class:'hint'},'All '+data.abilities.length+' ability records currently present in the configured level data are listed below, including their bonus values and unlock ranks.'),abilityCards),
+  editor.append(intro,commanderRankCard(data),customAbilityCard,el('div',{class:'card'},el('h3',{},'Commander tree preview'),preview,el('h3',{},'Edit subsystem choices ('+data.abilities.length+' known abilities)'),el('p',{class:'hint'},'The game data stores which abilities each subsystem can offer. Set each ability’s unlock rank in the ability list; assignments are saved with the work DLL.'),specListControls(),trees),el('div',{class:'card'},el('h3',{},'Ability effect values ('+data.abilities.length+')'),el('p',{class:'hint'},'All '+data.abilities.length+' ability records currently present in the configured level data are listed below, including their bonus values and unlock ranks.'),abilityCards),
    el('div',{class:'card'},save,status));
   function drawPreview(){
    const branches=el('div',{class:'cmd-tree-branches'});
@@ -2914,7 +3347,7 @@ async function loadCommanders(){
 
 async function loadTools(){const box=$('#tab-tools');if(box.dataset.ok)return;
  if(!state.info.ready){box.replaceChildren(el('div',{class:'card'},el('p',{},'Set the paths in the Settings tab first.')));return}
- box.dataset.ok=1;const tools=await api('/api/tools');const groups={};tools.forEach(t=>(groups[t.group]=groups[t.group]||[]).push(t));
+ box.dataset.ok=1;const tools=(await api('/api/tools')).filter(t=>t.group!=='Commanders');const groups={};tools.forEach(t=>(groups[t.group]=groups[t.group]||[]).push(t));
  const side=el('div',{class:'row'}),form=el('div',{style:'min-width:280px'});
  const operations=el('div',{class:'row',style:'margin:12px 0'});
  const byId=Object.fromEntries(tools.map(t=>[t.id,t]));

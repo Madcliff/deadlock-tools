@@ -9,8 +9,8 @@ from deadlock_tools import config
 
 def _unity_modules():
     try:
-        import UnityPy
-        from UnityPy.helpers.TypeTreeGenerator import TypeTreeGenerator
+        from deadlock_tools.bundled_assets import load_asset_tools
+        UnityPy, TypeTreeGenerator = load_asset_tools()
     except ImportError as exc:
         raise SystemExit(
             "UI asset editing needs the optional Unity asset package. Install it with: "
@@ -57,6 +57,18 @@ def _patch_layout_asset(path, generator, kind, dependency_root):
     env.typetree_generator = generator
     asset = next(iter(env.files.values()))
     objects, names, transforms = _game_objects(env)
+    game_objects = {
+        obj.path_id: obj for obj in env.objects if obj.type.name == "GameObject"
+    }
+    components = {}
+    for go_id, go in game_objects.items():
+        try:
+            components[go_id] = [
+                objects.get(entry["component"]["m_PathID"])
+                for entry in go.read_typetree().get("m_Component", [])
+            ]
+        except Exception:
+            components[go_id] = []
     changed = []
 
     if kind in ("campaign", "galactica"):
@@ -77,6 +89,119 @@ def _patch_layout_asset(path, generator, kind, dependency_root):
                 fields["listScaleMode"] = 1
                 obj.save_typetree(fields)
                 changed.append("/".join(reversed(ancestry)))
+
+        # The commander detail panel's SkillsWidgetList has no ScrollRect. Use
+        # the existing Content image as a clipping mask, and attach a vertical
+        # ScrollRect to the list itself so the panel's fixed profile fields stay
+        # in place while its skill entries scroll.
+        commander_panels = [go_id for go_id, name in names.items() if name == "CommanderInfoPanel"]
+        scroll_template = None
+        mask_template = None
+        for component in env.objects:
+            if component.type.name != "MonoBehaviour":
+                continue
+            try:
+                candidate = component.read_typetree(check_read=False)
+            except Exception:
+                continue
+            if scroll_template is None and all(key in candidate for key in (
+                    "m_Content", "m_Viewport", "m_Vertical", "m_Horizontal")):
+                scroll_template = component
+            if mask_template is None and "m_ShowMaskGraphic" in candidate:
+                mask_template = component
+
+        def rect_component(go_id):
+            for component in components.get(go_id, []):
+                if component is not None and component.type.name == "RectTransform":
+                    return component
+            return None
+
+        def parent_game_object(go_id):
+            transform = transforms.get(go_id)
+            if transform is None:
+                return 0
+            father = transform.read_typetree().get("m_Father", {}).get("m_PathID", 0)
+            return objects[father].read_typetree().get("m_GameObject", {}).get("m_PathID", 0) if father in objects else 0
+
+        def attach_component(go_id, template, fields):
+            clone = copy.copy(template)
+            clone.path_id = max(asset.objects) + 1
+            clone.data = None
+            clone._read_until = None
+            asset.objects[clone.path_id] = clone
+            fields["m_GameObject"] = {"m_FileID": 0, "m_PathID": go_id}
+            clone.save_typetree(fields)
+            go_fields = game_objects[go_id].read_typetree()
+            go_fields["m_Component"].append({"component": {"m_FileID": 0, "m_PathID": clone.path_id}})
+            game_objects[go_id].save_typetree(go_fields)
+            components.setdefault(go_id, []).append(clone)
+            objects[clone.path_id] = clone
+            return clone
+
+        for panel_id in commander_panels:
+            content_id = next((go_id for go_id, name in names.items()
+                               if name == "Content" and parent_game_object(go_id) == panel_id), None)
+            skills_go = next((go_id for go_id, go_name in names.items() if go_name == "SkillsWidgetList"
+                              and "CommanderInfoPanel" in _ancestors(go_id, objects, names, transforms)), None)
+            skills = next((component for component in components.get(skills_go, [])
+                           if component is not None and component.type.name == "MonoBehaviour"
+                           and "listScaleMode" in component.read_typetree(check_read=False)), None) if skills_go else None
+            if content_id is None or skills_go is None or skills is None or scroll_template is None or mask_template is None:
+                continue
+            content_rect = rect_component(content_id)
+            skills_rect = rect_component(skills_go)
+            if content_rect is None or skills_rect is None:
+                continue
+
+            skill_fields = skills.read_typetree()
+            if skill_fields["listScaleMode"] != 1:
+                skill_fields["listScaleMode"] = 1
+                skills.save_typetree(skill_fields)
+
+            skills_components = components.get(skills_go, [])
+            scroll_obj = next((component for component in skills_components
+                               if component is not None and component.type.name == "MonoBehaviour"
+                               and all(key in component.read_typetree(check_read=False) for key in (
+                                   "m_Content", "m_Viewport", "m_Vertical", "m_Horizontal"))), None)
+            if scroll_obj is None:
+                scroll_fields = scroll_template.read_typetree()
+                scroll_fields.update({
+                    "m_Content": {"m_FileID": 0, "m_PathID": skills_rect.path_id},
+                    "m_Viewport": {"m_FileID": 0, "m_PathID": content_rect.path_id},
+                    "m_Horizontal": False,
+                    "m_Vertical": True,
+                    "m_HorizontalScrollbar": {"m_FileID": 0, "m_PathID": 0},
+                    "m_VerticalScrollbar": {"m_FileID": 0, "m_PathID": 0},
+                })
+                scroll_obj = attach_component(skills_go, scroll_template, scroll_fields)
+                changed.append("Commander SkillsWidgetList vertical ScrollRect")
+
+            scroll_fields = scroll_obj.read_typetree()
+            scroll_fields["m_Content"] = {"m_FileID": 0, "m_PathID": skills_rect.path_id}
+            scroll_fields["m_Viewport"] = {"m_FileID": 0, "m_PathID": content_rect.path_id}
+            scroll_fields["m_Horizontal"] = False
+            scroll_fields["m_Vertical"] = True
+            scroll_obj.save_typetree(scroll_fields)
+
+            content_components = components.get(content_id, [])
+            has_mask = any(component is not None and component.type.name == "MonoBehaviour"
+                           and "m_ShowMaskGraphic" in component.read_typetree(check_read=False)
+                           for component in content_components)
+            if not has_mask:
+                mask_fields = mask_template.read_typetree()
+                mask_fields["m_ShowMaskGraphic"] = True
+                attach_component(content_id, mask_template, mask_fields)
+                changed.append("Commander skills clipping mask")
+
+            skill_fields = skills.read_typetree()
+            # read_typetree re-reads from the original object reader after the
+            # first save, so explicitly preserve this setting in the final
+            # write alongside the scrollRect reference.
+            skill_fields["listScaleMode"] = 1  # UIWidgetList.TopToBottom
+            skill_fields["scrollRect"] = {"m_FileID": 0, "m_PathID": scroll_obj.path_id}
+            skills.save_typetree(skill_fields)
+            if "Commander skills vertical scrolling" not in changed:
+                changed.append("Commander skills vertical scrolling")
 
     if kind == "battle":
         panel_ids = [pid for pid, name in names.items() if name == "ShipInfoPanel"]
@@ -233,6 +358,12 @@ def fix_overflows(levels, dll, work):
             print(f"{filename}: no layout changes needed")
             continue
         data, changed = result
+        from deadlock_tools.repair_shortcuts import _object_sizes
+        with open(read_path, "rb") as stream:
+            before = _object_sizes(stream.read())
+        after = _object_sizes(data)
+        if set(before) != set(after) or any(size and not after.get(pid) for pid, size in before.items()):
+            raise SystemExit(f"{filename}: the rewritten asset lost objects; nothing was written")
         config.write(target, data)
         print(f"{filename}: updated {len(changed)} layout setting(s) -> {target}")
 
@@ -240,7 +371,7 @@ def fix_overflows(levels, dll, work):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="deadlock ui",
-        description="Fix slot list overflow in construction, research and battle ship panels.",
+        description="Fix commander skill scrolling and expanded ship slot layouts.",
     )
     sub = ap.add_subparsers(dest="command", required=True)
     fix = sub.add_parser("fix-overflows", help="stage row-sizing fixes for expanded ship slots")

@@ -169,6 +169,9 @@ def write(path, data, original=None):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "wb") as fh:
         fh.write(data)
+        fh.flush()
+        if hasattr(os, 'fsync'):
+            os.fsync(fh.fileno())
     return path
 
 

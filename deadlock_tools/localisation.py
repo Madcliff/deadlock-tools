@@ -152,6 +152,11 @@ class Localisation:
         return output
 
     def _replace_objects(self, replacements):
+        """Splice replacement payloads into the resources file.
+
+        Unmodified objects stay inside the copied gaps, so several tables can
+        change in one pass. Padding keeps later object offsets 8-byte aligned.
+        """
         header = bytearray(self.data[:self.offset])
         parts = []
         cursor = self.offset

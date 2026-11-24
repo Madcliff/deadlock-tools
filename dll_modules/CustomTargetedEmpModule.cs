@@ -18,6 +18,8 @@ public sealed class CustomTargetedEmpModule : CustomEmpPulseModule, ADEMJMJBKOI
     private int salvoBurstIndex;
     private int salvoAffected;
     private int salvoMissilesDestroyed;
+    private int salvoFightersStunned;
+    private int salvoFightersJammed;
     private int chargesUsedThisTurn;
     private ShipInfo selectingSource;
     private BattleManager selectingBattle;
@@ -222,6 +224,8 @@ public sealed class CustomTargetedEmpModule : CustomEmpPulseModule, ADEMJMJBKOI
                     salvoAffected += ApplyPulseAt(source, battle, location, range,
                         battle.PCFKLFGBAHP, false, false, targetRange + range, processedSalvoMissiles);
                     salvoMissilesDestroyed += lastPulseMissilesDestroyed;
+                    salvoFightersStunned += lastPulseFightersStunned;
+                    salvoFightersJammed += lastPulseFightersJammed;
                 }
                 FinishSalvo();
             }
@@ -236,11 +240,14 @@ public sealed class CustomTargetedEmpModule : CustomEmpPulseModule, ADEMJMJBKOI
         int burstCount = salvoBurstIndex;
         int affected = salvoAffected;
         int missilesDestroyed = salvoMissilesDestroyed;
+        int fightersStunned = salvoFightersStunned;
+        int fightersJammed = salvoFightersJammed;
         ClearSalvo();
         var panel = RefMan.GetBehaviour<ShipInfoPanel>(false, false, false);
         if (panel != null)
             panel.DisplayNotification("Targeted EMP fired " + burstCount + " separate burst(s), affecting " +
-                affected + " enemy target(s) and destroying " + missilesDestroyed + " enemy missile(s).");
+                affected + " enemy target(s): stunned " + fightersStunned + " fighter squadron(s), applied evade debuff to " +
+                fightersJammed + " fighter(s), destroyed " + missilesDestroyed + " enemy missile(s).");
         FinishTickSubscriptionIfIdle();
     }
 
@@ -255,6 +262,8 @@ public sealed class CustomTargetedEmpModule : CustomEmpPulseModule, ADEMJMJBKOI
         salvoBurstIndex = 0;
         salvoAffected = 0;
         salvoMissilesDestroyed = 0;
+        salvoFightersStunned = 0;
+        salvoFightersJammed = 0;
         processedSalvoMissiles.Clear();
         queuedLocations.Clear();
     }

@@ -38,12 +38,14 @@ Run `python -m deadlock_tools shipdb COMMAND [ARGS]`. Provide `--levels` with th
 | `fleetinfo` | Read campaign fleet limits. |
 | `setfleetinfo FIELD VALUE [FIELD VALUE ...]` | Set limits such as `MaxShips` and `StartingFleetPointCap`. |
 | `fleeticons [--factory FACTORY]` | List the fleet icon table. |
-| `fleeticon TARGETS SOURCE [--factory FACTORY]` | Copy a prefab icon from a source to one or more comma-separated targets. |
+| `fleeticon TARGETS SOURCE [--factory FACTORY] [--add-missing]` | Copy a prefab reference to one or more targets. `--add-missing` creates absent factory entries for cloned ships. |
 | `commanders` | Show ranks, XP, leadership intervals, traits, and specialisations. |
 | `setcommanders [--add N] [--xp-growth F] [--every-level]` | Extend the commander rank tables. Pair this with a DLL rank-cap patch. |
 | `fixspecs [--revert-specs]` | Repair the commander specialisation lists or restore the shipped Tactician list. |
-| `squadrons` | Show fighter count, hull pool, per-fighter hull, and loss thresholds. |
-| `setsquadron NAME FIELD VALUE` | Set `HullFactor`, `MaxHullPoints`, or `FighterHull`. Match part of a name or use `all`. |
+| `squadrons [NAME]` | List every squadron (fighters, hull pool, per-fighter hull, max speed, loss thresholds), or show every editable field of one. |
+| `setsquadron NAME FIELD VALUE ...` | Set `MaxShipCount` (1–16; resizes thresholds and formation), `ShipLoss 2,4,8,...`, `HullFactor`, `FighterHull`, or any squadron field (`MaxVelocity`, `MaxHullPoints`, `RetreatDistance`, `launchVelocity` ...). Match part of a name or use `all`. See [docs/game/squadrons.md](game/squadrons.md). |
+| `allocations [CARRIER]` | Squadron types each carrier may put in its fighter and utility slots (from `SquadronDataTable`). |
+| `setallocation TYPE allow\|deny CARRIER[,CARRIER]` | Allow or deny a squadron type on capital ships (edits its `shipExclusionList` in all six level copies). `setallocation TYPE FIELD VALUE ...` edits `IsUtility`, `Faction`, `DLCRequired`, `PointValue`, costs, `XP`, `DefaultGroup`, `MoveOnLaunch`, list flags. |
 
 ## Ship prefab bundles
 
@@ -53,10 +55,12 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 |---|---|
 | Inspect the prefab or list only its mounts | `--inspect`, `--list-mounts` |
 | Duplicate or resize mounts | `--copies`, `--clone SELECTOR=N`, `--scale SELECTOR=S`, `--clone-scale` |
+| Respace cloned mounts | `--respace SELECTOR=GAP` (move existing clones so every turret is at least GAP game units apart; originals stay put) |
+| Scale the whole ship | `--ship-scale S` (absolute, 1 = stock; turrets keep their size). See [docs/game/ship-scale.md](game/ship-scale.md) |
 | Control turret placement | `--layout offset\|mid\|free`, `--offset`, `--gap`, `--min-gap`, `--no-mirror`, `--no-hull-follow` |
 | Add carrier and munition controls | `--fighter-slots`, `--utility-slots`, `--munition-slots`, `--bay-offset`, `--icon-offset`, `--slot-parts`, `--split-squadrons`, `--squadron-groups` |
 | Align bay types with database slot order or move a marker | `--align-launch-bays` with both slot totals, `--bay-icon SLOT=X,Y,Z` (repeatable) |
-| Passive ship systems | `--hull-regen`, `--armour-regen`, `--munition-factory`, `--squadron-revive` |
+| Passive ship systems | `--hull-regen` (positive, hull only), `--munition-factory` |
 | Custom ship modules | `--custom-armour-repair`, `--custom-squadron-replacement`, `--custom-drone-resupply`, `--custom-magazine-capacity`, `--custom-emp-pulse`, `--custom-targeted-emp` |
 | Micro-FTL | `--mini-jump`, `--jump-range`, `--jump-delay`, `--jump-duration`, `--jump-cooldown` |
 | Predictive Augury | `--augury`, `--augury-uses` |
@@ -69,9 +73,8 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 ```bash
 python -m deadlock_tools weapons colonialmercury --inspect
 python -m deadlock_tools weapons colonialmercury --clone fore=1 --clone-scale 0.7 --mini-jump
-python -m deadlock_tools weapons colonialmercury --hull-regen 0.2 --armour-regen
+python -m deadlock_tools weapons colonialmercury --hull-regen 0.2 --custom-armour-repair
 python -m deadlock_tools weapons colonialmercury --custom-targeted-emp --ability-submenu
-python -m deadlock_tools dll patch --armour-factor 1
 ```
 
 The last two commands are a separate recipe. Combine the desired prefab options in one `weapons` call to keep both sets of edits when using the same input. Micro-FTL needs a compatible prefab, including an FTL effect and Tech Lab. Stealth needs the Orion bundle as a donor. The tool reports missing components and radial-menu capacity errors.
@@ -90,7 +93,7 @@ Supply only the options you want to change. When adding an ability to a new bund
 
 Custom module flags append the matching MonoScript and MonoBehaviour records to the ship bundle. Armour repair clears Hull Resin's negative-rate armour flag and preserves positive hull repair. Squadron replacement clears the `ShipInfo` flag used by the legacy Munition Factory revive patch while keeping the Munition Factory itself for ordinary resupply. The matching custom-module DLL must be installed before launching the game. Drone resupply defaults to 1 plating per battle tick (120 per 120-tick turn at the base rate); ships can configure their own rate in the editor.
 
-Experimental EMP adds a battle action and configurable ship module. Activating it queues the pulse for the start of the next turn; `detonationDelayTicks` adds a configurable delay after that event (default 0). The default range is 1,000 units and cooldown is one turn. It reduces enemy subsystem maximum health by 8 for 240 ticks, stuns enemy squadrons for 360 ticks (`disableSquadronTicks`), applies the game's native jamming evade penalty for 360 ticks (`fighterEvadeDebuffTicks`), and immediately destroys hostile missiles in range. The 360-tick duration matches the vanilla Cylon Virus Mine's default jamming field; durations remain independently configurable. Team and faction checks exclude friendly ships and missiles. It does not alter munition capacity or stockpiles.
+Experimental EMP adds a battle action and configurable ship module. Activating it queues the pulse for the start of the next turn; `detonationDelayTicks` adds a configurable delay after that event (default 0). The default range is 1,000 units and cooldown is one turn. It reduces enemy subsystem maximum health by 8 for 240 ticks, stuns enemy squadrons for 360 ticks (`disableSquadronTicks`), applies the game's native jamming evade penalty for 360 ticks (`fighterEvadeDebuffTicks`), and immediately destroys hostile missiles in range. Its target scan includes child fighter ships, which the game's regular radius query omits. The detonation notification reports fighter squadrons stunned, fighters jammed, and missiles destroyed. The 360-tick duration matches the vanilla Cylon Virus Mine's default jamming field; durations remain independently configurable. Team and faction checks exclude friendly ships and missiles. It does not alter munition capacity or stockpiles.
 
 Instant Plating also queues its effect: activation applies the configured extra armour at the start of the next turn, with `activationDelayTicks` as an optional additional delay (default 0). Both abilities can be cancelled by activating the queued action again before the turn starts; once the start event occurs, the delay/effect cannot be cancelled. Both delay settings are simulation ticks: 10 ticks per second and 120 ticks per 12-second turn. The EMP fighter-stun duration remains independently configurable.
 
@@ -100,7 +103,7 @@ indexed shortcuts. To install the ability on a new bundle, also pass `--turnarou
 
 ## UI layout
 
-Run `python -m deadlock_tools ui fix-overflows` to stage Unity UI layout fixes in the configured work tree. The command
+Run `python -m deadlock_tools ui fix-overflows` to stage Unity UI layout fixes in the configured work tree. For the commander detail panel, it adds a vertical `ScrollRect` to `SkillsWidgetList`, links the existing list component, and clips overflow at the content panel. This allows the skill entries to scroll while the commander profile fields remain fixed. The command
 sets ship slot lists to resize vertically as their contents gain rows, wraps ship-card icons into two rows, and makes
 the battle ship squadron panel tall enough for two rows. It edits `level5`, `level85`, `level9`, and
 `sharedassets5.assets` under `work/BSG_Data/`.
@@ -113,20 +116,22 @@ Run `python -m deadlock_tools dll check` to inspect the staged DLL or configured
 
 | Patch option | Purpose | Revert option |
 |---|---|---|
-| `--armour-factor F` | Enable armour regeneration for flagged Hull Resin modules. | `--armour` |
-| `--revive-turns T` | Rebuild destroyed squadrons on a flagged ship with Munition Factory. | `--revive` |
 | `--max-rank N` | Set the commander cap. | `--max-rank` |
 | `--command-nodes N` | Set the number of command nodes. Optionally set `--command-step` and `--command-first-rank`. | `--command-nodes` |
 | `--munition-load` | Rebuild an existing save's munition list when it is shorter than the ship's new slot count. | `--munition-load` |
 | `--repair-bay-actions N` | Assign indexed shortcuts and stage matching keyboard/localization rows in `level3` and `resources.assets` (1–16). The custom-module DLL adds the matching launch-slot widgets. | `--repair-bay-shortcuts` |
 
 ```bash
-python -m deadlock_tools dll patch --armour-factor 1 --revive-turns 0
+python -m deadlock_tools dll patch --max-rank 20 --command-nodes 10
 python -m deadlock_tools dll patch --repair-bay-actions 2 --levels /path/to/BSG_Data
 python -m deadlock_tools dll check
 python -m deadlock_tools dll revert --revive
 python -m deadlock_tools dll revert --repair-bay-shortcuts --levels /path/to/BSG_Data
 ```
+
+The legacy armour-regeneration (`--armour-factor`) and squadron-revive (`--revive-turns`) patches were removed in favour of
+the custom armour repair and squadron replacement modules. `dll check` still reports them and `dll revert --armour` /
+`--revive` (or a plain `dll revert`) removes them from a DLL patched by an older version.
 
 `dll revert` with no patch flags reverts all supported patches. The `dll armour`, `dll revive`, and `dll munition` subcommands also provide single-patch operations with `--check` and `--revert`. Repair shortcut changes also stage the relevant key mappings and descriptions. The tool checks for expected code patterns before patching.
 
