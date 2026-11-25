@@ -23,7 +23,7 @@ static class MergePrototype
 
     static bool IsHudModule(string name)
     {
-        return name == "CustomInstantPlatingModule" || name == "CustomEmpPulseModule" || name == "CustomTargetedEmpModule" || name == "CustomBattleHud" || name == "CustomArmourRepairModule";
+        return name == "CustomInstantPlatingModule" || name == "CustomEmpPulseModule" || name == "CustomTargetedEmpModule" || name == "CustomBattleHud" || name == "CustomArmourRepairModule" || name == "CustomModuleSubsystems";
     }
 
     static string MethodName(MethodReference method, TypeDefinition sourceType, ModuleDefinition target)
@@ -316,6 +316,51 @@ static class MergePrototype
             method.Body.MaxStackSize = Math.Max(method.Body.MaxStackSize, 3);
         }
         Console.WriteLine("Injected custom commander stat modifiers into native commander bonus calculations");
+    }
+
+    static void InjectModuleSubsystemHooks(ModuleDefinition module, TypeDefinition helper)
+    {
+        // Stock modules read one subsystem for their rate. Every call to that getter is wrapped so the ship's
+        // CustomModuleSubsystems entries (if any) replace the result:
+        //   RegenerativeHullResinModule: rate = Engineering.GetHullRepairRate(hullPerTick)
+        //        -> CustomModuleSubsystems.HullResin(rate, this, this.hullPerTick)
+        //   MunitionFactoryModule: rate = Armory.GetMunitionResupplyRate()
+        //        -> CustomModuleSubsystems.MunitionFactory(rate, this)
+        // Only real-name calls are wrapped; the obfuscator's decoy copies call other names and never run.
+        var hullHook = helper.Methods.Single(m => m.Name == "HullResin" && m.Parameters.Count == 3);
+        var munitionHook = helper.Methods.Single(m => m.Name == "MunitionFactory" && m.Parameters.Count == 2);
+        int wrapped = 0;
+        foreach (var target in new[] { "RegenerativeHullResinModule", "MunitionFactoryModule" })
+        {
+            var type = module.Types.Single(t => t.Name == target);
+            bool resin = target == "RegenerativeHullResinModule";
+            var hook = resin ? hullHook : munitionHook;
+            var hullField = resin ? type.Fields.Single(f => f.Name == "hullPerTick") : null;
+            foreach (var method in type.Methods.Where(m => m.HasBody))
+            {
+                var calls = method.Body.Instructions.Where(i => (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
+                    i.Operand is MethodReference mr && (resin
+                        ? mr.Name == "GetHullRepairRate" && mr.DeclaringType.Name == "Engineering"
+                        : mr.Name == "GetMunitionResupplyRate" && mr.DeclaringType.Name == "Armory")).ToList();
+                if (calls.Count == 0) continue;
+                if (method.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference hr &&
+                                                      hr.DeclaringType.FullName == helper.FullName && hr.Name == hook.Name))
+                    continue;                                   // already wrapped (rebuilding an updated DLL)
+                var il = method.Body.GetILProcessor();
+                foreach (var call in calls)
+                {
+                    Instruction cursor = call;
+                    var added = resin
+                        ? new[] { Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Ldarg_0),
+                                  Instruction.Create(OpCodes.Ldfld, hullField), Instruction.Create(OpCodes.Call, hook) }
+                        : new[] { Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Call, hook) };
+                    foreach (var instruction in added) { il.InsertAfter(cursor, instruction); cursor = instruction; }
+                    wrapped++;
+                }
+                method.Body.MaxStackSize = Math.Max(method.Body.MaxStackSize, 4);
+            }
+        }
+        Console.WriteLine("Injected module subsystem drivers into Hull Resin / Munition Factory (" + wrapped + " call(s))");
     }
 
     static void InjectSubsystemModifierHooks(ModuleDefinition module, TypeDefinition helper)
@@ -614,6 +659,8 @@ static class MergePrototype
             InjectCommanderStatModifierHooks(mod, destType);
         if (srcType.Name == "CustomSubsystemModifiers")
             InjectSubsystemModifierHooks(mod, destType);
+        if (srcType.Name == "CustomModuleSubsystems")
+            InjectModuleSubsystemHooks(mod, destType);
         if (srcType.Name == "CustomCommanderAbilityLevels")
             InjectCommanderAbilityLevelHooks(mod, destType);
         target.Write(args[2]);

@@ -48,6 +48,7 @@ public sealed class CustomDroneResupplyModule : EventReceiverBehaviour
                 ship, (FEDNAJLFKEF)modifierField, battle, 1f);
             factor = Mathf.Max(0f, 1f + (crewFactor - 1f) * modifierRate);
         }
+        factor *= CustomModuleSubsystems.Factor(this, CustomModuleSubsystems.ModuleDroneResupply);
 
         float reserve = (float)ReserveField.GetValue(plating);
         float maxCapacity = (float)CapacityGetter.Invoke(plating, null);

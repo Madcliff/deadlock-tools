@@ -152,26 +152,27 @@ def _ship_object(F):
     raise ValueError("bundle has no ShipInfo component (not a ship prefab)")
 
 
-def _components(F, go_pid):
+def _components(F, go_pid, spec=None):
+    spec = spec or CREW
     scripts = _scripts(F)
     found = []
     for o in F.objs:
         if o.classid != 114:
             continue
         value = F.read(o)[0]
-        if (scripts.get(value.get("m_Script", {}).get("m_PathID")) == CLASS_NAME
+        if (scripts.get(value.get("m_Script", {}).get("m_PathID")) == spec.class_name
                 and value.get("m_GameObject", {}).get("m_PathID") == go_pid):
             found.append(o)
     return found
 
 
-def _entries(value):
-    columns = [value.get(name) for name, _ in FIELDS]
+def _entries(value, spec=None):
+    spec = spec or CREW
+    columns = [value.get(name) for name, _ in spec.fields]
     if any(not isinstance(column, list) for column in columns):
-        raise ValueError(f"unrecognised {CLASS_NAME} layout")
+        raise ValueError(f"unrecognised {spec.class_name} layout")
     count = min(len(column) for column in columns)
-    stats, sources, low, high = columns
-    return [{"stat": stats[i], "source": sources[i], "min": low[i], "max": high[i]} for i in range(count)]
+    return [dict(zip(spec.keys, (column[i] for column in columns))) for i in range(count)]
 
 
 def _f32(value):
@@ -193,8 +194,19 @@ def _validate(entries):
     return clean
 
 
-def _type_raw(template, script_index):
-    """Unity 2018.4 MonoBehaviour type record for CustomSubsystemModifiers (four plain vectors)."""
+class ComponentSpec:
+    """A ship-root MonoBehaviour made of four parallel vectors: class name, (field, element type) pairs, the entry
+    dict keys those fields map to, and the validator that cleans a list of entries."""
+    def __init__(self, class_name, fields, keys, validate):
+        self.class_name, self.fields, self.keys, self.validate = class_name, tuple(fields), tuple(keys), validate
+
+
+CREW = ComponentSpec(CLASS_NAME, FIELDS, ("stat", "source", "min", "max"), _validate)
+
+
+def _type_raw(template, script_index, spec=None):
+    """Unity 2018.4 MonoBehaviour type record for a component made of plain vectors (spec.fields)."""
+    spec = spec or CREW
     name_index = next((i for i, n in enumerate(template.nodes) if n.level == 1 and n.name == "m_Name"), None)
     if name_index is None:
         raise ValueError("bundle has no usable MonoBehaviour type-tree header")
@@ -212,7 +224,7 @@ def _type_raw(template, script_index):
     for source in template.nodes[:end]:
         add(source.level, source.type, source.name, source.size, source.meta, source.tflags, source.ver)
     # Same flags as the game's own serialized vectors (e.g. Hangar LaunchCompatibility).
-    for name, element in FIELDS:
+    for name, element in spec.fields:
         add(1, "vector", name, -1, 0x8000)
         add(2, "Array", "Array", -1, 0x4000, tflags=1)
         add(3, "int", "size", 4, 0)
@@ -223,7 +235,7 @@ def _type_raw(template, script_index):
         hashed += node.type.encode() + node.name.encode()
         hashed += struct.pack("<iiii", node.size, node.tflags, node.ver, node.meta & 0x4000)
     type_hash = _md4(hashed)
-    script_hash = _md4(b"Assembly-CSharp.dll" + CLASS_NAME.encode())
+    script_hash = _md4(b"Assembly-CSharp.dll" + spec.class_name.encode())
     strings, offsets = bytearray(), {}
 
     def offset(text):
@@ -241,9 +253,10 @@ def _type_raw(template, script_index):
     return raw, nodes, type_hash
 
 
-def _ensure_script(F, appended, newpid):
+def _ensure_script(F, appended, newpid, spec=None):
     """Return (script_pid, type_index, nodes), adding the type record and MonoScript when missing."""
-    script_pid = next((pid for pid, cls in _scripts(F).items() if cls == CLASS_NAME), None)
+    spec = spec or CREW
+    script_pid = next((pid for pid, cls in _scripts(F).items() if cls == spec.class_name), None)
     script_count = struct.unpack_from("<i", F.suffix, 0)[0]
     if script_pid is not None:
         script_index = next(i for i in range(script_count)
@@ -251,8 +264,8 @@ def _ensure_script(F, appended, newpid):
         type_index = next(i for i, t in enumerate(F.types) if t.classid == 114 and t.script_idx == script_index)
         nodes = F.types[type_index].nodes
         names = [(n.name, n.type) for n in nodes if n.level == 1 and not n.name.startswith("m_")]
-        if names != [(name, "vector") for name, _ in FIELDS]:
-            raise ValueError(f"unrecognised {CLASS_NAME} type tree")
+        if names != [(name, "vector") for name, _ in spec.fields]:
+            raise ValueError(f"unrecognised {spec.class_name} type tree")
         return script_pid, type_index, nodes
 
     template = next((t for t in F.types if t.classid == 114 and
@@ -260,7 +273,7 @@ def _ensure_script(F, appended, newpid):
     mono = next((o for o in F.objs if o.classid == 115), None)
     if template is None or mono is None:
         raise ValueError("bundle has no MonoBehaviour/MonoScript to use as a template")
-    raw, nodes, type_hash = _type_raw(template, script_count)
+    raw, nodes, type_hash = _type_raw(template, script_count, spec)
     prefix = bytearray(F.prefix)
     count_at = 4 + len(F.unity) + 1 + 4 + 1             # endian+reserved, unity version, platform, has-type-tree
     struct.pack_into("<i", prefix, count_at, struct.unpack_from("<i", prefix, count_at)[0] + 1)
@@ -269,7 +282,7 @@ def _ensure_script(F, appended, newpid):
 
     script_pid = newpid()
     fields = copy.deepcopy(F.read(mono)[0])
-    fields.update(m_Name=CLASS_NAME, m_ExecutionOrder=0, m_ClassName=CLASS_NAME,
+    fields.update(m_Name=spec.class_name, m_ExecutionOrder=0, m_ClassName=spec.class_name,
                   m_Namespace="", m_AssemblyName="Assembly-CSharp.dll")
     fields["m_PropertiesHash"] = {f"bytes[{i}]": value for i, value in enumerate(type_hash)}
     appended.append((script_pid, mono.tidx, F.write(mono, fields)))
@@ -324,28 +337,30 @@ def _save(bundle, index, F, cab, dst, encrypted):
 
 # ----- public API -----------------------------------------------------------------------
 
-def read(path):
+def read(path, spec=None):
     """Return {"present": bool, "entries": [...]} for the ship bundle at path."""
+    spec = spec or CREW
     _bundle, _index, F, _encrypted = _load(path)
-    found = _components(F, _ship_object(F))
+    found = _components(F, _ship_object(F), spec)
     if len(found) > 1:
-        raise ValueError(f"ship has multiple {CLASS_NAME} components")
+        raise ValueError(f"ship has multiple {spec.class_name} components")
     if not found:
         return {"present": False, "entries": []}
-    return {"present": True, "entries": _entries(F.read(found[0])[0])}
+    return {"present": True, "entries": _entries(F.read(found[0])[0], spec)}
 
 
-def apply(src, dst, entries):
+def apply(src, dst, entries, spec=None):
     """Write src to dst with exactly these entries (empty list removes the component).
 
     Returns the read-back state of dst; raises ValueError if it does not match the request.
     """
-    wanted = _validate(entries)
+    spec = spec or CREW
+    wanted = spec.validate(entries)
     bundle, index, F, encrypted = _load(src)
     go_pid = _ship_object(F)
-    found = _components(F, go_pid)
+    found = _components(F, go_pid, spec)
     if len(found) > 1:
-        raise ValueError(f"ship has multiple {CLASS_NAME} components")
+        raise ValueError(f"ship has multiple {spec.class_name} components")
     replaced, appended, removed = {}, [], set()
     used = set(F.by_pid)
     state = {"next": max(abs(p) for p in used) + 1000}
@@ -356,12 +371,11 @@ def apply(src, dst, entries):
         used.add(state["next"])
         return state["next"]
 
-    columns = {"stats": [e["stat"] for e in wanted], "sources": [e["source"] for e in wanted],
-               "bonusMin": [e["min"] for e in wanted], "bonusMax": [e["max"] for e in wanted]}
+    columns = {name: [e[key] for e in wanted] for (name, _), key in zip(spec.fields, spec.keys)}
     if found and wanted:
         obj = found[0]
         value = F.read(obj)[0]
-        _entries(value)                                   # layout check
+        _entries(value, spec)                             # layout check
         value.update(columns)
         replaced[obj.pid] = F.write(obj, value)
     elif found:
@@ -374,7 +388,7 @@ def apply(src, dst, entries):
         _preload_edit(F, replaced, removed=[obj.pid])
     elif wanted:
         new_pids = []
-        script_pid, type_index, nodes = _ensure_script(F, appended, newpid)
+        script_pid, type_index, nodes = _ensure_script(F, appended, newpid, spec)
         if appended:
             new_pids.append(script_pid)
         component = {"m_GameObject": {"m_FileID": 0, "m_PathID": go_pid}, "m_Enabled": 1,
@@ -392,7 +406,7 @@ def apply(src, dst, entries):
 
     cab = F.rebuild(replaced=replaced, appended=appended, removed=removed)
     _save(bundle, index, F, cab, dst, encrypted)
-    result = read(dst)
+    result = read(dst, spec)
     if result["entries"] != wanted or result["present"] != bool(wanted):
         raise ValueError("read-back of the written bundle does not match the requested entries")
     return result

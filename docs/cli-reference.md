@@ -63,6 +63,7 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 | Align bay types with database slot order or move a marker | `--align-launch-bays` with both slot totals, `--bay-icon SLOT=X,Y,Z` (repeatable) |
 | Passive ship systems | `--hull-regen` (positive, hull only), `--munition-factory` |
 | Custom ship modules | `--custom-armour-repair`, `--custom-squadron-replacement`, `--custom-drone-resupply`, `--custom-magazine-capacity`, `--custom-emp-pulse`, `--custom-targeted-emp` |
+| Module subsystems (which subsystems drive Hull Resin, Munition Factory and the custom modules) | `--module-subsystem MODULE:SOURCE:MIN:MAX` (repeatable; replaces the ship's list), `--clear-module-subsystems`. `--inspect` lists them. See [docs/game/subsystems.md](game/subsystems.md#module-subsystems) |
 | Subsystem crew modifiers | `--subsystem-modifier STAT:SOURCE:MIN:MAX` (repeatable; replaces the ship's list), `--clear-subsystem-modifiers`. `--inspect` lists them. See [docs/game/subsystems.md](game/subsystems.md) |
 | Micro-FTL | `--mini-jump`, `--jump-range`, `--jump-delay`, `--jump-duration`, `--jump-cooldown` |
 | Predictive Augury | `--augury`, `--augury-uses` |

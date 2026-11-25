@@ -36,6 +36,7 @@ public sealed class CustomMagazineCapacityModule : EventReceiverBehaviour
                 ship, (FEDNAJLFKEF)modifierField, battle, 1f);
             factor = Mathf.Max(0f, 1f + (crewFactor - 1f) * modifierRate);
         }
+        factor *= CustomModuleSubsystems.Factor(this, CustomModuleSubsystems.ModuleMagazineCapacity);
         return capacityMultiplier * factor;
     }
 

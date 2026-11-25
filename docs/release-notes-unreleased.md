@@ -1,6 +1,8 @@
 # Unreleased changes
 
 ## Editor
+- **Module subsystems** card and `weapons --module-subsystem MODULE:SOURCE:MIN:MAX`: choose which subsystems drive each module the toolkit adds (Hull Resin, Munition Factory, custom armour repair, drone resupply, squadron replacement, magazine capacity). Each subsystem adds its own % from 0 to full health; the total replaces the stock driver (Engineering for Hull Resin, Armoury for the Munition Factory) or multiplies the custom modules' rate. Needs the rebuilt custom-module DLL.
+- The crew-veterancy card is renamed **Crew bonuses from subsystem health**, so it is not confused with the subsystem values.
 - **Realign launch bays** (Weapon layout view) and `weapons --realign-bays`: cloned launch bays become mirrored port/starboard pairs in slot order, in a grid beside the stock rear bays, renamed after their side and slot. Bays can also be renamed by hand in the Launch bays layer. See [game/launch-bays.md](game/launch-bays.md).
 
 ## Tools

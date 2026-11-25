@@ -42,6 +42,8 @@ public sealed class CustomArmourRepairModule : EventReceiverBehaviour
             rate *= Mathf.Max(0f, 1f + (crewFactor - 1f) * modifierRate);
         }
 
+        // Subsystems that drive this module (CustomModuleSubsystems); 1 without entries.
+        rate *= CustomModuleSubsystems.Factor(this, CustomModuleSubsystems.ModuleArmourRepair);
         return rate;
     }
 

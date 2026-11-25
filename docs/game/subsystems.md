@@ -132,3 +132,39 @@ which also rebuilds the custom-module DLL when a bundle carries the component).
 
 The Colonial Mercury Mk II round trip (add, edit, remove, re-add) is covered by `tests/test_subsystem_modifiers.py`.
 The patched DLL has been built and checked in IL, but it has not been tested in game yet.
+
+## Which subsystem drives each module
+
+Passive modules read one subsystem setting through the same health evaluation (`value * Range.Evaluate(HealthPC) / 100`):
+
+| Module | Per tick | Stock driver |
+|---|---|---|
+| `RegenerativeHullResinModule` (Hull Resin) | `RepairHull(hullPerTick * Engineering.HullRepairRateRange.Evaluate(health) / 100)` while hull is below maximum | Engineering `HullRepairRateRange` (the same range also drives the repair crew's hull repair) |
+| `MunitionFactoryModule` | work `Armory.MunitionResupplyRange.Evaluate(health) / 100` | Armoury `MunitionResupplyRange` |
+| Custom armour repair / drone resupply / squadron replacement / magazine capacity | base value × crew-veterancy weighting | none |
+
+Read from the vanilla DLL: `RegenerativeHullResinModule.DJMKBDNFBGM` (the tick `OnGameEvent` calls) calls
+`Engineering.GetHullRepairRate(hullPerTick)`; `MunitionFactoryModule.DJMKBDNFBGM` calls `Armory.GetMunitionResupplyRate()`.
+The other copies of those methods are obfuscator decoys that call renamed getters and never run. Crew veterancy's
+"HullRegen" stat (103) is read by neither, so its rank bonuses have no effect on Hull Resin in the stock game.
+
+## Module subsystems
+
+`CustomModuleSubsystems` (`dll_modules/CustomModuleSubsystems.cs`, `deadlock_tools/module_subsystems.py`) lets
+several subsystems drive one of those modules. It sits on the GameObject that holds `ShipInfo`, with four parallel
+vectors: `modules` (0 Hull Resin, 1 Munition Factory, 2 custom armour repair, 3 drone resupply, 4 squadron
+replacement, 5 magazine capacity), `sources` (0 Fire Control … 6 Tech Bay), `rateMin`, `rateMax`. A module with at
+least one entry uses
+
+    factor % = sum of rateMin + (rateMax - rateMin) * source.HealthPC   over its entries (never below 0)
+
+* Hull Resin: hull per tick = `hullPerTick × factor / 100` instead of Engineering's range.
+* Munition Factory: work per tick = `factor / 100` instead of the Armoury's range.
+* Custom modules: their rate (or the magazine multiplier) is multiplied by `factor / 100`, after the crew weighting.
+
+A module without entries is unchanged. The merge script (`InjectModuleSubsystemHooks`) wraps every real-name call to
+`Engineering.GetHullRepairRate` inside `RegenerativeHullResinModule` and to `Armory.GetMunitionResupplyRate` inside
+`MunitionFactoryModule`; the custom modules call `CustomModuleSubsystems.Factor` themselves. Edit with
+`weapons --module-subsystem MODULE:SOURCE:MIN:MAX` / `--clear-module-subsystems` or the **Module subsystems** card on
+the Ships tab. Built and checked in IL (2026-11-25); not yet tested in game.
+

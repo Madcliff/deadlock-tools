@@ -73,6 +73,17 @@ def bundle_stats_with_modifiers(path):
                    "stock_source": sm.stock_source(code)} for code, info in sm.STATS.items()],
         "sources": [{"code": code, "label": labels[1]} for code, labels in sm.SOURCES.items()],
     }
+    from deadlock_tools import module_subsystems as msub
+    try:
+        drivers, error = msub.read(path)["entries"], None
+    except ValueError as exc:
+        drivers, error = [], str(exc)
+    result["module_subsystems"] = {
+        "entries": drivers, "error": error,
+        "modules": [{"code": code, "name": info["name"], "script": info["script"], "stock": info["stock"],
+                     "installed": info["script"] in result.get("abilities", {})} for code, info in msub.MODULES.items()],
+        "sources": [{"code": code, "label": labels[1]} for code, labels in msub.SOURCES.items()],
+    }
     return result
 
 class Project:
@@ -1404,7 +1415,7 @@ class Project:
         custom_types = {"CustomArmourRepairModule", "CustomSquadronReplacementModule",
                         "CustomDroneResupplyModule", "CustomMagazineCapacityModule",
                         "CustomInstantPlatingModule", "CustomInstantPlatingAction"}
-        custom_types.add("CustomSubsystemModifiers")
+        custom_types.update({"CustomSubsystemModifiers", "CustomModuleSubsystems"})
         custom_types.update({"CustomEmpPulseModule", "CustomEmpPulseAction",
                              "CustomTargetedEmpModule", "CustomTargetedEmpAction"})
         module_count = sum(name in custom_types for name in component_names)
@@ -1439,7 +1450,7 @@ class Project:
             if any(signature in source_bytes for signature in (b"CustomArmourRepairModule", b"CustomSquadronReplacementModule",
                                                                b"CustomDroneResupplyModule", b"CustomMagazineCapacityModule",
                                                                b"CustomRepairBaySlots", b"CustomInstantPlatingModule",
-                                                               b"CustomCommanderStatModifiers", b"CustomSubsystemModifiers")):
+                                                               b"CustomCommanderStatModifiers", b"CustomSubsystemModifiers", b"CustomModuleSubsystems")):
                 raise ValueError("the configured DLL already has custom modules, but no clean base exists. Put a clean Assembly-CSharp.dll at " + base_dll)
             shutil.copy2(self.dll, base_dll)
 
@@ -2879,6 +2890,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      bundle.linkBox.disabled=!result.fields.some(field=>Object.values(HULL_ARMOUR_LINKS).includes(field.key));
      if(bundle.linkBox.checked)for(const field of Object.keys(HULL_ARMOUR_LINKS))if(state.pending[key(state.cur,field)])syncBundleStatFromLevel(field,shipFieldValue(field));
      bundle.setSubsystemModifiers?.(result.subsystem_modifiers);
+     bundle.setModuleSubsystems?.(result.module_subsystems);
      bundle.statsResult=result;bundle.optionBaseline=bundleOptionValues(bundle);
      if(activeBundle===bundle)updPend();else bundle.refreshAgreement();
    }catch(error){
@@ -3018,8 +3030,9 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
     sections.append(card);
     continue;
   }
-  const modifierDests=['subsystem_modifier','clear_subsystem_modifiers'];
+  const modifierDests=['subsystem_modifier','clear_subsystem_modifiers','module_subsystem','clear_module_subsystems'];
   const grid=buildGrid(options.filter(o=>!modifierDests.includes(o.dest)));
+  if(group==='Custom ship modules'&&options.some(o=>o.dest==='module_subsystem'))sections.append(moduleSubsystemCard(bundle));
   if(group==='Custom ship modules'&&options.some(o=>o.dest==='subsystem_modifier'))sections.append(subsystemModifierCard(bundle));
   if(group==='Squadron / munition slots'){
     slots.replaceChildren(el('h4',{},'Bundle slot controls'),el('p',{class:'hint'},'Leave blank to keep the bundle as it is. Level data ↔ bundle at the top compares these with the ship record.'),grid);
@@ -3101,9 +3114,60 @@ function subsystemModifierCard(bundle){
    spec.value=rows.map(row=>[row.stat,row.source,num(row.min),num(row.max)].join(':')).join('\n');clear.checked=false;
    render();
  };
- return el('div',{class:'card'},el('h3',{},'Subsystem crew modifiers'),
-   el('p',{class:'hint'},'Let one subsystem’s health add to a crew stat, as a crew veterancy bonus would. The bonus runs linearly from the “0 health” value to the “full health” value. Percentage stats use 0.25 for +25%; flat stats add the number as is. It stacks with veterancy and applies even when crew veterancy is off. Needs the custom-module DLL, which Save ship rebuilds. Details: docs/game/subsystems.md.'),
+ return el('div',{class:'card'},el('h3',{},'Crew bonuses from subsystem health'),
+   el('p',{class:'hint'},'Not the subsystem values themselves (those are under Ship subsystems): this lets one subsystem’s health add to a crew stat, as a crew veterancy bonus would. The bonus runs linearly from the “0 health” value to the “full health” value. Percentage stats use 0.25 for +25%; flat stats add the number as is. It stacks with veterancy and applies even when crew veterancy is off. Needs the custom-module DLL, which Save ship rebuilds. Details: docs/game/subsystems.md.'),
    status,body,spec,clear);
+}
+// Module subsystems (weapons --module-subsystem / --clear-module-subsystems): which subsystems drive each module
+// this toolkit adds. Same hidden-input pattern as the crew card, so Save ship's option diff picks it up.
+function moduleSubsystemCard(bundle){
+ const spec=el('input',{type:'hidden','data-d':'module_subsystem'});
+ const clear=el('input',{type:'checkbox','data-d':'clear_module_subsystems',hidden:true});
+ const body=el('div'),status=el('p',{class:'hint'},'Load a ship bundle to see its module drivers.');
+ let catalog={modules:[],sources:[]},rows=[],loadedCount=0;
+ const num=v=>Number(Number(v).toPrecision(7)).toString();
+ const lines=()=>rows.map(row=>[row.module,row.source,num(row.min),num(row.max)].join(':')).join('\n');
+ const summary=el('div',{class:'hint'});
+ const sourceName=code=>catalog.sources.find(s=>s.code===Number(code))?.label||'subsystem '+code;
+ const sync=()=>{spec.value=lines();clear.checked=!rows.length&&loadedCount>0;if(typeof updPend==='function')updPend();renderSummary()};
+ function renderSummary(){
+   summary.replaceChildren(...catalog.modules.filter(m=>m.installed||rows.some(r=>r.module===m.code)).map(m=>{
+     const own=rows.filter(r=>r.module===m.code);
+     const lo=own.reduce((t,r)=>t+Number(r.min),0),hi=own.reduce((t,r)=>t+Number(r.max),0);
+     return el('div',{},el('strong',{},m.name+(m.installed?'':' (module not on this ship)')+': '),
+       own.length?num(lo)+'% with those subsystems destroyed → '+num(hi)+'% at full health, from '+own.map(r=>sourceName(r.source)).join(' + ')
+         :'stock ('+m.stock+')');
+   }));
+   if(!summary.childNodes.length&&catalog.modules.length)summary.textContent='This ship has none of the modules this card drives yet; add one under Ship systems or Custom ship modules.';
+ }
+ function render(){
+   if(!catalog.modules.length){body.replaceChildren();return}
+   const moduleOptions=selected=>catalog.modules.map(m=>el('option',{value:m.code,selected:m.code===Number(selected)},m.name+(m.installed?'':' (not on this ship)')));
+   const sourceOptions=selected=>catalog.sources.map(s=>el('option',{value:s.code,selected:s.code===Number(selected)},s.label));
+   body.replaceChildren(...rows.map((row,index)=>{
+     const number=name=>el('input',{type:'number',step:'any',required:true,value:num(row[name]),style:'width:7em',
+       oninput:event=>{if(event.target.value!==''&&Number.isFinite(event.target.valueAsNumber)){row[name]=event.target.valueAsNumber;sync()}}});
+     return el('div',{class:'row',style:'padding:6px 0;border-top:1px solid var(--line)'},
+       el('label',{class:'f'},'Module',el('select',{onchange:event=>{row.module=Number(event.target.value);sync()}},...moduleOptions(row.module))),
+       el('label',{class:'f'},'Driven by',el('select',{onchange:event=>{row.source=Number(event.target.value);sync()}},...sourceOptions(row.source))),
+       el('label',{class:'f',title:'Contribution when this subsystem is at 0 health'},'At 0 health (%)',number('min')),
+       el('label',{class:'f',title:'Contribution when this subsystem is at full health'},'At full health (%)',number('max')),
+       el('button',{class:'sec',type:'button',onclick:()=>{rows.splice(index,1);render();sync()}},'Remove'));
+   }),el('div',{class:'row',style:'margin-top:6px'},el('button',{class:'sec',type:'button',onclick:()=>{
+     const first=catalog.modules.find(m=>m.installed)||catalog.modules[0];
+     rows.push({module:first.code,source:first.code===1?2:1,min:20,max:100});render();sync();
+   }},'Add subsystem')));
+ }
+ bundle.setModuleSubsystems=data=>{
+   catalog=data||{modules:[],sources:[]};
+   rows=(data?.entries||[]).map(entry=>({...entry}));loadedCount=rows.length;
+   status.className=data?.error?'msg-bad':'hint';
+   status.textContent=data?.error?'Cannot edit module drivers on this bundle: '+data.error:'';
+   spec.value=lines();clear.checked=false;render();renderSummary();
+ };
+ return el('div',{class:'card'},el('h3',{},'Module subsystems'),
+   el('p',{class:'hint'},'Choose which subsystems drive each module this toolkit adds, and how strongly. Each row adds its own percentage, from “at 0 health” to “at full health” of that subsystem; the rows for a module add up. With rows, Hull Resin heals hull-per-tick × that total and the Munition Factory works at that total, instead of Engineering’s hull repair range or the Armoury’s resupply range; the custom modules multiply their rate by it. A module without rows keeps its stock behaviour. Needs the custom-module DLL, which Save ship rebuilds.'),
+   status,summary,body,spec,clear);
 }
 function bundleFieldLabel(option){
  const label=option.flag.replace(/^--/,'').replaceAll('-',' ');

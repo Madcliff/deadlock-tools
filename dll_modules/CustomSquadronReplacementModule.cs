@@ -43,6 +43,7 @@ public sealed class CustomSquadronReplacementModule : EventReceiverBehaviour
                 ship, (FEDNAJLFKEF)modifierField, battle, 1f);
             rateFactor = Mathf.Max(0.01f, 1f + (crewFactor - 1f) * modifierRate);
         }
+        rateFactor = Mathf.Max(0.01f, rateFactor * CustomModuleSubsystems.Factor(this, CustomModuleSubsystems.ModuleSquadronReplacement));
 
         var simulation = SimulationGetter.Invoke(battle, null) as BlackLab.WEGO.BattleSimulation;
         if (simulation == null) return;

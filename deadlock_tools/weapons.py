@@ -3091,6 +3091,8 @@ LIMITS
     g_custom.add_argument("--custom-targeted-emp", action="store_true", help="add Targeted EMP: each per-turn charge selects one PCM 3D point; all queued enemy-only bursts fire at turn start; charge count, target range, blast size, delay, burst spacing, fighter stun and evade-jam durations are configurable; requires the custom-module DLL")
     g_custom.add_argument("--subsystem-modifier", action="append", default=[], metavar="STAT:SOURCE:MIN:MAX", help="replace the ship's subsystem crew modifiers with these entries (repeatable): crew STAT (number or name, e.g. 102 or squadron_repair) gets a bonus from SOURCE subsystem's health (0-6 or name; empty = the stat's own subsystem), MIN at 0 health to MAX at full health, in veterancy BonusAmount units (0.25 = +25%% for percent stats). See docs/game/subsystems.md; requires the custom-module DLL")
     g_custom.add_argument("--clear-subsystem-modifiers", action="store_true", help="remove the ship's subsystem crew modifiers component")
+    g_custom.add_argument("--module-subsystem", action="append", default=[], metavar="MODULE:SOURCE:MIN:MAX", help="replace the ship's module subsystem drivers with these entries (repeatable): MODULE (hull_regeneration, munition_factory, custom_armour_repair, custom_drone_resupply, custom_squadron_replacement, custom_magazine_capacity, or 0-5) is driven by SOURCE subsystem (0-6 or name) at MIN %% at 0 health to MAX %% at full health; several entries for one module add up and replace its stock subsystem factor (Hull Resin: Engineering, Munition Factory: Armoury; custom modules: none = 100 %%). Requires the custom-module DLL")
+    g_custom.add_argument("--clear-module-subsystems", action="store_true", help="remove the ship's module subsystem drivers (modules go back to their stock subsystem)")
     g_weap.add_argument("--no-hull-follow", action="store_true", help="skip the hull check. By default every clone is raised out of the hull if it would sit lower than the mount it was copied from (reads the hull mesh from the bundle)")
     g_abil.add_argument("--mini-jump", action="store_true", help="give the ship the micro-FTL jump (Cylon Argos style): adds the MiniJumpAgent and the jump button in the Actions radial menu. The ship needs an FTLEffect component (Mercury, Jupiter, Argos have one)")
     g_abil.add_argument("--jump-range", default="200,10", help="--mini-jump: horizontal,vertical jump range in game units (default 200,10 = Argos)")
@@ -3172,6 +3174,10 @@ def main():
         if a.subsystem_modifier and a.clear_subsystem_modifiers:
             raise ValueError("use either --subsystem-modifier or --clear-subsystem-modifiers, not both")
         modifier_entries = [sm.parse_spec(text) for text in a.subsystem_modifier]
+        from deadlock_tools import module_subsystems as msub
+        if a.module_subsystem and a.clear_module_subsystems:
+            raise ValueError("use either --module-subsystem or --clear-module-subsystems, not both")
+        driver_entries = [msub.parse_spec(text) for text in a.module_subsystem]
         bay_spec = None
         if a.bay_layout and not (a.list_mounts or a.inspect):
             with open(a.bay_layout, encoding="utf-8") as source:
@@ -3250,6 +3256,13 @@ def main():
             entries = sm.read(a.src)["entries"]
             print("subsystem crew modifiers: %s" % (len(entries) or "none"))
             for entry in entries: print("  " + sm.describe(entry))
+            drivers = msub.read(a.src)["entries"]
+            print("module subsystem drivers: %s" % (len(drivers) or "none (stock subsystems)"))
+            for entry in drivers: print("  " + msub.describe(entry))
+        elif (driver_entries or a.clear_module_subsystems) and not a.list_mounts:
+            drivers = msub.apply(tmp, tmp, driver_entries)["entries"]
+            print("module subsystem drivers: %d entr%s" % (len(drivers), "y" if len(drivers) == 1 else "ies") if drivers else "module subsystem drivers removed")
+            for entry in drivers: print("  " + msub.describe(entry))
         elif (modifier_entries or a.clear_subsystem_modifiers) and not a.list_mounts:
             entries = sm.apply(tmp, tmp, modifier_entries)["entries"]
             print("subsystem crew modifiers: %d entr%s" % (len(entries), "y" if len(entries) == 1 else "ies") if entries else "subsystem crew modifiers removed")

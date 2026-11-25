@@ -34,7 +34,8 @@ Without it, the save goes into the work tree. **Discard changes** throws away le
 | **Level data ↔ bundle** | every value both files hold, side by side, with ✓/✗, per-row **Use level** / **Use bundle**, and *make all match* buttons; *Keep hull & armour linked while editing* | none (stages edits for Save ship); see [game/bundle-level-agreement.md](game/bundle-level-agreement.md) |
 | Field groups | level fields; bundle hull & armour and subsystems inside *Hull & armour*; bundle slot controls inside *Carrier & munition slots* | staged for Save ship |
 | Bundle option cards | Ship systems, Custom ship modules, Abilities (installed + add), Weapons, Output | staged for Save ship |
-| Subsystem crew modifiers | one row per modifier: crew stat, source subsystem, bonus at 0 and at full health, effect note; **Add modifier**, **Remove** | `/api/bundle/stats` (read, with the stat catalog); staged for Save ship → `weapons --subsystem-modifier … / --clear-subsystem-modifiers` |
+| Module subsystems | one row per driver: module, driving subsystem, % at 0 and at full health; per-module total and stock driver; **Add subsystem**, **Remove** | `/api/bundle/stats` (read); staged for Save ship → `weapons --module-subsystem … / --clear-module-subsystems` |
+| Crew bonuses from subsystem health | one row per modifier: crew stat, source subsystem, bonus at 0 and at full health, effect note; **Add modifier**, **Remove** | `/api/bundle/stats` (read, with the stat catalog); staged for Save ship → `weapons --subsystem-modifier … / --clear-subsystem-modifiers` |
 | Research, veterancy, advantages | per-ship research rows and veterancy ranks | staged for Save ship |
 | Ship localisation | opens the Localisation tab filtered to the ship | |
 | Weapon layout view | **Edit** layer (Turrets / Launch bays / Munition launchers), projection, drag the selected layer's objects, **Reload** | `/api/bundle/layout` (read, includes `bays.read_layout`); staged for Save ship |
