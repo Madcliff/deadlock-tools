@@ -6,6 +6,7 @@
 - **Realign launch bays** (Weapon layout view) and `weapons --realign-bays`: cloned launch bays become mirrored port/starboard pairs in slot order, in a grid beside the stock rear bays, renamed after their side and slot. Bays can also be renamed by hand in the Launch bays layer. See [game/launch-bays.md](game/launch-bays.md).
 
 ## Tools
+- **Copied ships no longer freeze the game.** "Copy and add a ship" now gives the new bundle its own internal CAB names. Before, a copy shared its donor's, so Unity refused to load it next to the donor ("another AssetBundle with the same files is already loaded") and the game hung loading the battle. Re-copy ships made earlier, or run them through `weapons.rename_bundle_asset`. See [technical-findings.md](technical-findings.md#creating-a-new-ship).
 - **Backups no longer go into the work folder.** Replaced files are copied to a new `backups` setting (Settings tab, `config --backups`), by default `work-backups/` beside the work folder. This covers the ship-clone, commander, squadron, bay, bundle-import, bundle-overwrite (no more `.bak` beside the file) and custom-module DLL saves.
 - `trench.reset_mounts(src, donor, dst)` puts weapon mounts back to a donor bundle (e.g. the vanilla Mercury) and removes clones; on a scaled hull the turrets stay stock size (Python API).
 - `xor decrypt -o DIR` writes to `DIR/decrypted` (it used to ignore `-o` and always write to the work folder).

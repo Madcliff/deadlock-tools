@@ -330,8 +330,16 @@ def rename_bundle_asset(data, target_name, ship_type_id=None):
     assetName is also the bundle filename. Renaming only the file therefore
     leaves Unity's AssetBundle container pointing at the donor prefab name.
     A cloned ShipInfo also retains the donor ShipType unless a new ID is given.
+
+    The bundle's internal files are named CAB-<32 hex> (plus CAB-<hex>.resS for
+    mesh/texture data, referenced from inside the serialized file as
+    "archive:/CAB-<hex>/CAB-<hex>.resS"). Unity refuses to load a second bundle
+    holding a CAB name that is already loaded ("another AssetBundle with the
+    same files is already loaded"), and Deadlock then hangs on the load. So a
+    copy gets fresh CAB names, derived from the new bundle name so rebuilding
+    the same clone gives the same bytes.
     """
-    import tempfile
+    import hashlib, tempfile
 
     data = bytes(data)
     target_name = str(target_name).lower()
@@ -339,6 +347,18 @@ def rename_bundle_asset(data, target_name, ship_type_id=None):
         raise ValueError("Ship type ID must be a non-negative integer.")
     encrypted = not data.startswith(b"UnityFS\0")
     bundle = parse_bundle(data)
+    cab_names = {}
+    for _offset, _size, _flags, node_name in bundle["nodes"]:
+        hit = re.match(r"CAB-([0-9a-f]{32})", node_name)
+        if hit and hit.group(1) not in cab_names:
+            cab_names[hit.group(1)] = hashlib.md5(("deadlock-tools:%s:%s" % (target_name, hit.group(1))).encode()).hexdigest()
+    def rename_cabs(text):
+        for old, new in cab_names.items(): text = text.replace(old, new)
+        return text
+    def rename_cab_bytes(blob):
+        # same-length ASCII swap: length-prefixed strings and offsets in the serialized file stay valid
+        for old, new in cab_names.items(): blob = blob.replace(b"CAB-" + old.encode(), b"CAB-" + new.encode())
+        return blob
     node_blobs = []
     for offset, size, flags, node_name in bundle["nodes"]:
         blob = bundle["data"][offset:offset + size]
@@ -387,8 +407,8 @@ def rename_bundle_asset(data, target_name, ship_type_id=None):
                 ship_info, fields = ship_infos[0]
                 fields["ShipType"] = ship_type_id
                 replacements[ship_info.pid] = serialized.write(ship_info, fields)
-            blob = serialized.rebuild(replacements)
-        node_blobs.append((flags, node_name, blob))
+            blob = rename_cab_bytes(serialized.rebuild(replacements))
+        node_blobs.append((flags, rename_cabs(node_name), blob))
 
     with tempfile.TemporaryDirectory(prefix="deadlock-bundle-rename-") as temp:
         plain_path = os.path.join(temp, "bundle.unity")

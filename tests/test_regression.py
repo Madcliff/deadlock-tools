@@ -153,6 +153,29 @@ class Regression(unittest.TestCase):
             icon = file.by_pid[bays[slot]["iconPosition"]["m_PathID"]]
             self.assertEqual(file.read(icon)[0]["m_LocalPosition"], {"x": x, "y": 20, "z": 30})
 
+    def test_cloned_bundle_gets_its_own_cab_names(self):
+        # Unity will not load two bundles that share a CAB name; the game hung loading a copied Mercury
+        import re
+        from deadlock_tools import weapons as W
+        self.need("mercury_dec")
+        raw = open(INPUTS["mercury_dec"], "rb").read()
+        donor = W.parse_bundle(raw)
+        old = {re.match(r"CAB-[0-9a-f]{32}", n[3]).group(0) for n in donor["nodes"]}
+        out = W.rename_bundle_asset(raw, "colonialmercurymk2", 999)
+        self.assertEqual(out, W.rename_bundle_asset(raw, "colonialmercurymk2", 999))   # reproducible
+        clone = W.parse_bundle(out)
+        names = [n[3] for n in clone["nodes"]]
+        self.assertEqual(len(names), len(donor["nodes"]))
+        for name in names: self.assertNotIn(name.split(".")[0], old)
+        self.assertFalse(any(o.encode() in clone["data"] for o in old), "donor CAB name left inside the clone")
+        cab = names[0]; self.assertIn(cab + ".resS", names)
+        off, size, _f, _n = clone["nodes"][0]
+        serialized = W.SerFile(clone["data"][off:off + size])
+        streamed = {serialized.read(o)[0]["m_StreamData"]["path"] for o in serialized.objs if o.classid in (28, 43)} - {""}
+        self.assertEqual(streamed, {"archive:/%s/%s.resS" % (cab, cab)})
+        other = W.parse_bundle(W.rename_bundle_asset(raw, "colonialmercurymk3", 1000))
+        self.assertNotEqual(other["nodes"][0][3], cab)
+
     def test_support_abilities_preserve_prefab_links(self):
         from pathlib import Path
         from deadlock_tools.editor import Project
