@@ -38,6 +38,14 @@ class MercuryTrench(unittest.TestCase):
         cls.src = os.path.join(cls.tmp, "colonialmercurymk2")
         shutil.copyfile(MK2, cls.src)
         cls.fore = [m for m in w.bundle_mount_layout(cls.src)["mounts"] if m["quadrant"] == 2]
+        if not any(trench.CLONE.search(m["name"]) for m in cls.fore):
+            # the work-tree MK2 may have stock bow guns only (reset_mounts); clone them as the MK2 was built (2 each)
+            import subprocess, sys
+            cloned = os.path.join(cls.tmp, "cloned")
+            subprocess.run([sys.executable, "-m", "deadlock_tools", "weapons", cls.src, cloned, "--clone", "fore=2",
+                            "--layout", "free"], cwd=ROOT, check=True, capture_output=True)
+            shutil.move(cloned, cls.src)
+            cls.fore = [m for m in w.bundle_mount_layout(cls.src)["mounts"] if m["quadrant"] == 2]
 
     @classmethod
     def tearDownClass(cls):
@@ -72,6 +80,25 @@ class MercuryTrench(unittest.TestCase):
         self.assertFalse(names & set(report["removed"]))
         self.assertEqual(report["turrets"] + len(report["removed"]), len(self.fore))
         trench.check(dst)
+
+VANILLA = os.path.join(os.path.dirname(ROOT), "decrypted", "colonialmercury.dec")
+
+
+@unittest.skipUnless(os.path.isfile(MK2) and os.path.isfile(VANILLA), "needs the MK2 work bundle and the vanilla Mercury .dec")
+class ResetMounts(unittest.TestCase):
+    def test_trench_layout_then_reset_gives_vanilla_mounts(self):
+        import tempfile
+        from deadlock_tools import trench
+        def local(path):
+            _b, prefab, _r = trench._open(path); value = lambda pid: prefab.read(prefab.by_pid[pid])[0]
+            return {m["name"]: (m["quad"], tuple(round(x, 4) for x in m["pos"]), round(m["scale"], 4),
+                                value(m["mount"].pid)["WeaponType"]) for m in trench._mounts(prefab, value)}
+        with tempfile.TemporaryDirectory() as tmp:
+            laid = os.path.join(tmp, "laid"); back = os.path.join(tmp, "back")
+            trench.reset_mounts(MK2, VANILLA, back)                       # start from vanilla mounts
+            report = trench.reset_mounts(back, VANILLA, laid)            # idempotent: nothing to change or remove
+            self.assertEqual((report["changed"], report["removed"]), (0, []))
+            self.assertEqual(local(back), local(VANILLA))
 
 
 if __name__ == "__main__":
