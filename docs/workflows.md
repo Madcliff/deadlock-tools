@@ -93,6 +93,13 @@ python -m deadlock_tools weapons colonialmercury --turnaround-repair-bay --targe
 
 In **Bundle file**, select your installed Mercury bundle and use **Inspect current bundle** to check its values. Under **Abilities**, enter the new **Plating supply**, **Plating drone load**, **Plating facing cap**, or **Plating rate**, then save the bundle. Blank fields keep their current values. If the source bundle already has the ability, the settings can be edited directly. For a new module, also enable **Deploy plating**.
 
+## Backups
+
+Every file the editor or a tool replaces in the work tree is first copied to the backups folder, one subfolder per
+save (`<label>-<date>-<time>/`, keeping the path relative to the work folder). By default that is `work-backups/`
+beside the work folder; set another with **Backups folder** on the Settings tab or `config --backups PATH`. It must be
+outside the work folder, because the work folder mirrors `BSG_Data/` and is merged into the game.
+
 ## Install, verify, and roll back
 
 1. Close the game and back up the destination files and your save.

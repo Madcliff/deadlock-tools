@@ -5,7 +5,8 @@
         tx.stage(ws.target("levels", "sharedassets9.assets"), new_bytes, verify=check_fn)
         ...
     # leaving the block commits: every staged file is verified, the files it replaces are backed up into
-    # <work>/BSG_Data/.deadlock-backups/<label>-<stamp>/<relative path>, then each target is replaced atomically.
+    # <backups>/<label>-<stamp>/<relative path> (config.backups_root: beside the work folder by default), then each
+    # target is replaced atomically.
     # Any exception (in the block, a verifier, or a replace) restores every target that was already replaced.
 
 Reads go through ws.source(kind, name, fresh): the work-tree copy when it exists (edits stack), else the configured
@@ -42,7 +43,7 @@ class Workspace:
         ab = lambda path: os.path.abspath(os.path.expanduser(path)) if path else path
         self.levels, self.dll, self.work, self.bundles = ab(levels), ab(dll), ab(work), ab(bundles)
         self.game_data = os.path.join(self.work, "BSG_Data")
-        self.backup_root = os.path.join(self.game_data, ".deadlock-backups")
+        self.backup_root = config.backups_root(self.work)          # outside the work folder (see config.backups_root)
         self.stage_root = os.path.join(self.work, ".deadlock-tools", "stage")
 
     @classmethod

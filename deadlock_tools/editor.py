@@ -87,9 +87,10 @@ def bundle_stats_with_modifiers(path):
     return result
 
 class Project:
-    def __init__(self, levels, dll, work, bundles):
+    def __init__(self, levels, dll, work, bundles, backups=None):
         ab = lambda x: os.path.abspath(x) if x else x                  # the helper tools run from the script's folder, so no relative paths
         self.levels, self.dll, self.work, self.bundles = ab(levels), ab(dll), ab(work), ab(bundles)
+        self.backups = config.backups_root(self.work, backups)          # outside the work folder (config.backups_root)
         self.stage_root = os.path.join(self.work, ".deadlock-tools", "stage")
         self.commander_levels_path = os.path.join(self.work, ".deadlock-tools", "commander_ability_levels.json")
         self.game_data = os.path.join(self.work, "BSG_Data")
@@ -377,17 +378,13 @@ class Project:
                                        (enum_result.stdout + enum_result.stderr)[-8000:])
                 outputs.append((enum_candidate, enum_work_dll))
 
-                backup_root = os.path.join(self.game_data, ".deadlock-backups", "ship-clone-" + stamp)
+                backup_root = os.path.join(self.backups, "ship-clone-" + stamp)
                 backups, promoted = {}, []
                 try:
                     for _, target in outputs:
                         os.makedirs(os.path.dirname(target), exist_ok=True)
                         if os.path.isfile(target):
-                            if os.path.commonpath([os.path.abspath(target), os.path.abspath(self.game_data)]) == os.path.abspath(self.game_data):
-                                backup = os.path.join(backup_root, os.path.relpath(target, self.game_data))
-                            else:
-                                backup = os.path.join(self.work, ".deadlock-backups", os.path.basename(backup_root),
-                                                      os.path.relpath(target, self.work))
+                            backup = self.backup_target(backup_root, target)
                             os.makedirs(os.path.dirname(backup), exist_ok=True); shutil.copy2(target, backup); backups[target] = backup
                     for source, target in outputs:
                         temp = target + ".ship-clone-tmp"; shutil.copy2(source, temp); os.replace(temp, target); promoted.append(target)
@@ -589,19 +586,14 @@ class Project:
             outputs.append((ranks_stage, self.commander_levels_path))
             import shutil
             import datetime
-            backup_root = os.path.join(self.game_data, ".deadlock-backups",
-                                       "commander-editor-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+            backup_root = os.path.join(self.backups, "commander-editor-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
             backups = {}
             promoted = []
             try:
                 for _, target in outputs:
                     os.makedirs(os.path.dirname(target), exist_ok=True)
                     if os.path.isfile(target):
-                        if os.path.commonpath([os.path.abspath(target), os.path.abspath(self.game_data)]) == os.path.abspath(self.game_data):
-                            backup = os.path.join(backup_root, os.path.relpath(target, self.game_data))
-                        else:
-                            backup = os.path.join(self.work, ".deadlock-backups", os.path.basename(backup_root),
-                                                  os.path.relpath(target, self.work))
+                        backup = self.backup_target(backup_root, target)
                         os.makedirs(os.path.dirname(backup), exist_ok=True)
                         shutil.copy2(target, backup); backups[target] = backup
                 for source, target in outputs:
@@ -646,13 +638,13 @@ class Project:
         """copy [(staged bytes, target path)] into the work tree atomically, backing up what they replace;
         on any failure every target is restored. Returns the backup folder (or None)."""
         import datetime, shutil
-        backup_root = os.path.join(self.game_data, ".deadlock-backups", label + "-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+        backup_root = os.path.join(self.backups, label + "-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
         backups, promoted = {}, []
         try:
             for _data, target in outputs:
                 if os.path.isfile(target):
-                    backup = os.path.join(backup_root, os.path.basename(target))
-                    os.makedirs(backup_root, exist_ok=True); shutil.copy2(target, backup); backups[target] = backup
+                    backup = self.backup_target(backup_root, target)
+                    os.makedirs(os.path.dirname(backup), exist_ok=True); shutil.copy2(target, backup); backups[target] = backup
             for data, target in outputs:
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 temporary = target + "." + label + "-tmp"
@@ -758,8 +750,8 @@ class Project:
                 result = bymod.apply(path, staged, body.get("layout") or {})
                 backup = None
                 if os.path.isfile(target):
-                    backup_root = os.path.join(self.game_data, ".deadlock-backups", "bays-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
-                    os.makedirs(backup_root, exist_ok=True); backup = os.path.join(backup_root, stem); shutil.copy2(target, backup)
+                    backup_root = os.path.join(self.backups, "bays-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+                    backup = self.backup_target(backup_root, target); os.makedirs(os.path.dirname(backup), exist_ok=True); shutil.copy2(target, backup)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 shutil.copy2(staged, target + ".bays-tmp"); os.replace(target + ".bays-tmp", target)
             finally:
@@ -1025,9 +1017,8 @@ class Project:
         backup = None
         with self.lock:
             if os.path.isfile(target):
-                backup = target + ".bak"
-                if os.path.exists(backup): backup = target + "." + time.strftime("%Y%m%d-%H%M%S") + ".bak"
-                shutil.copy2(target, backup)
+                backup = self.backup_target(os.path.join(self.backups, "bundle-import-" + time.strftime("%Y%m%d-%H%M%S")), target)
+                os.makedirs(os.path.dirname(backup), exist_ok=True); shutil.copy2(target, backup)
             fd, temporary = tempfile.mkstemp(prefix=".bundle-import-", dir=bundle_dir)
             os.close(fd)
             try:
@@ -1314,9 +1305,8 @@ class Project:
                     import shutil, tempfile, time
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     if overwrite:
-                        backup = src + ".bak"
-                        if os.path.exists(backup): backup = src + "." + time.strftime("%Y%m%d-%H%M%S") + ".bak"
-                        shutil.copy2(src, backup)
+                        backup = os.path.join(self.backups, "bundle-overwrite-" + time.strftime("%Y%m%d-%H%M%S"), os.path.basename(src))
+                        os.makedirs(os.path.dirname(backup), exist_ok=True); shutil.copy2(src, backup)
                     fd, temporary = tempfile.mkstemp(prefix=".bundle-save-", dir=os.path.dirname(dst)); os.close(fd)
                     try:
                         shutil.copy2(produced, temporary); os.replace(temporary, dst)
@@ -1328,6 +1318,12 @@ class Project:
             output = "\n".join(lines) + "\nSaved bundle to " + dst + "\n"
         return {"ok": r.returncode == 0, "output": output[-20000:], "dst": dst if r.returncode == 0 and not inspect else None,
                 "backup": backup, "cmd": " ".join(cmd[3:])}
+
+    def backup_target(self, backup_root, target):
+        """where a replaced file goes inside a backup folder: its path relative to the work folder (or its name)"""
+        target = os.path.abspath(target)
+        inside = os.path.commonpath([target, self.work]) == self.work
+        return os.path.join(backup_root, os.path.relpath(target, self.work) if inside else os.path.basename(target))
 
     # ---- DLL patches (the work-tree copy is the continuing source) ----
     def managed_dir(self):
@@ -1540,14 +1536,14 @@ class Project:
         dll_target = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
         outputs = [(candidate, dll_target)] + asset_outputs
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_root = os.path.join(metadata, "backups", "editor-update-" + stamp)
+        backup_root = os.path.join(self.backups, "editor-update-" + stamp)
         promoted = []
         with self.lock:
             try:
                 for _, target in outputs:
                     os.makedirs(os.path.dirname(target), exist_ok=True)
                     if os.path.isfile(target):
-                        backup = os.path.join(backup_root, os.path.relpath(target, self.game_data))
+                        backup = self.backup_target(backup_root, target)
                         os.makedirs(os.path.dirname(backup), exist_ok=True)
                         shutil.copy2(target, backup)
                 for source, target in outputs:
@@ -1582,8 +1578,8 @@ class Project:
         r = self.run_staged("dll", cmd, 300)
         return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr).replace(self.stage_root, self.work), "dst": dst}
 
-PATH_KEYS = ("levels", "dll", "bundles", "work")
-STATE = {"cfg": {"levels": "", "dll": "", "bundles": "", "work": config.resolve(config.DEFAULTS["work"])}, "P": None, "error": ""}
+PATH_KEYS = ("levels", "dll", "bundles", "work", "backups")
+STATE = {"cfg": {"levels": "", "dll": "", "bundles": "", "work": config.resolve(config.DEFAULTS["work"]), "backups": ""}, "P": None, "error": ""}
 
 
 def _need(v, k, what):
@@ -1684,7 +1680,9 @@ def configure(cfg, save=True):
     if cfg["bundles"] and not os.path.isdir(cfg["bundles"]): raise ValueError("ship asset folder not found: %r" % cfg["bundles"])
     if config.same_file(os.path.join(cfg["work"], "BSG_Data"), cfg["levels"]):
         raise ValueError("the level data folder cannot be the work folder's BSG_Data tree; choose the game's default level-data folder")
-    try: P = Project(cfg["levels"], cfg["dll"], cfg["work"], cfg["bundles"] or None)
+    try: config.backups_root(cfg["work"], cfg["backups"] or None)
+    except SystemExit as e: raise ValueError(str(e))
+    try: P = Project(cfg["levels"], cfg["dll"], cfg["work"], cfg["bundles"] or None, cfg["backups"] or None)
     except BaseException as e: raise ValueError(str(e) or "could not read the level data")
     STATE.update(cfg=cfg, P=P, error="")
     if save or migrated:
@@ -1694,7 +1692,7 @@ def configure(cfg, save=True):
 
 def config_info():
     P = STATE["P"]; c = STATE["cfg"]
-    return {**c, "ready": P is not None, "error": STATE["error"], "tables": len(P.table_files) if P else 0,
+    return {**c, "backups_effective": P.backups if P else "", "ready": P is not None, "error": STATE["error"], "tables": len(P.table_files) if P else 0,
             "bundle_files": P.bundle_files() if P else [], "base_bundle_files": P.base_bundle_files() if P else [], "bundle_dir": P.bundles if P else c["bundles"],
             "home": os.path.expanduser("~")}
 
@@ -3054,7 +3052,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
  bundle.message=el('span',{class:'hint'},'Save ship in the top bar writes the bundle into the work tree under BSG_Data/StreamingAssets/.');
  bundle.output=el('pre',{hidden:true});
  actions.replaceChildren(el('h3',{},'Saving the bundle'),
-   el('label',{class:'f chk',title:'A .bak backup is made beside the file first'},bundle.overwriteBox,'Save over the opened bundle file instead of the work tree (makes a backup)'),
+   el('label',{class:'f chk',title:'The file is first copied to the backups folder (Settings)'},bundle.overwriteBox,'Save over the opened bundle file instead of the work tree (makes a backup)'),
    el('div',{class:'row'},bundle.message),bundle.output);
 }
 // Subsystem crew modifiers (weapons --subsystem-modifier / --clear-subsystem-modifiers): a table editor that keeps
@@ -3457,10 +3455,11 @@ function loadSettings(){const box=$('#tab-settings'),I=state.info;
   row('s_levels','Default level-data folder','Choose the game’s BSG_Data folder. The DLL and ship folders can be elsewhere and are set separately.',I.levels,false),
   row('s_bundles','Default ship-bundle folder','Choose the game’s StreamingAssets folder or another folder of ship bundles. Same-named files in the work copy take priority.',I.bundles,false),
   row('s_dll','Default game DLL file','Choose Assembly-CSharp.dll wherever it is installed. Edited DLL copies go into the work tree under BSG_Data/Managed/.',I.dll,true),
+  row('s_backups','Backups folder','Copies of files the editor replaces. Leave empty for a work-backups folder beside the work folder. It must be outside the work folder, which is merged into the game.',I.backups,false),
   row('s_work','Work folder','Keeps your edits in a merge-ready tree: BSG_Data/ level files, StreamingAssets/ ship bundles, and Managed/Assembly-CSharp.dll. Decrypted scratch files stay in a hidden tool folder.',I.work,false),
   el('div',{class:'row'},el('button',{class:'pri',id:'s_save',onclick:saveSettings},'Save and load'),el('span',{id:'s_msg',class:I.error?'msg-bad':'hint'},I.error||'')))}
 async function saveSettings(){const m=$('#s_msg');$('#s_save').disabled=true;m.className='hint';m.textContent='loading the level data (about 15 seconds)...';
- try{state.info=await api('/api/config',{levels:$('#s_levels').value,dll:$('#s_dll').value,bundles:$('#s_bundles').value,work:$('#s_work').value});bundleForm=undefined;localisationEditor=undefined;delete $('#tab-armaments').dataset.ready;
+ try{state.info=await api('/api/config',{levels:$('#s_levels').value,dll:$('#s_dll').value,bundles:$('#s_bundles').value,work:$('#s_work').value,backups:$('#s_backups').value});bundleForm=undefined;localisationEditor=undefined;delete $('#tab-armaments').dataset.ready;
   shipRequest++;activeBundle=undefined;openedBundles.clear();state.pending={};state.cur=null;state.data=null;$('#view').replaceChildren(el('p',{class:'hint'},'Pick a ship on the left.'));
   for(const t of ['dll','tools'])delete $('#tab-'+t).dataset.ok;await loadShips();updPend();m.className='msg-ok';m.textContent='loaded '+state.info.tables+' level file(s) with the ship table.';showTab('ships')}
  catch(e){m.className='msg-bad';m.textContent=e.message}$('#s_save').disabled=false}

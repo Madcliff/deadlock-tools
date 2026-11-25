@@ -23,7 +23,7 @@ that changed in one go:
 | Custom-module DLL, repair-shortcut assets | `work/BSG_Data/Managed/`, `level3`, `resources.assets` | `/api/editor/update` → `dll patch` + module build |
 
 The bundle is written once per save. Prerequisites such as turnaround-repair shortcuts are checked first. Under
-**Saving the bundle**, *Save over the opened bundle file* writes over the source file and keeps a `.bak` beside it.
+**Saving the bundle**, *Save over the opened bundle file* writes over the source file after copying it to the backups folder.
 Without it, the save goes into the work tree. **Discard changes** throws away level, bundle and layout edits.
 
 | Area | Controls | Endpoint → tool |

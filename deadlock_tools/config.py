@@ -35,8 +35,8 @@ elif os.path.isfile(PROJECT_DIR):
 SETTINGS_FILE = os.path.join(PROJECT_DIR, "deadlock.json")
 OLD_SETTINGS_FILE = os.path.expanduser("~/.deadlock_ships.json")      # the GUI's settings before the reorganisation
 
-KEYS = ("levels", "dll", "bundles", "work")
-DEFAULTS = {"levels": "", "dll": "", "bundles": "", "work": "work"}
+KEYS = ("levels", "dll", "bundles", "work", "backups")
+DEFAULTS = {"levels": "", "dll": "", "bundles": "", "work": "work", "backups": ""}
 WORK_PATHS = {"levels": (), "dll": ("Managed",), "bundles": ("StreamingAssets",)}
 KINDS = tuple(WORK_PATHS)
 HELP = {
@@ -44,6 +44,7 @@ HELP = {
     "dll": "the game's Assembly-CSharp.dll",
     "bundles": "folder with ship bundles",
     "work": "editable work folder",
+    "backups": "folder for backups of replaced files (default: <work>-backups beside the work folder)",
 }
 
 
@@ -91,6 +92,18 @@ def setting(key, override=None, required=True):
     if not value and required:
         raise SystemExit("no '%s' path set (%s): pass --%s PATH, or save it once with:  python -m deadlock_tools config --%s PATH"
                          % (key, HELP[key], key, key))
+    return value
+
+
+def backups_root(work=None, override=None):
+    """Where replaced files are backed up: --backups / the 'backups' setting, else '<work>-backups' beside the work
+    folder. Never inside the work folder, which mirrors BSG_Data and gets merged into the game."""
+    value = os.path.abspath(os.path.expanduser(override)) if override else resolve(load().get("backups", ""))
+    if not value:
+        value = os.path.abspath(work or setting("work")).rstrip(os.sep) + "-backups"
+    work_root = os.path.abspath(work or setting("work", required=False) or "")
+    if work_root and os.path.commonpath([value, work_root]) == work_root:
+        raise SystemExit("the backups folder %s is inside the work folder %s; choose a folder outside it" % (value, work_root))
     return value
 
 

@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 out/
 work/
+work-backups/
 deadlock.json
 dist/
 tests/regression_inputs.json
