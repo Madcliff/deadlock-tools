@@ -84,7 +84,7 @@ How the layout is built:
 5. `trench.check(path)` re-reads the bundle (`bundle_mount_layout`). It verifies `MeshScale`, the closest 3D pair,
    distance to other groups, mirror symmetry and distance to the hull surface.
 
-Result installed in the work tree (backup `work/.deadlock-tools/backups/mk2-trench-20261124-073147`): 30 turrets, none
+Result installed in the work tree (backup `work-backups/mk2-trench-20261124-073147`): 30 turrets, none
 removed. Upper row z 80.58: 8 guns at x ±1.6 … ±12.0. Floor row z 78.59: 8 at ±3.2 … ±12.8. Then 7 mirrored pairs
 down the side grooves (z 75.4 to 56.2, x ±13.3 to ±17.0). Closest pair 4.00 game units, nearest other turret group
 33.4, largest pivot-to-surface distance 0.17, all `MeshScale` 1.0.
@@ -94,7 +94,7 @@ donor's values (match by GameObject name: local position, rotation, `InitialAngl
 `Quadrant`) and removes mounts the donor lacks, such as the `_xN` clones. Mount Transform scales are left alone, so on a
 `--ship-scale` hull the turrets stay stock size and sit in proportion. On 2026-11-25 the MK2 was reset to the vanilla
 Mercury this way: 48 mounts (10 fore railguns), the 20 bow clones removed (backup
-`work/.deadlock-tools/backups/mk2-reset-mounts-20261125-025213`).
+`work-backups/mk2-reset-mounts-20261125-025213`).
 
 `upper_rows=2` gives a more compact mouth: 15 under the jaw (8 at z 80.58, 7 at z 83.78), 9 across the floor
 including one on the centre line, and 3 pairs down the grooves to z 69.0.
