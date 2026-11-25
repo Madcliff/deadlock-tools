@@ -3,8 +3,9 @@
 They need game files, so they are skipped unless tests/regression_inputs.json exists (copy
 tests/regression_inputs.example.json and fill in your paths). Each input is checked against the hash it had when the
 expected outputs were recorded; a different input file skips that test instead of failing it.
-"levels" must be an unmodded level folder: every level file is checked, so installing edited levels into it skips
-the shipdb tests (keep a clean copy for the tests).
+"levels" must be the vanilla level folder (GOG 1.5.113, identical to Steam's; BSG/Battlestar.Galactica.Deadlock.zip has
+the originals): every level file is checked, so installing edited levels into it skips the shipdb tests (keep a clean
+copy for the tests). The bundles are the vanilla ones too: mercury_enc is the game file, mercury_dec its decryption.
 
     python -m unittest tests.test_regression -v
 """
@@ -14,23 +15,23 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 INPUTS_FILE = os.path.join(HERE, "regression_inputs.json")
 INPUT_SHA1 = {   # the input files the expected hashes were made from
     "dll": "f036ae751809d34e257b7bbc325c6f7f8251b49e",            # unpatched Assembly-CSharp.dll
-    "level0": "ee0a41809d2ed1958c24d62b2634a6e5f501769f",         # <levels>/level0 .. level97 (unmodified game levels)
-    "mercury_dec": "0d15aa1ca98fde9e80bde2bd53547d94f3ab79a2",    # decrypted colonialmercury.dec
+    "level0": "c4ed9359355b5a5f39a1872ca66467a8ff74603c",         # <levels>/level0 .. level97 (vanilla GOG 1.5.113 = Steam)
+    "mercury_dec": "7691029324507a1b1a416ccea180444be6d48796",    # decrypted vanilla colonialmercury.dec
     "orion_dec": "0c2d95780c6478a2f15b3439c25d9ac7ca6fbf7d",      # decrypted colonialorion.dec
-    "mercury_enc": "a11060eaa9200e202619772e413155ade96e630b",    # encrypted colonialmercury (game file)
+    "mercury_enc": "3d3fa51f2b719e9aafec13121a7cf7c50fa78ae2",    # encrypted vanilla colonialmercury (game file)
 }
-LEVEL_SHA1 = {   # every level file the shipdb tests read; "level0" in need() checks all of them
-    "level0": "ee0a41809d2ed1958c24d62b2634a6e5f501769f", "level1": "f08668032c13494fcb6158829c46120f0695deaf",
-    "level3": "dd4038e40441cc91b050854b2cef8f7ba7d5a274", "level5": "8808a0be3de4f8710285eb99cfd1c5f3cdbd6312",
-    "level6": "b6a717d5f60836899a185ba376846e22d361b71b", "level7": "dda264d1d90811944240563242f0d47d034313f1",
-    "level8": "99a3f3e80e1b02c64ae30c82f8e1733a11136067", "level85": "f6aeee5f3b1b8a4f23d7b277a994f1a6af252a1e",
-    "level9": "d85ab2c22562011ecd6334f4be2571b139cdcb5d", "level97": "88af62ae9282e352f8b1b6975ffcd7460f6ca407",
+LEVEL_SHA1 = {   # every level file the shipdb tests read; "level0" in need() checks all of them (vanilla GOG 1.5.113 = Steam)
+    "level0": "c4ed9359355b5a5f39a1872ca66467a8ff74603c", "level1": "1305ba1cfce58f689c974cafec33c0eeb0612b27",
+    "level3": "1bc6f987db51de9d4d25c75246385b1d2a2514fa", "level5": "17c189e4130683e15c5e453d17a92270ff2f9881",
+    "level6": "375f01eeeecdec8ed89f800089d07280568d2e10", "level7": "fd9526ca283a0308a63d12f001ab0151a777270b",
+    "level8": "55b2a32dd803c081523e29a91af22bf77614a5bc", "level85": "0833e12ab08d59d6147a00c524dddc3c718dc5cc",
+    "level9": "7694966687618c543a85d44965f34d32b5eb2c10", "level97": "de9b19fcd31c4e16b410fcefb69c779f2ae86635",
 }
-SET_LEVELS = {"level0": "86b9870f9ef6df8379ce01207a44bd524791863c", "level1": "137df9bf81ff14ab3a0bdfd920b8c2a3f1826ee1", "level3": "df25e4cc27f30aab4a496471747f4d90c86f874c",
-              "level5": "06e67d22bac85f2ff418c9b4d59e98a23284ed32", "level6": "b3b37161adf77f2bec048e89880e2c5fc5067c77", "level7": "ec4f97265f5067cfb5bf9ff3cda8c4e74de6b954",
-              "level8": "970edce93414624c2f50b35a464cd76d8c7887fc", "level85": "2a479b34e2df93194d1bec1f508dd6d14ce6f126", "level9": "e986a2b9dfc770b87678f2bf5a8a108e46920706",
-              "level97": "f6f286efddf61df8eeefb855e283d5b53acc5937"}
-CMD_LEVELS = {"level5": "835219def95d67826be35876b4e5d756cb6c14f9", "level85": "78e30f486046edd5ada9fc8097f1b0ecdc771953", "level9": "72bf904cc3615af8fba6566be2faf08274d9cb18"}
+SET_LEVELS = {"level0": "577c611cb6101fc7fa17b5e80c4955e5754999d7", "level1": "ad734e393e5dbec33307cf1fb40da0253c05298e", "level3": "b1289e651559d8b2c0a7c024ba76ece0e8a7260a",
+              "level5": "a17a3e4304e6eaa2940841ce9e3fa67fa27d0427", "level6": "15ff9964b7e2e58339a1738c5c73a65c44232236", "level7": "c5ddeaecb1506de11adaf012b000b97050216986",
+              "level8": "890a436a353ae41b27c619e5ec3a0edc28f6a206", "level85": "58a84d82e321c666ea395303bd13958fed7a1d88", "level9": "dca72937cd1c86127cec019671e9c3d195a4bc52",
+              "level97": "25c872ef3710f8bb9bc9d0f742a896f13af10054"}
+CMD_LEVELS = {"level5": "a6c9e0c4143e9355d2df8fe33341654a81c95916", "level85": "cda79dc76d156b9b51d3f8af34858e92978cce2e", "level9": "f714b8da41eb284211a759c6178497ec2d92e779"}
 
 
 def sha1(path):
@@ -92,16 +93,17 @@ class Regression(unittest.TestCase):
 
     def test_xor_round_trip(self):
         self.need("mercury_enc", "mercury_dec")
-        self.run_tool("xor", "decrypt", INPUTS["mercury_enc"], "--work", self.out)
-        self.assertHash(os.path.join(self.out, "decrypted", os.path.basename(INPUTS["mercury_enc"]) + ".dec"), "18e27ea2fd67b9b478a89992b15f2f1b624a013c")
+        # vanilla game file -> the vanilla .dec input, and back to the game file byte for byte
+        self.run_tool("xor", "decrypt", INPUTS["mercury_enc"], "-o", self.out)
+        self.assertHash(os.path.join(self.out, "decrypted", os.path.basename(INPUTS["mercury_enc"]) + ".dec"), INPUT_SHA1["mercury_dec"])
         self.run_tool("xor", "encrypt", INPUTS["mercury_dec"], "-o", self.out)
-        self.assertHash(os.path.join(self.out, "bundles", "colonialmercury"), "66a80bb4bd895d0d47163b047b84c1c7465b7d68")
+        self.assertHash(os.path.join(self.out, "bundles", "colonialmercury"), INPUT_SHA1["mercury_enc"])
 
     def test_shipdb_reads(self):
         self.need("dll", "level0")
         p = ["--levels", INPUTS["levels"], "--dll", INPUTS["dll"], "-o", self.out]       # empty output folder: read the originals
-        for args, expected in ((["list"], "96eaa83fb1b78608e75a5fd009649b9bbf98dfe8"), (["show", "viper mk1"], "66c8c43e07174ed6fd0d42c8268ba83cf445a826"),
-                               (["munitions"], "175c3b34dcae132e11aeea4430445906854475fd"), (["fleetinfo"], "493b541542187bb41a437f84a72a46026cd51502")):
+        for args, expected in ((["list"], "243d68d94ffff5d54f6a4800de69bc0610bc53aa"), (["show", "viper mk1"], "66c8c43e07174ed6fd0d42c8268ba83cf445a826"),
+                               (["munitions"], "0dd12d52e83fb0c2e9539151068dd0d6ba2e8b81"), (["fleetinfo"], "493b541542187bb41a437f84a72a46026cd51502")):
             self.assertEqual(hashlib.sha1(self.run_tool("shipdb", *args, *p).encode()).hexdigest(), expected, args)
 
     def test_shipdb_edits_stack(self):
@@ -224,7 +226,7 @@ class Regression(unittest.TestCase):
         self.run_tool("weapons", INPUTS["mercury_dec"], "-o", self.out, "--clone", "fore=3", "--layout", "free", "--scale", "fore=0.7", "--clone-scale", "0.7",
                       "--fighter-slots", "5", "--utility-slots", "1", "--munition-slots", "4", "--hull-regen", "0.5", "--munition-factory",
                       "--mini-jump", "--augury", "--stealth", INPUTS["orion_dec"], "--ability-submenu")
-        self.assertHash(os.path.join(self.out, "bundles", "colonialmercury"), "4bacedcdfdf6653de6533c2eb417def427ba49f3")   # v0.4.0 labels the Abilities submenu button (descriptionID 21)
+        self.assertHash(os.path.join(self.out, "bundles", "colonialmercury"), "7bfb3342b1c11de220014c5e2fdaaacd25e808ac")   # from the vanilla Mercury (recorded 2026-11-25)
 
 
 if __name__ == "__main__":

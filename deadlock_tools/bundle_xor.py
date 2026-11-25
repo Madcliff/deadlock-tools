@@ -137,8 +137,9 @@ def main():
     a = ap.parse_args()
     key = bytes.fromhex(a.key) if a.key else None
     src = find_source(a.src, a.mode, a.bundles)
-    if a.mode == "decrypt":
-        outdir = config.work_dir()
+    if a.mode == "decrypt":                       # -o DIR: <DIR>/decrypted instead of the work scratch folder
+        outdir = os.path.join(config.out_root(a.out), "decrypted") if a.out else config.work_dir()
+        os.makedirs(outdir, exist_ok=True)
     elif a.mode == "encrypt":
         outdir = config.out_dir("bundles", a.out)
     else:
