@@ -92,7 +92,7 @@ public static class CustomJamming
                 float[] values = { float.NaN, float.NaN, float.NaN };
                 for (int i = 2; i < parts.Length; i++)
                 {
-                    string[] kv = parts[i].Split('=');
+                    string[] kv = parts[i].Split(new char[] { '=' });
                     float number;
                     if (kv.Length != 2 || !float.TryParse(kv[1], System.Globalization.NumberStyles.Float,
                             System.Globalization.CultureInfo.InvariantCulture, out number)) continue;

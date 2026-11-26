@@ -14,13 +14,17 @@ cecil="/usr/lib/mono/gac/Mono.Cecil/0.11.1.0__0738eb9f132ed756/Mono.Cecil.dll"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/deadlock-custom-modules.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
-for assembly in Assembly-CSharp.dll Assembly-CSharp-firstpass.dll UnityEngine.dll UnityEngine.CoreModule.dll UnityEngine.UI.dll; do
+for assembly in mscorlib.dll System.dll System.Core.dll Assembly-CSharp.dll Assembly-CSharp-firstpass.dll UnityEngine.dll UnityEngine.CoreModule.dll UnityEngine.UI.dll; do
   [[ -f "$managed_dir/$assembly" ]] || { echo "Missing game reference: $managed_dir/$assembly" >&2; exit 1; }
 done
 [[ -f "$source_dll" ]] || { echo "Missing source DLL: $source_dll" >&2; exit 1; }
 [[ -f "$cecil" ]] || { echo "Mono.Cecil 0.11.1 was not found at $cecil" >&2; exit 1; }
 
-mcs -target:library -out:"$work_dir/CustomModules.dll" \
+# Compile against the game's own framework (Managed/mscorlib.dll, System*.dll), not the system Mono's newer one:
+# a method the game's runtime lacks (e.g. string.Split(char, StringSplitOptions)) is then a build error instead of a
+# MissingMethodException in game.
+mcs -target:library -nostdlib -out:"$work_dir/CustomModules.dll" \
+  -r:"$managed_dir/mscorlib.dll" -r:"$managed_dir/System.dll" -r:"$managed_dir/System.Core.dll" \
   -r:"$managed_dir/Assembly-CSharp.dll" \
   -r:"$managed_dir/Assembly-CSharp-firstpass.dll" \
   -r:"$managed_dir/UnityEngine.dll" \

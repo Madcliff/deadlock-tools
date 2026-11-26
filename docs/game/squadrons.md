@@ -131,6 +131,38 @@ Edited with `shipdb allocations` / `setallocation` and the GUI's **Squadrons →
 (`deadlock_tools/squadron_table.py`). Exclusion lists are variable length, so the table object is resized; every save
 is read back, and any entry that wasn't edited must come back unchanged.
 
+## Squadron groups (why squadrons take the same orders)
+
+A launched squadron joins a squadron group when the game option **Auto-assign squadrons to groups**
+(`GameConfig.AutoAssignSquadronsToGroups`, `"AutoAssignSquadronsToGroups"` in `Documents/Black Lab Games/BSG/config.txt`)
+is on. The group is its type's `SquadronDataTable.DefaultGroup` (`JNLHLGGFCGH.KPABCKPJGHN`); with the option off,
+or `DefaultGroup` 0, it joins none. Each fleet ship keeps one group number per squadron slot in
+`FleetShip.SquadronGroupNumbers` (built with every slot at -1, "no group").
+
+A group takes orders together. Stock `DefaultGroup` is 1 for the fighters (Viper Mk I, Mk II and Mk VII; Raider
+prototype, Mk I and modern) and 0 for everything else. Copied types keep their donor's value, so
+"Viper MkVII (Missile)" is 1 too. A carrier with ten fighter slots therefore puts all ten squadrons in group 1, and
+one order moves them all: the battle log shows one `MoveToLocation` line per squadron for a single order.
+
+To command them separately:
+
+- **In battle:** each fighter squadron's action menu has an **Assign Group** submenu (radial position 2).
+  It holds seven `AssignSquadronGroupAction` buttons:
+
+  | Button | `targetGroup` | Text id | Radial position |
+  |---|---|---|---|
+  | No group | 0 | 304, "remove" | 1 |
+  | Red | 1 | 881 | 4 |
+  | Blue | 2 | 882 | 5 |
+  | Yellow | 3 | 883 | 6 |
+  | Green | 4 | 884 | 7 |
+  | Black | 5 | 1507 | 2 |
+  | White | 6 | 1508 | 3 |
+
+  Copied types keep the submenu (Viper MkVII (Missile) has it).
+- **Turn the game option off.** Squadrons then launch with no group.
+- **Set Default group to 0** on the Squadrons tab for the type. This applies on every carrier.
+
 ## Reviving destroyed squadrons
 
 The stock game brings a destroyed squadron back only in **Survival**. `ShipInfo.ReviveSquadron()` returns at once

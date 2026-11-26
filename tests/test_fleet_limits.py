@@ -64,3 +64,12 @@ class DllCommand(unittest.TestCase):
             self.assertIsNone(SK.read(path)["campaign_ships"])
             r = self.run_dll("patch", "-o", tmp, "--skirmish-ships", "500")
             self.assertNotEqual(r.returncode, 0)
+
+
+class BuildUsesGameFramework(unittest.TestCase):
+    def test_compiles_against_game_mscorlib(self):
+        # the system Mono's newer mscorlib let string.Split('#') compile to Split(char, StringSplitOptions), which the
+        # game's runtime lacks (MissingMethodException broke the skirmish fleet-cap and match-type lists in 0.6.0)
+        script = open(os.path.join(ROOT, "scripts", "build_custom_modules.sh")).read()
+        self.assertIn("-nostdlib", script)
+        self.assertIn('-r:"$managed_dir/mscorlib.dll"', script)

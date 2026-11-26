@@ -65,7 +65,7 @@ public static class CustomSkirmishFleetCap
             if (!File.Exists(path)) return;
             foreach (string raw in File.ReadAllLines(path))
             {
-                string line = raw.Split('#')[0].Trim();
+                string line = raw.Split(new char[] { '#' })[0].Trim();
                 if (line.Length == 0) continue;
                 string[] parts = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
                 if (parts[0] == "ships" && parts.Length > 1)
