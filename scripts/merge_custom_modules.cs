@@ -258,7 +258,7 @@ static class MergePrototype
     static void InjectSkirmishFleetCap(ModuleDefinition module, TypeDefinition helper)
     {
         var mpDataTables = module.Types.Single(t => t.Name == "MPDataTables");
-        var include32k = helper.Methods.Single(m => m.Name == "Include32k" && m.Parameters.Count == 1);
+        var include32k = helper.Methods.Single(m => m.Name == "IncludeLargeCaps" && m.Parameters.Count == 1);
         foreach (var name in new[] { "GetFleetPointOptionsPvP", "GetFleetPointOptionsCoOp" })
         {
             var getter = mpDataTables.Methods.Single(m => m.Name == name && m.Parameters.Count == 0);
@@ -271,7 +271,43 @@ static class MergePrototype
             getter.Body.GetILProcessor().InsertBefore(returns[0], Instruction.Create(OpCodes.Call, include32k));
             getter.Body.MaxStackSize = Math.Max(getter.Body.MaxStackSize, 1);
         }
-        Console.WriteLine("Added 32,000 fleet-cap choice to skirmish PvP and co-op option lists");
+        Console.WriteLine("Added the extra fleet-cap choices (default 32,000 and 64,000) to skirmish PvP and co-op option lists");
+
+        // Ships per skirmish / multiplayer fleet: every read of SkirmishDataTables.maxShips (its three getters) is
+        // followed by CustomSkirmishFleetCap.MaxShips(value), which swaps in the configured count when one is set.
+        var maxShips = helper.Methods.Single(m => m.Name == "MaxShips" && m.Parameters.Count == 1);
+        var skirmish = module.Types.Single(t => t.Name == "SkirmishDataTables");
+        int reads = 0;
+        foreach (var method in skirmish.Methods.Where(m => m.HasBody))
+        {
+            var il = method.Body.GetILProcessor();
+            foreach (var ins in method.Body.Instructions.ToList())
+                if (ins.OpCode == OpCodes.Ldfld && ins.Operand is FieldReference f && f.Name == "maxShips" &&
+                    !(ins.Next != null && ins.Next.OpCode == OpCodes.Call && ins.Next.Operand is MethodReference n && n.Name == maxShips.Name))
+                { il.InsertAfter(ins, Instruction.Create(OpCodes.Call, maxShips)); reads++; }
+        }
+        if (reads == 0) throw new InvalidOperationException("no SkirmishDataTables.maxShips reads found");
+        Console.WriteLine("Routed skirmish ships-per-fleet through CustomSkirmishFleetCap (" + reads + " read(s))");
+
+        // Capital ships per campaign fleet: every read of FleetInfo.MaxShips (battle queue, fleet panels, FleetGroup)
+        // is followed by CustomSkirmishFleetCap.CampaignMaxShips(value).
+        var campaignShips = helper.Methods.Single(m => m.Name == "CampaignMaxShips" && m.Parameters.Count == 1);
+        int campaignReads = 0;
+        foreach (var type in module.Types.SelectMany(t => new[] { t }.Concat(t.NestedTypes)))
+        {
+            if (type.FullName == helper.FullName) continue;
+            foreach (var method in type.Methods.Where(m => m.HasBody))
+            {
+                var il = method.Body.GetILProcessor();
+                foreach (var ins in method.Body.Instructions.ToList())
+                    if (ins.OpCode == OpCodes.Ldfld && ins.Operand is FieldReference f && f.Name == "MaxShips" &&
+                        f.DeclaringType.Name == "FleetInfo" &&
+                        !(ins.Next != null && ins.Next.OpCode == OpCodes.Call && ins.Next.Operand is MethodReference n && n.Name == campaignShips.Name))
+                    { il.InsertAfter(ins, Instruction.Create(OpCodes.Call, campaignShips)); campaignReads++; }
+            }
+        }
+        if (campaignReads == 0) throw new InvalidOperationException("no FleetInfo.MaxShips reads found");
+        Console.WriteLine("Routed campaign capital ships-per-fleet through CustomSkirmishFleetCap (" + campaignReads + " read(s))");
     }
 
     static void InjectCommanderStatModifierHooks(ModuleDefinition module, TypeDefinition helper)
@@ -558,6 +594,125 @@ static class MergePrototype
         Console.WriteLine("Replaced fixed three-choice commander level lookups with per-ability unlock ranks");
     }
 
+    static void InjectStealthFallbackHooks(ModuleDefinition module, TypeDefinition helper)
+    {
+        // StealthModule and StealthBatteryWidget call TechLab rate getters (and SubSystemBase.IsOffline on their
+        // TechLab field) with no null check, so stealth throws on ships without a Tech Bay (fighter squadrons).
+        // Each call becomes a static CustomStealthFallback call taking the same TechLab: stack-compatible, stock
+        // behaviour with a TechLab, Orion full-health rates without one. Decoy copies (CMGEDHHPHFB, AIACKIPACHL:
+        // the recharge range under another name) are redirected too.
+        var drain = helper.Methods.Single(m => m.Name == "Drain");
+        var recharge = helper.Methods.Single(m => m.Name == "Recharge");
+        var offline = helper.Methods.Single(m => m.Name == "IsOffline");
+        int wrapped = 0;
+        foreach (var target in new[] { "StealthModule", "StealthBatteryWidget" })
+        {
+            var type = module.Types.SingleOrDefault(t => t.Name == target);
+            if (type == null) continue;
+            foreach (var method in type.Methods.Where(m => m.HasBody))
+            {
+                foreach (var ins in method.Body.Instructions.ToList())
+                {
+                    if ((ins.OpCode != OpCodes.Call && ins.OpCode != OpCodes.Callvirt) || !(ins.Operand is MethodReference mr)) continue;
+                    MethodDefinition hook = null;
+                    if (mr.DeclaringType.Name == "TechLab" && mr.Parameters.Count == 0 && mr.ReturnType.FullName == "System.Single")
+                    {
+                        if (mr.Name == "get_StealthDrainRate") hook = drain;
+                        else if (mr.Name == "get_StealthRechargeRate" || mr.Name == "CMGEDHHPHFB" || mr.Name == "AIACKIPACHL") hook = recharge;
+                    }
+                    else if (mr.Name == "get_IsOffline" && mr.DeclaringType.Name == "SubSystemBase" && ins.Previous != null &&
+                             ins.Previous.OpCode == OpCodes.Ldfld && ins.Previous.Operand is FieldReference fr &&
+                             fr.FieldType.Name == "TechLab")
+                        hook = offline;
+                    if (hook == null) continue;
+                    ins.OpCode = OpCodes.Call;
+                    ins.Operand = hook;
+                    wrapped++;
+                }
+            }
+        }
+        Console.WriteLine("Injected stealth fallbacks for ships without a Tech Bay (" + wrapped + " call(s))");
+    }
+
+    static void InjectJammingHooks(ModuleDefinition module, TypeDefinition helper)
+    {
+        // Per-jammer jamming effects (dll_modules/CustomJamming.cs). Jammer's set_IsJammed(value) calls become
+        // CustomJamming.SetJammed(target, value, this); in every method that checks IsJammed and reads a
+        // JammingPenaltyInfo field, the check becomes CustomJamming.IsJammed(ship) and each field read
+        // (ldfld on the struct's address) becomes CustomJamming.MaxVelocity / Evade / Accuracy(ref info).
+        // Methods that read the penalties without an IsJammed check (the ship-info tooltip) are left alone.
+        var setJammed = helper.Methods.Single(m => m.Name == "SetJammed");
+        var isJammed = helper.Methods.Single(m => m.Name == "IsJammed");
+        var readers = new Dictionary<string, MethodDefinition> {
+            { "MaxVelocityPenalty", helper.Methods.Single(m => m.Name == "MaxVelocity") },
+            { "EvadePenalty", helper.Methods.Single(m => m.Name == "Evade") },
+            { "AccuracyPenalty", helper.Methods.Single(m => m.Name == "Accuracy") } };
+        int sets = 0, checks = 0, reads = 0;
+        var jammer = module.Types.Single(t => t.Name == "Jammer");
+        foreach (var method in jammer.Methods.Where(m => m.HasBody && !m.IsStatic))
+        {
+            var il = method.Body.GetILProcessor();
+            foreach (var ins in method.Body.Instructions.ToList())
+            {
+                if ((ins.OpCode == OpCodes.Call || ins.OpCode == OpCodes.Callvirt) && ins.Operand is MethodReference mr &&
+                    mr.Name == "set_IsJammed" && mr.DeclaringType.Name == "DestructableAssetInfo")
+                {
+                    il.InsertBefore(ins, Instruction.Create(OpCodes.Ldarg_0));
+                    ins.OpCode = OpCodes.Call; ins.Operand = setJammed; sets++;
+                }
+            }
+            method.Body.MaxStackSize = Math.Max(method.Body.MaxStackSize, 4);
+        }
+        foreach (var type in module.Types.SelectMany(t => new[] { t }.Concat(t.NestedTypes)))
+        {
+            if (type.FullName == helper.FullName) continue;
+            foreach (var method in type.Methods.Where(m => m.HasBody))
+            {
+                var body = method.Body.Instructions;
+                bool readsPenalty = body.Any(i => i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference f &&
+                                                  f.DeclaringType.Name == "JammingPenaltyInfo");
+                bool checksJammed = body.Any(i => (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
+                                                  i.Operand is MethodReference m && m.Name == "get_IsJammed" &&
+                                                  m.DeclaringType.Name == "DestructableAssetInfo");
+                if (!readsPenalty || !checksJammed) continue;
+                foreach (var ins in body.ToList())
+                {
+                    if ((ins.OpCode == OpCodes.Call || ins.OpCode == OpCodes.Callvirt) && ins.Operand is MethodReference m &&
+                        m.Name == "get_IsJammed" && m.DeclaringType.Name == "DestructableAssetInfo")
+                    { ins.OpCode = OpCodes.Call; ins.Operand = isJammed; checks++; }
+                    else if (ins.OpCode == OpCodes.Ldfld && ins.Operand is FieldReference f &&
+                             f.DeclaringType.Name == "JammingPenaltyInfo" && readers.ContainsKey(f.Name))
+                    { ins.OpCode = OpCodes.Call; ins.Operand = readers[f.Name]; reads++; }
+                }
+            }
+        }
+        Console.WriteLine("Injected per-jammer jamming effects (" + sets + " jam flag(s), " + checks + " check(s), " + reads + " penalty read(s))");
+
+        // Capital-ship jamming: BattleSimulation's Jam / JamCancel command handlers only act on ships whose prefab sets
+        // ShipInfo.IsProxy (squadrons), so a capital ship's Jam order was accepted but never set Jammer.JamActive and
+        // its Jamming button read "off" again the next turn. In every method that reads IsProxy and then calls
+        // Jammer.set_JamActive, the IsProxy read becomes CustomJamming.CanCommandJam(ship) (IsProxy or has a Jammer).
+        var canJam = helper.Methods.Single(m => m.Name == "CanCommandJam");
+        int gates = 0;
+        foreach (var type in module.Types.SelectMany(t => new[] { t }.Concat(t.NestedTypes)))
+        {
+            if (type.FullName == helper.FullName) continue;
+            foreach (var method in type.Methods.Where(m => m.HasBody))
+            {
+                var body = method.Body.Instructions;
+                bool setsActive = body.Any(i => (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
+                                                i.Operand is MethodReference m && m.Name == "set_JamActive" &&
+                                                m.DeclaringType.Name == "Jammer");
+                if (!setsActive) continue;
+                foreach (var ins in body)
+                    if (ins.OpCode == OpCodes.Ldfld && ins.Operand is FieldReference f && f.Name == "IsProxy" &&
+                        f.DeclaringType.Name == "ShipInfo")
+                    { ins.OpCode = OpCodes.Call; ins.Operand = canJam; gates++; }
+            }
+        }
+        Console.WriteLine("Let capital ships with a Jammer take jam orders (" + gates + " check(s))");
+    }
+
     static void Main(string[] args)
     {
         var resolver = new DefaultAssemblyResolver();
@@ -663,6 +818,10 @@ static class MergePrototype
             InjectModuleSubsystemHooks(mod, destType);
         if (srcType.Name == "CustomCommanderAbilityLevels")
             InjectCommanderAbilityLevelHooks(mod, destType);
+        if (srcType.Name == "CustomStealthFallback")
+            InjectStealthFallbackHooks(mod, destType);
+        if (srcType.Name == "CustomJamming")
+            InjectJammingHooks(mod, destType);
         target.Write(args[2]);
         Console.WriteLine("Merged " + destType.FullName + " into " + args[2]);
     }

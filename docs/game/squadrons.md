@@ -130,3 +130,264 @@ Raptor and Sagittaron Viper Mk I exclude 11 (Daidalos).
 Edited with `shipdb allocations` / `setallocation` and the GUI's **Squadrons → Carrier allocations** view
 (`deadlock_tools/squadron_table.py`). Exclusion lists are variable length, so the table object is resized; every save
 is read back, and any entry that wasn't edited must come back unchanged.
+
+## Reviving destroyed squadrons
+
+The stock game brings a destroyed squadron back only in **Survival**. `ShipInfo.ReviveSquadron()` returns at once
+unless `BattleManager.BattleType` is 6 (battle types: 0 StoryMission, 1 ResourceMission, 2 CampaignRandomEncounter,
+3 MultiplayerSkirmish_PvP, 4 MultiplayerSkirmish_CoOp, 5 SingleplayerSkirmish, 6 Survival, 7 Tutorial). Survival's
+two static helpers are its only callers. For a dead squadron (not alive, or `FighterSquadron.Status` 5 Destroyed) it
+does this:
+
+1. sets `Status` to 1 (Unlaunched, i.e. docked);
+2. publishes game event 26 (`FightersDocked`) with the squadron's GameObject;
+3. zeroes the squadron's `Force.ConstantForce`;
+4. sets hull to `MaxHealth`.
+
+Only a squadron that is still alive gets `RestoreFighters()`. `FighterSquadron.Status` values: 0 Unknown,
+1 Unlaunched, 2 Launching, 3 Launched, 4 Recalled, 5 Destroyed, 6 Boarded, 7 BoardingRetreat.
+`DestructableAssetInfo.IsAlive` is just `hullHealth.currentHealth > 0`, and `SetInitialHullPoints(h)` sets current
+hull directly.
+
+When a squadron dies, `BattleManager` ("Dealing with a dead ship") takes it out of the battle's ship list and its
+fleet's list, records its UID, and keeps its GameObject in the hulk list (`GetHulksForFaction`). Nothing destroys the
+object. It stays in its carrier's `ShipInfo.Children`, so it can be revived.
+
+`CustomSquadronReplacementModule` (`dll_modules/`) first called `ReviveSquadron()`. Outside Survival that did nothing,
+so a destroyed squadron never came back: the module filled its counter, saw the squadron still dead, and retried
+every tick. Seen 2026-11-25 in a battle with the Colonial Mercury MK2: `ColonialRaptorSquadron_0031` died 312 s in
+and was not replaced over the remaining ~600 s. The module now does steps 1–3 itself and then sets the hull to one
+fighter's share (the smallest loss threshold). Then it finishes the landing teardown as before (removes the squadron
+from the simulation, registers the docked fighters, sets the action to 0, deactivates the GameObject), so the
+carrier's normal hangar repair (`RepairCrew.FighterRepairRate`) refills it from there. Status, `Force` and the
+`FightersDocked` publish go through reflection, because the status property and the `Force` field have obfuscated
+names in this build.
+
+## Where a squadron type lives
+
+A squadron type is spread over four places. "Copy and add a squadron type" (`shipdb addsquadron`) writes all of them:
+
+| Place | What it holds |
+|---|---|
+| `sharedassets9.assets` | the **prefab**: a GameObject tree (root `<Name>Squadron` with the components above; children `Actions`, `Weapon`, `Engines` ...). Abilities live here |
+| `level9` `SquadronFactory` | squadron id → prefab pointer (`PPtr(6, path id)`, file 6 = `sharedassets9.assets`); `BattleShipSpawner` calls `SquadronFactory.Create(id)` |
+| `SquadronDataTable` (six level copies) | one entry per type: faction, fighter ship type, munitions, info-panel ability names, costs, text IDs |
+| `Assembly-CSharp.dll` | the squadron enum (obfuscated `MEAAHENKKPG`; anchor `ColonialRaptorSquadron = 2`, vanilla highest 114). Campaign stock data (`ShipStockData`) iterates it with `Enum.GetValues`, so new ids get a member |
+
+The individual fighters are **not** in the prefab: they come from the ship bundle of the fighter ship type
+(`SquadronDataTable.ShipType` / `FighterSquadron.ShipType`, e.g. 9 → `ShipFactory` → bundle `colonialraptor`). A new
+squadron type that keeps its donor's fighter needs no new bundle. Fighter weapons and veterancy are in that fighter's
+ship-database row, which every squadron type using the fighter shares.
+
+Text: `descriptionID` is in the `default` localisation table (the name in the info panel), `descriptionHeaderID` and
+`descriptionBodyID` in `blueprint_descriptions`.
+
+Offering: in skirmish a type is offered when `includedInMultiplayer` is set (`JNLHLGGFCGH.BGNPDHJFGII`); in a
+campaign only when its id is in the save's `CampaignState.UnlockedSquadrons`, which research fills (next section).
+
+## Abilities
+
+Abilities are action components on the prefab, each with a `radialMenuPosition` (0–7) and, mostly, a helper
+component on the prefab root:
+
+| Ability | Action | Helper | Info-panel text ID | Stock carriers |
+|---|---|---|---|---|
+| Board target | `BoardAction` | – | 34 | Raptor, Single Raptor, Heavy Raider |
+| Disarm | `DisarmAction` | `DisarmAgent` | 833 | Raptor, Sweeper, Wardriver |
+| Boost firewalls | `BoostFirewallsAction` | – | 967 | Raptor, Single Raptor |
+| Hack target | `HackTargetAction` | `HackModule` | 441 | Wardriver |
+| Jamming mode | `JammingAction` | `Jammer` | 995 | Wardriver |
+| Deploy chaff | `ChaffCloudAction` | `ChaffCloudAgent` | 33 | Sweeper |
+| Paint target | `PaintTargetAction` | `PaintTargetModule` | 971 | Assault Raptor |
+| Bomb target | `BombTargetAction` | `BombTargetModule` | – | Cylon Bomber |
+| Fire munitions | `FireMissileAction` | `MissileLauncher` (child of `Weapon`) | 232 Fire Munitions / 25 Fire Rockets | Raptor, Assault Raptor, Scorpion |
+
+Settings (on the helper component; Abilities card inputs, `shipdb setsquadronability SQ set ABILITY field=value`):
+
+| Ability | Fields (stock) |
+|---|---|
+| Deploy chaff | `ChaffCloudAgent.maxStock` 10 = the chaff supply (set full in `Awake`, refilled on `FightersDocked`, i.e. landing), `releaseInterval` 80 ticks, `minRangeFromPreviousClouds` 50 |
+| Disarm | `DisarmAgent.disarmRange` 500 |
+| Hack target | `HackModule.HackStrength` 0.6, `HackRange` 300 |
+| Jamming mode | `Jammer.jamRange` 150, `jamMissileChance` 0.6 |
+| Paint target | `PaintTargetModule.accuracyBuff` 15, `range` 400 |
+| Bomb target | `BombTargetModule.bombRange` 1, `bombVerticalOffset` 0.5, `moveOutRange` 150, `missileType` 26 (the munition dropped) |
+| Stealth | `StealthModule.batteryMax`, `destealthCooldownTurns`, `activeByDefault` |
+
+Board, Boost firewalls and Fire munitions have no settings of their own. A helper is per prefab, so settings change one
+squadron type only.
+
+Not covered: the Scorpion's `SentryTargetPriorityAction` (+ `SentryAgent`, `StabilisationModule`) and the
+reinforcement raptor's `RaptorChangeReinforcementTargetAction` (+ `ReinforcementMarines`).
+
+The main menu always uses 0 Recall, 1 Move, 2 Assign group (a `SubMenuAction`, `descriptionID` 880), 3 Defend at
+location, 4 Select target, 5 Defend; 6 and 7 are free. The Raptor's abilities sit in a submenu: a `SubMenuAction`
+(slot 7, `descriptionID` 21 "Abilities", `Icon` 8) whose `SubMenu` points at the child GameObject `Actions/Abilities`,
+which holds a `BackAction` in slot 0 and the ability actions in 1–7. `SquadronDataTable.AbilityIDs` are only text IDs
+for the info panel (`ONLMCNHFBIO` passes them to `TextRepository.GetItem`). Several stock squadrons carry a
+`DisarmAgent` without a `DisarmAction` (Taipan, the story raptors), so the toolkit leaves it in place when Disarm is
+removed; other helpers go with the last action that uses them.
+
+The toolkit copies an ability (and its helper, and for Fire munitions the donor's `MissileLauncher` GameObject) from a
+donor prefab into the squadron's Abilities submenu, creating the submenu in main slot 7 (or 6) when missing. When the main
+menu is full (Assault Raptor: Fire munitions 6, Paint target 7; Wardriver: Hack 6, Jamming 7), the ability in slot 7
+(or 6; Fire munitions stays if it can) moves into the new submenu's slot 1 and the submenu button takes its slot.
+
+## Munitions
+
+`SquadronDataTable.MunitionSlots` lists the munition types (MissileDataTable ids, the same as capital ships use) a
+squadron spawns with; `BattleShipSpawner` hands it to `ShipInfo.ConfigureMunitions`. Its filter
+(`KBHEGPGCPJC.DNNMFPCFEBB`) logs `Mismatch between ShipInfo munition slots ...` when the count differs from the
+fighter ship row's `MunitionSlots`, and swaps a munition of another faction for the faction default (`Ship faction
+{0} is trying to use munition type ...`). Both only log; every slot still loads. Firing them takes **one `FireMissileAction` per munition**: at battle start
+`MJDBEJECJMN.OBEGIIMCLHP` pairs the squadron's `GetComponentsInChildren<FireMissileAction>()` (hierarchy order) with its
+munitions, giving button *i* munition *i* (`set_MissileType`, `set_Slot`) for `min(buttons, munitions)` pairs. A
+munition without a button never shows. The toolkit keeps the count equal: extra buttons are copies of the first, put in
+the Abilities submenu (after the main-menu one in hierarchy order), and a squadron given munitions without any button
+gets the Fire munitions ability and a MissileLauncher. Stock data always matches
+(Raptor, Single Raptor and Delivery Raptor: Raptor Torpedo 12; Assault Raptor: 20; Scorpion: 19). The toolkit refuses
+foreign munitions and keeps the fighter's count in step.
+
+When the new count would clash with another squadron type on the same fighter (e.g. giving a copy of the Raptor two
+munitions while the Raptor and Single Raptor keep one on fighter 9), the squadron first gets **its own fighter**:
+a copy of the fighter's ship-database row in every level file with a ship table (level0, 1, 3, 5, 6, 7, 8, 85, 9,
+97), its `ProjectionFactory` (all six scene levels), `ShipImageDataTable` and `ShipFactory` (level5, 85, 9) entries,
+a copy of the fighter bundle with the new `ShipInfo.ShipType` and its own CAB names (`<type name>fighter<id>`), and a
+`CustomShip<id>` ShipType member in the DLL. The squadron prefab's `ShipInfo.ShipType` and `FighterSquadron.ShipType`
+and its table entry's `ShipType` then point at the copy. Fighters have no `FleetModelFactory` entry.
+
+
+## Prefab file format notes
+
+`sharedassets9.assets` has no type trees. MonoBehaviours are read with trees generated from the DLLs (UnityPy +
+TypeTreeGeneratorAPI). All 979 objects of the 21 squadron prefabs round-trip byte for byte. The generated
+MonoBehaviour header leaves out the alignment after `m_Enabled`, so `m_Script` reads as garbage (the later fields line
+up again); script names are taken from the raw bytes (file id and path id at offset 16) and resolved against
+`globalgamemanagers.assets`.
+
+## Research
+
+Campaigns unlock squadron types through the research tree: `WarRoomDataTables.BlueprintInfo` in **level5** and
+**level85** (identical copies). It has one entry per campaign (`Campaign`: 0 Deadlock, 1 Quorum, 2 Sin and Sacrifice,
+3 Galactica Rebirth, 4 Ghost Fleet, 5 Armistice) with four lists: `CapitalShipUnlocks`, `MunitionUnlocks`,
+`SquadronUnlocks`, `BattlestarShipUnlocks`. `BlueprintSquadronUnlock` uses the same generic entry
+(`CHDPKHPONLG<T>`) as the ship entries, with obfuscated fields:
+
+| Field | Meaning |
+|---|---|
+| `ODOMECMDGKJ` | squadron type id |
+| `GEIBBHBCKAM` | story mission that must be completed first (-1 = none) |
+| `GKIMOHIEFNI` | cost in research points |
+| `NPFHKIHKKIC` | short label on the research node |
+| `HJGFMHOLHPG` | unlocked from the start |
+| `COPOFKMOPIH` | second flag (false in every stock entry) |
+
+Stock: Viper Mk I and Raptor unlocked at start (not in Quorum), Viper Mk II 800 RP, Sweeper 400, Assault Raptor 600
+and, from Galactica Rebirth, Taipan 600 (mission 39 there). In Deadlock and Quorum the Mk II, Sweeper and Assault
+Raptor need missions 5, 6 and 17. The Viper Mk VII and Modern Raider have no entries (skirmish only).
+
+The research panel rebuilds its list from these entries every time it opens (`GBEPGGLDNMC.KPJBEHEGPHJ`), so added
+entries show in existing campaigns. A squadron entry's state (`GBEPGGLDNMC.IKIHCCPCAAC`, enum Locked / Available /
+Purchased / Unavailable): **Purchased** when flagged unlocked or already in `UnlockedSquadrons`; **Unavailable** when
+the type is missing from the `SquadronDataTable` or its DLC is not owned; **Available** once the required mission is
+completed (`BICIKLMBCLG`: `LastStoryMissionCompleted` or `StoryMissionsCompleted`); **Locked** otherwise. Buying it
+adds it to `UnlockedSquadrons`. The unlocked flag is copied into `UnlockedSquadrons` when a campaign starts
+(`CampaignStartingResourcesInfo`), so in an existing campaign a newly flagged entry shows as purchased but is not
+offered in carrier slots until a new campaign.
+
+Edited with `shipdb squadronresearch` / `setsquadronresearch` and the Research card (`deadlock_tools/squadron_research.py`).
+
+## Stealth
+
+Stealth is `StealthModule` (battery, drain/recharge, cooldown) plus `StealthAction` (the button). Stock carriers: the
+Colonial Orion (and copies such as the user's Mercury MK2). The Orion's `StealthModule` serializes `batteryMax` 100,
+`destealthCooldownTurns` 1, `activeByDefault` 1 and two effect GameObjects (`stealthEffect`, toggled with
+`SetActive`; `changeStealthEffect`, passed to `Instantiate` with no null check on every stealth change).
+`StealthAction` serializes only `ActionBase`'s `radialMenuPosition` / `hideInMenu`; it looks for a TechLab only on
+capital ships and guards its "Tech Bay Offline" text against a missing one. Text 1534 is "Stealth".
+
+The rates come from the ship's **Tech Bay** (`TechLab`, found in `StealthModule.Awake` with
+`ShipInfo.GetSubSystem<TechLab>()`): per battle tick the battery loses `TechLab.StealthDrainRate / 10` while stealthed
+and gains `StealthRechargeRate / 10` otherwise, and stealth is cancelled when `TechLab.IsOffline`. The rates evaluate
+`stealthDrainRate` (FloatCurveRange Start 8 → End 0.1, Power 5) and `stealthRechargeRate` (FloatRange 0.5–2) at the
+Tech Bay's health; at full health that is drain 0.1 and recharge 2. Without a TechLab `Awake` only logs "Could not find
+TechLab on ship", but every rate or IsOffline call then throws. Squadrons have no subsystems, so:
+
+* The custom-module DLL's `CustomStealthFallback` (`dll_modules/`, injected by `InjectStealthFallbackHooks` in
+  `scripts/merge_custom_modules.cs`) turns the TechLab rate getters (including the decoy copies `CMGEDHHPHFB` and
+  `AIACKIPACHL`) and the `IsOffline` call in `StealthModule` and `StealthBatteryWidget` (10 call sites) into static
+  calls that return the stock value with a TechLab and the full-health values (drain 0.1, recharge 2, never offline)
+  without one. Every custom-module build includes it; ships with a Tech Bay behave as before.
+* `sharedassets9.assets` has no type entry for either script (no squadron used them), and both MonoScripts are in
+  `globalgamemanagers.assets` (StealthModule 905, StealthAction 2618). A new MonoBehaviour type there needs a
+  script-type entry (file 1 = globalgamemanagers, the MonoScript's path id) and a type whose script ID is
+  **MD4(class name + "Assembly-CSharp.dll")** and whose type hash is the MonoScript's **`m_PropertiesHash`**
+  (checked against DisarmAgent and Jammer). The toolkit adds both, then the two components; the effects are two empty,
+  inactive child GameObjects (`StealthEffect`, `ChangeStealthEffect`), so there is no shimmer.
+
+Untested in game: whether enemies stop targeting a stealthed squadron and which squadron commands cancel stealth
+(`StealthAction.IsCommandAllowedInStealth`).
+
+UnityPy note: an object is read from its place in the source file; only saving uses the edited `data`. The toolkit
+points every object it writes at a reader over its new bytes, so in-session reads (and clones) see the edit.
+
+## Jamming on capital ships
+
+`Jammer` acts on what is around it: every squadron reference in it is to the ship being jammed (enemy squadrons in
+`jamRange`, tracked in `jameeSquadronIDList`; capital ships it finds are treated differently), and it rolls
+`jamMissileChance` against missiles in range. Nothing assumes its own ship is a squadron, so it works on a capital
+ship. `JammingAction` finds its Jammer with a parent search (button in an `Actions` child, Jammer on the root, as on the
+Wardriver); its `HackTargetAction` link is null-checked everywhere. The jam sound plays through the root's
+`AudioSource` only when there is one (`PlayOneShot` is guarded); the Wardriver's clip (path 1174) is in
+`sharedassets9.assets`, which a ship bundle cannot reference, so a ship's jammer has no clip.
+
+No ship bundle contains either script, so `weapons --jamming` writes both into the bundle the way the custom modules
+are written: a MonoScript record (`Assembly-CSharp.dll`, no namespace) and a type tree per class. Jammer's serialized
+fields: `jamRange` float, `jamMissileChance` float, `jamAudioClip` `PPtr<$AudioClip>`, `visualiseLayer` string
+(Wardriver: `UI_3D`), `assignToSelf` bool. `JammingAction` serializes only `ActionBase`'s `radialMenuPosition` /
+`hideInMenu`. Type-tree conventions copied from the game's own bundles: strings `string -1 / 0x8000` → `Array 0x4001`
+→ `size`, `data` (`0x1`) as colonialcelestra's `predefinedName`; object pointers 12 bytes with `m_FileID` / `m_PathID`
+at `0x800001` as the Orion's StealthModule effects. Default range 500 (the Wardriver's 150 is squadron-sized), missile
+chance 0.6.
+
+**Turning it on needs the custom-module DLL.** The Jamming button queues a `Jam` (33) or `JamCancel` (34) command;
+`BattleSimulation` runs them in `PGJCKKJJNKA` / `LANLGKDOLED`, which call `ShipInfo.Jammer.set_JamActive(true/false)`
+only when the ship's `ShipInfo.IsProxy` is set. `IsProxy` is never written by code: it is a prefab field, 1 on squadron
+prefabs and 0 on capital ships. On a stock DLL a capital ship's Jam order is accepted, shown as pending (the button
+lights because the command exists), then does nothing, so the button reads "off" again next turn (the game log still
+lists `<ship> - Jam` each time). `InjectJammingHooks` swaps that `IsProxy` read for `CustomJamming.CanCommandJam` (IsProxy
+or a Jammer on the ship) in every method that then calls `set_JamActive` (the two handlers plus an unused decoy).
+Everything after that is stock: `ShipInfo.Tick` calls `Jammer.Tick` for any ship; while `jamActive` it jams enemy ships
+that are `IsProxy` (squadrons, not capital ships) and in range, and rolls against guided missiles. It switches off on
+`JamCancel`, a Hack order, or its ship's death.
+
+## Launch bays
+
+A carrier launches a squadron only from a `LaunchPoint` whose `LaunchCompatibility` (a list of squadron types) contains
+the squadron's type: `MJDBEJECJMN.FindLaunchPoint(type)` checks `Contains`. The lists live in each carrier's ship bundle
+(vanilla Colonial carriers: fighter bays `0, 1` (+ `113` with the Modern Ships pack), utility bays `2, 3, 4, 5`, some
+with `104`). A new squadron type is in none of them, so it is offered in a carrier slot but never launches.
+"Copy and add a squadron type" / `shipdb addsquadron` therefore also adds the new type to every bay that takes the
+donor, on every carrier allowed to carry it (same faction, fighter or utility slots, not on its `shipExclusionList`;
+bundle names from `ShipFactory`). For an existing type: the Launch bays card or
+`shipdb setsquadronbays PREFAB [--launch-like PREFAB]` (default: the stock squadron whose name the prefab name contains).
+Carriers excluded later through the allocation grid keep the entry; carriers allowed later need the action again.
+
+## Jamming effects
+
+A `Jammer` flags squadrons and fighters in `jamRange` `IsJammed` (and records the team: `LastTeamJammedBy`) and rolls
+`jamMissileChance` to `Missile.Redirect` missiles. What a jammed ship suffers is one global struct,
+`DataTables.JammingPenalty` (level5, level85, level9): `MaxVelocityPenalty` -1.2 (read in the fleet ship class's
+`get_MaxVelocity`), `EvadePenalty` -15 (14 reads in the hit calculation) and `AccuracyPenalty` 0 (read in
+`WeaponInfo`, for the jammed ship's own weapons). The ship-info tooltip shows the same values. The game does not record
+which jammer jammed a ship, so stock jamming has one effect for every jammer.
+
+Edited globally with the Squadrons tab's **Jamming effects** view or `shipdb setjamming global evade=-20 ...`.
+Per jammer: the custom-module DLL's `CustomJamming` (`dll_modules/`, injected by `InjectJammingHooks`) routes the
+Jammer's 8 `set_IsJammed` calls through `SetJammed(target, value, jammer)`, which remembers the jamming ship, and in
+every method that checks `IsJammed` and then reads a penalty field (16 reads; not the tooltip) turns the check into
+`IsJammed(ship)` and the read into `MaxVelocity / Evade / Accuracy(ref info)`. Those return the jammer's own value from
+`StreamingAssets/deadlock-jamming.txt` (`squadron <type id> evade=-25 ...`, `ship <ship id> speed=-2 ...`), else the
+global value. The jammer key is `FighterSquadron.SquadronShipType` for a squadron, `ShipInfo.ShipType` for a ship.
+Untested in game.
+

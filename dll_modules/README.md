@@ -109,8 +109,11 @@ game installation directory.
 
 The 2026-11-21 EMP targeting correction includes capital ships in the shared
 EMP target query and replaces linked multi-point PCM input with sequential
-independent 3D point selections. The 32,000 fleet-cap option is included in
-skirmish PvP and co-op choices. The combined candidate was installed in both
+independent 3D point selections. `CustomSkirmishFleetCap` reads `StreamingAssets/deadlock-fleet.txt` (written by
+`dll patch --skirmish-ships/--fleet-caps/--campaign-ships` or the DLL page): extra
+skirmish fleet caps (default 32,000 and 64,000), ships per skirmish fleet
+(`SkirmishDataTables.maxShips` reads) and capital ships per campaign fleet
+(`FleetInfo.MaxShips` reads). The combined candidate was installed in both
 the work overlay and GOG install; the prior DLL is backed up under
 `.deadlock-backups/emp-3d-selector-fix-20261121/Managed/Assembly-CSharp.dll`.
 The subsequent fighter-jamming update applies the native `IsJammed` flag to
@@ -131,3 +134,6 @@ For a manual one-type merge, the script takes
 `TARGET SOURCE OUTPUT REFERENCES TYPE_NAME`. Each step writes a new DLL so the
 input remains untouched. The build script performs the four merges in order
 and writes only the requested candidate output.
+
+- `CustomStealthFallback.cs`: static helpers that `StealthModule` / `StealthBatteryWidget` call instead of the TechLab rate getters and `IsOffline`, so stealth works on ships without a Tech Bay (squadrons). Injected by `InjectStealthFallbackHooks`.
+- `CustomJamming.cs`: per-jammer jamming penalties read from `StreamingAssets/deadlock-jamming.txt`; Jammer flags and the penalty reads are routed through it by `InjectJammingHooks`, which also lets the Jam / JamCancel commands act on capital ships with a Jammer (`CanCommandJam` in place of the stock squadron-only `ShipInfo.IsProxy` check).

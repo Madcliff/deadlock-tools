@@ -31,6 +31,15 @@ FIELDS = {
     "MaxHullPoints": ("float", "Hull pool (level copy)", "Hull shown by the UI; keep equal to the prefab's"),
 }
 
+# list fields: label in the log.  AbilityIDs are text IDs of the ability names listed in the squadron's info panel
+# (the abilities themselves are components on the prefab, see squadron_types.py)
+LIST_FIELDS = {"shipExclusionList": "excluded carriers", "AbilityIDs": "info-panel abilities",
+               "MunitionSlots": "munition slots"}
+# text IDs: descriptionID in the "default" localisation table (the name), the other two in "blueprint_descriptions"
+TEXT_FIELDS = ("descriptionID", "descriptionHeaderID", "descriptionBodyID")
+# other plain ints the toolkit sets itself (not offered in the allocation grid): ShipType = the fighter's ship-database id
+HIDDEN_INT_FIELDS = TEXT_FIELDS + ("ShipType",)
+
 
 def find(S, data):
     """(pid, offset, size, parsed) of the SquadronDataTable object in a level file, or None"""
@@ -79,7 +88,8 @@ def allowed(res, ship_id, faction, utility_slot=False):
 
 
 def apply(S, data, edits):
-    """Apply {type id or name: {field: value, 'shipExclusionList': [ship ids]}} to the table in one level file.
+    """Apply {type id or name: {field: value, 'shipExclusionList' / 'AbilityIDs' / 'MunitionSlots': [ints]}} to the
+    table in one level file.
     Returns (new bytes, log). Raises ValueError if the file has no table or a check fails."""
     found = find(S, data)
     if not found:
@@ -91,18 +101,21 @@ def apply(S, data, edits):
         e = entry(res, key)
         want = expected.setdefault(e["id"], {})
         for field, value in changes.items():
-            if field == "shipExclusionList":
-                ids = sorted({int(x) for x in value}) if value is not None else []
-                pos = e["_off"]["shipExclusionList"][0]
-                old = e["shipExclusionList"]
+            if field in LIST_FIELDS:
+                # the exclusion list is a set (kept sorted); ability text IDs and munition slots keep their order
+                ids = [int(x) for x in (value or [])]
+                if field == "shipExclusionList":
+                    ids = sorted(set(ids))
+                pos = e["_off"][field][0]
+                old = e[field]
                 splices.append((pos, 4 + 4 * len(old), struct.pack("<i", len(ids)) + b"".join(struct.pack("<i", i) for i in ids)))
                 want[field] = ids
-                if sorted(old) != ids:
-                    log.append("%s: excluded carriers %s -> %s" % (e["name"], sorted(old), ids))
+                if list(old) != ids:
+                    log.append("%s: %s %s -> %s" % (e["name"], LIST_FIELDS[field], list(old), ids))
                 continue
-            if field not in FIELDS:
-                raise ValueError("cannot edit %r. Editable: %s, shipExclusionList" % (field, ", ".join(FIELDS)))
-            kind = FIELDS[field][0]
+            if field not in FIELDS and field not in HIDDEN_INT_FIELDS:
+                raise ValueError("cannot edit %r. Editable: %s, %s, %s" % (field, ", ".join(FIELDS), ", ".join(LIST_FIELDS), ", ".join(TEXT_FIELDS)))
+            kind = FIELDS[field][0] if field in FIELDS else "int"
             pos = e["_off"][field][0]
             if kind == "bool":
                 value = value in (True, 1, "1", "true", "True", "yes")
@@ -128,7 +141,7 @@ def apply(S, data, edits):
     for type_id, fields in expected.items():
         for field, value in fields.items():
             got = by_id[type_id][field]
-            ok = sorted(got) == value if field == "shipExclusionList" else \
+            ok = list(got) == value if field in LIST_FIELDS else \
                 (abs(got - value) <= 1e-5 * max(1.0, abs(value)) if isinstance(value, float) else got == value)
             if not ok:
                 raise ValueError("verification failed for %s.%s: wrote %s, read back %s" % (by_id[type_id]["name"], field, value, got))
@@ -137,4 +150,46 @@ def apply(S, data, edits):
         a = {k: v for k, v in e.items() if k != "_off"}; b = {k: v for k, v in by_id[e["id"]].items() if k != "_off"}
         if a != b:
             raise ValueError("verification failed: %s changed although it was not edited" % e["name"])
+    return result, log
+
+
+def add_type(S, data, donor, type_id, name, changes=None):
+    """Append squadron type `type_id` named `name` to the table in one level file: a copy of the donor's entry,
+    then `changes` applied (as in apply). Returns (new bytes, log). An existing entry with that id is left alone."""
+    found = find(S, data)
+    if not found:
+        raise ValueError("no %s in this file" % TABLE)
+    pid, off, size, res = found
+    if any(e["id"] == int(type_id) for e in res["objects"]):
+        return bytes(data), []
+    d = entry(res, donor)
+    items = res["objects"]
+    index = items.index(d)
+    array_end = min(position for field, (position, _code) in res["_off"].items() if field != "objects")
+    row_start = d["_off"]["name"][0]
+    row_end = items[index + 1]["_off"]["name"][0] if index + 1 < len(items) else array_end
+    mono = bytes(data[off:off + size])
+    encoded = str(name).encode("utf-8")
+    if not encoded or b"\0" in encoded:
+        raise ValueError("invalid squadron type name %r" % name)
+    name_field = struct.pack("<i", len(encoded)) + encoded
+    name_field += b"\0" * ((-len(name_field)) % 4)
+    id_pos = d["_off"]["id"][0]
+    row = name_field + struct.pack("<i", int(type_id)) + mono[id_pos + 4:row_end]
+    last_end = array_end
+    new_mono = bytearray(mono[:last_end] + row + mono[last_end:])
+    array_start = res["_off"]["objects"][0]
+    struct.pack_into("<i", new_mono, array_start, len(items) + 1)
+    result = sd.resize_object(bytes(data), pid, bytes(new_mono))
+    after = find(S, result)
+    added = [e for e in after[3]["objects"] if e["id"] == int(type_id)] if after else []
+    if len(added) != 1 or added[0]["name"] != str(name):
+        raise ValueError("verification failed: the new squadron type did not read back")
+    plain = lambda e: {k: v for k, v in e.items() if k not in ("_off", "name", "id")}
+    if plain(added[0]) != plain(d):
+        raise ValueError("verification failed: the new squadron type is not a copy of %s" % d["name"])
+    log = ["added squadron type %s (%d), a copy of %s (%d)" % (name, int(type_id), d["name"], d["id"])]
+    if changes:
+        result, more = apply(S, result, {int(type_id): changes})
+        log += more
     return result, log

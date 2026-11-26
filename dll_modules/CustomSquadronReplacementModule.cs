@@ -10,6 +10,10 @@ public sealed class CustomSquadronReplacementModule : EventReceiverBehaviour
     private static readonly MethodInfo SimulationGetter = typeof(BattleManager).GetMethod("get_BattleSimulation", InstanceMethods);
     private static readonly MethodInfo LaunchPointGetter = typeof(FighterSquadron).GetMethod("get_LaunchPoint", InstanceMethods);
     private static readonly MethodInfo ActionSetter = typeof(FighterSquadron).GetMethod("set_Action", InstanceMethods);
+    private static readonly MethodInfo StatusSetter = typeof(FighterSquadron).GetMethod("set_Status", InstanceMethods);
+    private static readonly FieldInfo ForceField = FindForceField();
+    private const int StatusUnlaunched = 1;              // FighterSquadron status enum: 1 Unlaunched (docked), 5 Destroyed
+    private const int EventFightersDocked = 26;          // HMFMLKKCBDN.FightersDocked
     [SerializeField] public float baseTicksPerReplacement = 5f;
     [SerializeField] public float modifierRate = 1.0f;
     [SerializeField] public int modifierField = (int)FEDNAJLFKEF.SquadronRepair;
@@ -67,9 +71,16 @@ public sealed class CustomSquadronReplacementModule : EventReceiverBehaviour
                 ? bay.transform : ship.transform;
             child.transform.SetPositionAndRotation(hangar.position, hangar.rotation);
 
-            child.ReviveSquadron();
-            if (!(bool)AliveGetter.Invoke(child, null)) return;
+            // Not ShipInfo.ReviveSquadron(): it returns at once unless BattleType is Survival (6), so in skirmish and
+            // campaign battles the squadron stayed dead. Do its dead-squadron branch here instead.
+            if (StatusSetter != null)
+                StatusSetter.Invoke(squadron, new object[] {
+                    System.Enum.ToObject(StatusSetter.GetParameters()[0].ParameterType, StatusUnlaunched) });
+            if (IDIKLNMNBIC != null)
+                IDIKLNMNBIC.Publish((HMFMLKKCBDN)EventFightersDocked, child.gameObject);
+            ClearConstantForce(child);
             child.SetInitialHullPoints(hull);
+            if (!(bool)AliveGetter.Invoke(child, null)) return;
             replacementProgress = 0f;
 
             // Finish the same teardown as a normal landing so regular hangar repair can take over.
@@ -84,6 +95,22 @@ public sealed class CustomSquadronReplacementModule : EventReceiverBehaviour
         }
 
         replacementProgress = 0f;
+    }
+
+    private static FieldInfo FindForceField()
+    {
+        // ShipInfo keeps its Force component in an obfuscated private field; find it by type.
+        foreach (FieldInfo field in typeof(ShipInfo).GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public))
+            if (field.FieldType.Name == "Force") return field;
+        return null;
+    }
+
+    private static void ClearConstantForce(ShipInfo child)
+    {
+        object force = ForceField != null ? ForceField.GetValue(child) : null;
+        if (force == null || (force is Object && (Object)force == null)) return;
+        PropertyInfo constant = force.GetType().GetProperty("ConstantForce", InstanceMethods);
+        if (constant != null && constant.CanWrite) constant.SetValue(force, Vector3.zero, null);
     }
 
     private static float OneFighterHull(float maxHull, int maxFighters, float[] lossThresholds)

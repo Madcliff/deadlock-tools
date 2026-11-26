@@ -515,12 +515,26 @@ def _custom_module_type_raw(template, class_name, fields, script_index):
         node.type, node.name = source.type, source.name
         node.size, node.index, node.meta = source.size, source.index, source.meta
         nodes.append(node)
-    for name, value_type in fields:
+    def add(level, type_name, name, size, meta, tflags=0):
         node = Node()
-        node.ver, node.level, node.tflags = 1, 1, 0
-        node.type, node.name = value_type, name
-        node.size, node.index, node.meta = (1, len(nodes), 0x4000) if value_type == "bool" else (4, len(nodes), 0)
+        node.ver, node.level, node.tflags = 1, level, tflags
+        node.type, node.name = type_name, name
+        node.size, node.index, node.meta = size, len(nodes), meta
         nodes.append(node)
+    for name, value_type in fields:
+        if value_type == "string":                      # as colonialcelestra's predefinedName
+            add(1, "string", name, -1, 0x8000)
+            add(2, "Array", "Array", -1, 0x4001, 1)
+            add(3, "int", "size", 4, 0x1)
+            add(3, "char", "data", 1, 0x1)
+        elif value_type.startswith("PPtr<"):            # as the Orion's StealthModule effect pointers
+            add(1, value_type, name, 12, 0)
+            add(2, "int", "m_FileID", 4, 0x800001)
+            add(2, "SInt64", "m_PathID", 8, 0x800001)
+        elif value_type == "bool":
+            add(1, "bool", name, 1, 0x4000)
+        else:
+            add(1, value_type, name, 4, 0)
 
     hashed = bytearray()
     for node in nodes:
@@ -774,22 +788,7 @@ def load_support_donor(path):
     return file, components
 
 
-EDITABLE_ABILITY_MODULES = {
-    "RegenerativeHullResinModule": "Hull and armour regeneration",
-    "MunitionFactoryModule": "Munition Factory",
-    "CustomArmourRepairModule": "Custom armour repair",
-    "CustomInstantPlatingModule": "Instant plating",
-    "CustomSquadronReplacementModule": "Custom squadron replacement",
-    "CustomDroneResupplyModule": "Custom drone resupply",
-    "CustomMagazineCapacityModule": "Custom magazine capacity",
-    "CustomEmpPulseModule": "Experimental EMP",
-    "CustomTargetedEmpModule": "Targeted EMP",
-    "MiniJumpAgent": "Micro-FTL",
-    "PredictiveAuguryModule": "Predictive Augury",
-    "StealthModule": "Stealth",
-    **{module: ability.replace("_", " ").capitalize()
-       for ability, (module, _, _) in SUPPORT_ABILITIES.items()},
-}
+
 
 
 PREFAB_BOOLEAN_BYTES = {
@@ -815,6 +814,21 @@ CREW_MODIFIER_FIELDS = {
 INSTANT_PLATING_FIELDS = ("portPlating", "starboardPlating", "forePlating",
                           "aftPlating", "dorsalPlating", "ventralPlating")
 INSTANT_PLATING_ACTION = "CustomInstantPlatingAction"
+# Game classes written into a bundle the same way (no ship bundle has them to copy from: the Cylon Wardriver squadron
+# in sharedassets9.assets is the only user). Field lists follow the type trees generated from Assembly-CSharp.dll.
+OVERFLOW_MENU = "Abilities 2"      # second abilities submenu, made when "Abilities" holds 7 buttons
+OVERFLOW_TEXT = 707                # its button's label: "Other" (no "More abilities" text in the game)
+JAMMER_DEFINITION = {
+    "fields": (("jamRange", "float"), ("jamMissileChance", "float"), ("jamAudioClip", "PPtr<$AudioClip>"),
+               ("visualiseLayer", "string"), ("assignToSelf", "bool")),
+    # the Wardriver's values except the range (150 there, squadron-sized); its jam sound lives in sharedassets9.assets,
+    # which a bundle cannot point at, so the clip is empty
+    "defaults": {"jamRange": 500.0, "jamMissileChance": 0.6, "jamAudioClip": {"m_FileID": 0, "m_PathID": 0},
+                 "visualiseLayer": "UI_3D", "assignToSelf": False},
+}
+JAMMING_ACTION_DEFINITION = {"fields": (("radialMenuPosition", "int"), ("hideInMenu", "bool")),
+                             "defaults": {"hideInMenu": False}}
+
 CUSTOM_MODULE_DEFINITIONS = {
     "CustomInstantPlatingModule": {
         "label": "Instant plating",
@@ -865,6 +879,50 @@ CUSTOM_MODULE_DEFINITIONS = {
                      "burstIntervalTicks": 10},
     },
 }
+
+
+# Every component the ship writer can add, with the label the Ships tab shows for it as an installed ability. Built from
+# the same definitions the writer uses, so a new ability cannot be left out (tests/test_jamming.py checks it).
+EDITABLE_ABILITY_MODULES = {
+    "RegenerativeHullResinModule": "Hull and armour regeneration",
+    "MunitionFactoryModule": "Munition Factory",
+    **{cls: definition["label"] for cls, definition in CUSTOM_MODULE_DEFINITIONS.items()},
+    "MiniJumpAgent": "Micro-FTL",
+    "PredictiveAuguryModule": "Predictive Augury",
+    "StealthModule": "Stealth",
+    "Jammer": "Jamming",
+    **{module: ability.replace("_", " ").capitalize()
+       for ability, (module, _, _) in SUPPORT_ABILITIES.items()},
+}
+# per-ship jamming penalties (deadlock-jamming.txt, read by the custom-module DLL's CustomJamming)
+JAM_PENALTY_OPTIONS = {"jam_speed": "speed", "jam_evade": "evade", "jam_accuracy": "accuracy"}
+
+
+def bundle_ship_type(path):
+    """ShipInfo.ShipType of a ship bundle's prefab"""
+    bundle = read_bundle(path)
+    offset, size, *_ = bundle["nodes"][0]
+    prefab = SerFile(bundle["data"][offset:offset + size])
+    scripts = {obj.pid: prefab.read(obj)[0]["m_ClassName"] for obj in prefab.objs if obj.classid == 115}
+    types = {prefab.read(obj)[0]["ShipType"] for obj in prefab.objs if obj.classid == 114
+             and scripts.get(prefab.read(obj)[0].get("m_Script", {}).get("m_PathID")) == "ShipInfo"
+             and "ShipType" in prefab.read(obj)[0]}
+    if len(types) != 1:
+        raise ValueError("could not tell the bundle's ship type (%d ShipInfo types)" % len(types))
+    return int(types.pop())
+
+
+def set_ship_jamming(bundle_path, folder, sources, values):
+    """write the ship's per-jammer penalties into folder/deadlock-jamming.txt (starting from the first existing file
+    among folder and `sources`). values: {"speed"/"evade"/"accuracy": number or None (= global)}. Returns a log line."""
+    from deadlock_tools import jamming as jm
+    ship = bundle_ship_type(bundle_path)
+    current = next((os.path.join(d, jm.FILE) for d in [folder, *sources] if d and os.path.isfile(os.path.join(d, jm.FILE))), None)
+    overrides, log = jm.set_override(jm.read_overrides(current), "ship", ship, values)
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, jm.FILE), "wb") as stream:
+        stream.write(jm.render(overrides))
+    return (log[0] if log else "jamming effect of ship %d: no change" % ship)
 
 
 def upgrade_instant_plating(prefab):
@@ -1104,7 +1162,16 @@ def bundle_ship_stats(path):
     # FireMissileAction components = munition slot buttons in the battle UI; they must match
     # the level ship record's MunitionSlots (see docs/game/bundle-level-agreement.md).
     munition_actions = sum(1 for obj in prefab.objs if obj.classid == 114 and script_of(obj.pid) == "FireMissileAction")
+    from deadlock_tools import flak as flak_mod
+    flak_info = flak_mod.read(prefab)
+    if flak_info:
+        flak_info.update(fields=[{"key": key, "kind": kind, "min": minimum, "help": text, "label": flak_mod.LABELS[key]}
+                                 for key, (kind, minimum, text) in flak_mod.FIELDS.items()],
+                         hull=flak_mod.hull(prefab),
+                         stock=[{"ship": row[0], "hull": row[1], "armour": row[2], "distance": row[3], "length": row[4],
+                                 "radius": row[5], "bursts": row[6], "armory": list(row[7])} for row in flak_mod.STOCK])
     return {"prefab": name, "abilities": abilities, "subsystems": EDITABLE_SHIP_SUBSYSTEMS, "squadron_groups": squadron_groups,
+        "flak": flak_info,
         "munition_actions": munition_actions,
         "launch_actions": sum(1 for obj in prefab.objs if obj.classid == 114 and script_of(obj.pid) == "LaunchFightersAction"),
         "modifier_fields": [{"value": value, "label": label}
@@ -1631,7 +1698,7 @@ def layout_mount_edits(spec, bundle, prefab, mounts, value, new_pid):
     return replaced, additions, children
 
 
-def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=None, fighter_slots=None, utility_slots=None, bay_offset=(0.0, 3.0, 4.0), hull_regen=None, clones=(), list_mounts=False, clone_scale=None, scales=(), layout="offset", gap=1.5, mirror=True, munition_factory=False, hull_follow=True, min_gap=None, mini_jump=None, augury=None, stealth=None, slot_parts="buttons,bays,icons", ability_submenu=False, stealth_mesh="ship", squadron_groups=None, icon_offset=(12.0, 0.0, -4.0), inspect=False, support_abilities=None, align_launch_bays=False, bay_icons=None, support_settings=None, prefab_fields=None, ship_scale=None, respace=(), turnaround_repair_actions=1, custom_modules=(), mount_layout=None, normalize_ability_submenu=False, mirror_launch_bays=False):
+def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=None, fighter_slots=None, utility_slots=None, bay_offset=(0.0, 3.0, 4.0), hull_regen=None, clones=(), list_mounts=False, clone_scale=None, scales=(), layout="offset", gap=1.5, mirror=True, munition_factory=False, hull_follow=True, min_gap=None, mini_jump=None, augury=None, stealth=None, slot_parts="buttons,bays,icons", ability_submenu=False, stealth_mesh="ship", squadron_groups=None, icon_offset=(12.0, 0.0, -4.0), inspect=False, support_abilities=None, align_launch_bays=False, bay_icons=None, support_settings=None, prefab_fields=None, ship_scale=None, respace=(), turnaround_repair_actions=1, custom_modules=(), mount_layout=None, normalize_ability_submenu=False, mirror_launch_bays=False, jamming=None, flak=None):
     B = read_bundle(src)
     (O1, S1, F1, N1), (O2, S2, F2, N2) = B["nodes"]
     CAB = B["data"][O1:O1 + S1]; RESS = B["data"][O2:O2 + S2]
@@ -2374,11 +2441,25 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
 
     sub_state = {}
     act_used = {}                                                                             # radial positions taken in the Actions menu (shared by the abilities added below)
-    def alloc_action_pos(preferred):
+    sub2_state = {}
+
+    def alloc_action_pos(preferred, label=None):
         scr_n = {m.pid: val(m.pid)["m_ClassName"] for m in F.objs if m.classid == 115}
         cs = [o for o in F.objs if o.classid == 114 and val(o.pid).get("m_Script") and val(o.pid)["m_Script"]["m_PathID"] in scr_n]
         mv = next(o for o in cs if scr_n[val(o.pid)["m_Script"]["m_PathID"]] == "MoveAction"); g = val(mv.pid)["m_GameObject"]["m_PathID"]
         if g not in act_used: act_used[g] = {val(o.pid)["radialMenuPosition"] for o in cs if "radialMenuPosition" in val(o.pid) and val(o.pid)["m_GameObject"]["m_PathID"] == g and not val(o.pid)["hideInMenu"]}
+        if ability_submenu and not submenu_has_room(scr_n, cs, g):
+            # the Abilities submenu holds 7 buttons: overflow into a second submenu ("Abilities 2", button "Other"),
+            # created in a free slot of the Actions menu
+            menu = overflow_submenu(scr_n, cs, g)
+            if menu is None:
+                raise ValueError("the Abilities submenu is full and the Actions menu has no free slot for a second one")
+            pos = next((k for k in range(1, 8) if k not in sub2_state["used"]), None)
+            if pos is None:
+                raise ValueError("both ability submenus are full (14 abilities); no room for another ability button")
+            sub2_state["used"].add(pos)
+            print("the Abilities submenu is full: %s goes in '%s' (radial position %d)" % (label or "the button", OVERFLOW_MENU, pos))
+            return menu, pos
         if ability_submenu:
             if "go" not in sub_state:
                 existing = [
@@ -2390,6 +2471,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
                     and not v["SubMenu"]["m_FileID"]
                     and v["SubMenu"]["m_PathID"] in F.by_pid
                     and "abilit" in val(v["SubMenu"]["m_PathID"]).get("m_Name", "").casefold()
+                    and val(v["SubMenu"]["m_PathID"]).get("m_Name", "") != OVERFLOW_MENU
                 ]
                 if len(existing) > 1:
                     raise ValueError("multiple existing ability submenus; merge or rename them before editing")
@@ -2440,6 +2522,66 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
         u = act_used[g]; pos = preferred if preferred not in u else next((k for k in range(8) if k not in u), None)
         assert pos is not None, "the Actions radial menu has no free position for another ability button"
         u.add(pos); return g, pos
+
+    def overflow_submenu(scr_n, cs, g):
+        """the second abilities submenu: the existing one, or a new one in a free Actions slot (None if no slot)"""
+        if "go" in sub2_state:
+            return sub2_state["go"]
+        for obj in cs:
+            v = val(obj.pid)
+            if (scr_n[v["m_Script"]["m_PathID"]] == "SubMenuAction" and v["m_GameObject"]["m_PathID"] == g
+                    and not v["SubMenu"]["m_FileID"] and v["SubMenu"]["m_PathID"] in F.by_pid
+                    and val(v["SubMenu"]["m_PathID"]).get("m_Name", "") == OVERFLOW_MENU):
+                menu = v["SubMenu"]["m_PathID"]
+                used = {w["radialMenuPosition"] for o in cs for w in (val(o.pid),)
+                        if w["m_GameObject"]["m_PathID"] == menu and "radialMenuPosition" in w and not w.get("hideInMenu")}
+                sub2_state.update(go=menu, used=used)
+                return menu
+        u0 = act_used[g]
+        spos = next((k for k in range(1, 8) if k not in u0), None)
+        if spos is None:
+            return None
+        fgo_pid = named_menu("Fighters")
+        if fgo_pid is None:
+            raise ValueError("a second ability submenu needs an existing Fighters menu as a template")
+        fgo_ = F.by_pid[fgo_pid]
+        ftr_ = next(c["component"]["m_PathID"] for c in val(fgo_.pid)["m_Component"] if F.by_pid[c["component"]["m_PathID"]].classid == 4)
+        back_ = next(o for c in val(fgo_.pid)["m_Component"] for o in [F.by_pid[c["component"]["m_PathID"]]] if o.classid == 114 and scr_n[val(o.pid)["m_Script"]["m_PathID"]] == "BackAction")
+        smb_ = next(o for o in cs if scr_n[val(o.pid)["m_Script"]["m_PathID"]] == "SubMenuAction" and val(o.pid)["SubMenu"]["m_PathID"] == fgo_.pid)
+        ngo, ntr, nback, nsub = newpid(), newpid(), newpid(), newpid()
+        gv_ = copy.deepcopy(val(fgo_.pid)); gv_["m_Name"] = OVERFLOW_MENU; gv_["m_Component"] = [{"component": {"m_FileID": 0, "m_PathID": p_}} for p_ in (ntr, nback)]
+        tv_ = copy.deepcopy(val(ftr_)); tv_["m_GameObject"] = {"m_FileID": 0, "m_PathID": ngo}; tv_["m_Children"] = []
+        bv_ = copy.deepcopy(val(back_.pid)); bv_["m_GameObject"] = {"m_FileID": 0, "m_PathID": ngo}; bv_["radialMenuPosition"] = 0
+        sv_ = copy.deepcopy(val(smb_.pid)); sv_["SubMenu"] = {"m_FileID": 0, "m_PathID": ngo}
+        sv_["descriptionID"] = OVERFLOW_TEXT
+        u0.add(spos); sv_["radialMenuPosition"] = spos; sv_["m_GameObject"] = {"m_FileID": 0, "m_PathID": g}
+        appended.extend([(ngo, F.by_pid[fgo_.pid].tidx, F.write(F.by_pid[fgo_.pid].tidx, gv_)), (ntr, F.by_pid[ftr_].tidx, F.write(F.by_pid[ftr_].tidx, tv_)),
+                         (nback, back_.tidx, F.write(back_.tidx, bv_)), (nsub, smb_.tidx, F.write(smb_.tidx, sv_))])
+        new_pids.extend([ngo, ntr, nback, nsub]); comp_add.setdefault(g, []).append(nsub)
+        sub2_state.update(go=ngo, used={0}, father=val(ftr_)["m_Father"]["m_PathID"], tr=ntr, gov=gv_)
+        print(f"created a second ability submenu '{OVERFLOW_MENU}' (button 'Other' at radial position {spos} in the Actions menu)")
+        return ngo
+
+    def submenu_has_room(scr_n=None, cs=None, g=None):
+        """False when the ship already has an Abilities submenu with all 7 button positions taken"""
+        if not ability_submenu:
+            return False
+        if "go" in sub_state:
+            return any(k not in sub_state["used"] for k in range(8))
+        scr_n = scr_n or {m.pid: val(m.pid)["m_ClassName"] for m in F.objs if m.classid == 115}
+        cs = cs or [o for o in F.objs if o.classid == 114 and val(o.pid).get("m_Script") and val(o.pid)["m_Script"]["m_PathID"] in scr_n]
+        if g is None:
+            mv = next(o for o in cs if scr_n[val(o.pid)["m_Script"]["m_PathID"]] == "MoveAction"); g = val(mv.pid)["m_GameObject"]["m_PathID"]
+        menus = [v["SubMenu"]["m_PathID"] for obj in cs for v in (val(obj.pid),)
+                 if scr_n[v["m_Script"]["m_PathID"]] == "SubMenuAction" and v["m_GameObject"]["m_PathID"] == g
+                 and not v["SubMenu"]["m_FileID"] and v["SubMenu"]["m_PathID"] in F.by_pid
+                 and "abilit" in val(v["SubMenu"]["m_PathID"]).get("m_Name", "").casefold()
+                    and val(v["SubMenu"]["m_PathID"]).get("m_Name", "") != OVERFLOW_MENU]
+        if len(menus) != 1:
+            return True                             # none yet (one gets created) or several (alloc_action_pos reports it)
+        used = {v["radialMenuPosition"] for obj in cs for v in (val(obj.pid),)
+                if v["m_GameObject"]["m_PathID"] == menus[0] and "radialMenuPosition" in v and not v.get("hideInMenu")}
+        return any(k not in used for k in range(8))
     if normalize_ability_submenu:
         scr_n = {m.pid: val(m.pid)["m_ClassName"] for m in F.objs if m.classid == 115}
         cs = [o for o in F.objs if o.classid == 114 and val(o.pid).get("m_Script")
@@ -2501,7 +2643,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             fields = copy.deepcopy(val(action.pid))
             previous = fields["m_GameObject"]["m_PathID"]
             # Already in the ship's Abilities submenu.
-            if "abilit" not in val(previous)["m_Name"].casefold():
+            if "abilit" not in val(previous)["m_Name"].casefold() and submenu_has_room():
                 menu, position = alloc_action_pos(7)
                 owner = copy.deepcopy(current_fields(previous))
                 owner["m_Component"] = [item for item in owner["m_Component"]
@@ -2528,7 +2670,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             action = actions[0]
             fields = copy.deepcopy(val(action.pid))
             previous = fields["m_GameObject"]["m_PathID"]
-            if "abilit" not in val(previous)["m_Name"].casefold():
+            if "abilit" not in val(previous)["m_Name"].casefold() and submenu_has_room():
                 menu, position = alloc_action_pos(7)
                 owner = copy.deepcopy(current_fields(previous))
                 owner["m_Component"] = [item for item in owner["m_Component"]
@@ -2555,7 +2697,7 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             action = actions[0]
             fields = copy.deepcopy(val(action.pid))
             previous = fields["m_GameObject"]["m_PathID"]
-            if "abilit" not in val(previous)["m_Name"].casefold():
+            if "abilit" not in val(previous)["m_Name"].casefold() and submenu_has_room():
                 menu, position = alloc_action_pos(7)
                 owner = copy.deepcopy(current_fields(previous))
                 owner["m_Component"] = [item for item in owner["m_Component"]
@@ -2566,6 +2708,52 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
                 replaced[action.pid] = F.write(action, fields)
                 comp_add.setdefault(menu, []).append(action.pid)
                 print(f"moved Targeted EMP into Abilities (radial position {position})")
+    if jamming is not None:
+        # Jamming mode (the Cylon Wardriver's): a Jammer on the ship root and a JammingAction button. The Jammer acts
+        # on what is in range (enemy squadrons and missiles), not on its own ship, so it works on a capital ship.
+        jammers = [obj for obj in F.objs if obj.classid == 114 and
+                   custom_scripts.get(val(obj.pid).get("m_Script", {}).get("m_PathID")) == "Jammer"]
+        settings = {k: v for k, v in (("jamRange", jamming.get("range")), ("jamMissileChance", jamming.get("missile_chance")))
+                    if v is not None}
+        if settings.get("jamMissileChance") is not None and not 0 <= settings["jamMissileChance"] <= 1:
+            raise ValueError("the jam missile chance is a fraction from 0 to 1")
+        if settings.get("jamRange") is not None and not settings["jamRange"] > 0:
+            raise ValueError("the jam range must be above 0")
+        if len(jammers) > 1:
+            raise ValueError("The ship has more than one Jammer.")
+        if jammers:
+            fields = copy.deepcopy(current_fields(jammers[0].pid))
+            if any(fields.get(k) != v for k, v in settings.items()):
+                fields.update(settings)
+                replaced[jammers[0].pid] = F.write(jammers[0], fields)
+                print("updated the Jammer (range %g, missile chance %g)" % (fields["jamRange"], fields["jamMissileChance"]))
+        else:
+            add_custom_module_component("Jammer", root.pid, JAMMER_DEFINITION, **settings)
+            values = dict(JAMMER_DEFINITION["defaults"], **settings)
+            print("added a Jammer (range %g, missile chance %g)" % (values["jamRange"], values["jamMissileChance"]))
+        actions = [obj for obj in F.objs if obj.classid == 114 and
+                   custom_scripts.get(val(obj.pid).get("m_Script", {}).get("m_PathID")) == "JammingAction"]
+        if len(actions) > 1:
+            raise ValueError("The ship has multiple Jamming buttons.")
+        if not actions:
+            menu, position = alloc_action_pos(7, "Jamming mode")
+            add_custom_module_component("JammingAction", menu, JAMMING_ACTION_DEFINITION, radialMenuPosition=position)
+            print(f"added Jamming mode to the action menu (radial position {position})")
+        elif ability_submenu:
+            action = actions[0]
+            fields = copy.deepcopy(val(action.pid))
+            previous = fields["m_GameObject"]["m_PathID"]
+            if "abilit" not in val(previous)["m_Name"].casefold() and submenu_has_room():
+                menu, position = alloc_action_pos(7)
+                owner = copy.deepcopy(current_fields(previous))
+                owner["m_Component"] = [item for item in owner["m_Component"]
+                                        if item["component"]["m_PathID"] != action.pid]
+                replaced[previous] = F.write(F.by_pid[previous], owner)
+                fields["m_GameObject"] = {"m_FileID": 0, "m_PathID": menu}
+                fields.update(radialMenuPosition=position, hideInMenu=False)
+                replaced[action.pid] = F.write(action, fields)
+                comp_add.setdefault(menu, []).append(action.pid)
+                print(f"moved Jamming mode into Abilities (radial position {position})")
     if mini_jump is not None:
         # micro-FTL jump = MiniJumpAgent on the ship + MiniJumpAction button in the Actions radial menu (+ the ship's FTLEffect for the visuals)
         scr_name = {m.pid: val(m.pid)["m_ClassName"] for m in F.objs if m.classid == 115}
@@ -2996,8 +3184,9 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             replaced[ship_infos[0].pid] = F.write(ship_infos[0], ship_fields)
             print("disabled the ShipInfo-flagged Munition Factory revive hack")
     for gp, pids in comp_add.items():
-        if gp == sub_state.get("go") and "gov" in sub_state:
-            gv = sub_state["gov"]
+        new_menu = next((st for st in (sub_state, sub2_state) if gp == st.get("go") and "gov" in st), None)
+        if new_menu is not None:                        # a submenu created in this run: its record is still pending
+            gv = new_menu["gov"]
             for p_ in pids: gv["m_Component"].append({"component": {"m_FileID": 0, "m_PathID": p_}})
             i_ = next(i for i, t in enumerate(appended) if t[0] == gp); appended[i_] = (gp, appended[i_][1], F.write(appended[i_][1], gv)); continue
         gv = copy.deepcopy(val(gp))
@@ -3005,8 +3194,9 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
             gv = current_fields(gp)
         for p_ in pids: gv["m_Component"].append({"component": {"m_FileID": 0, "m_PathID": p_}})
         replaced[gp] = F.write(F.by_pid[gp], gv)
-    if "tr" in sub_state:                               # hang the Abilities submenu under the Actions object (like Munitions / Fighters)
-        late_children.setdefault(sub_state["father"], []).append(sub_state["tr"])
+    for st in (sub_state, sub2_state):                  # hang new ability submenus under the Actions object (like Munitions / Fighters)
+        if "tr" in st:
+            late_children.setdefault(st["father"], []).append(st["tr"])
     for fa, kids_ in late_children.items():
         if support_abilities and fa in replaced:
             fv = current_fields(fa)
@@ -3034,6 +3224,10 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
     replaced[ab.pid] = F.write(ab, abv)
     if prefab_fields:
         apply_prefab_fields(F, prefab_fields, replaced)
+    if flak:
+        from deadlock_tools import flak as flak_mod
+        for line in flak_mod.apply(F, flak, replaced):
+            print(line)
     if ship_scale:
         apply_ship_scale(F, ship_scale, replaced)
     for spec in respace or ():
@@ -3125,6 +3319,12 @@ LIMITS
     g_slot.add_argument("--squadron-groups", help="split the squadron launch buttons into submenus inside the Fighters menu, e.g. 4,2 (slot counts per submenu, in slot order; must add up to FighterSlots+UtilityFighterSlots)")
     g_slot.add_argument("--split-squadrons", action="store_true", help="shorthand: one submenu for the fighter slots and one for the support (utility) slots")
     g_slot.add_argument("--icon-offset", default="12,0,-4", help="where the build-screen icons of the NEW squadron bays sit relative to the copied bay icon, X,Y,Z per added slot (X is towards the centre line for both sides). Raise it if the new slot icons overlap the old ones")
+    g_abil.add_argument("--jamming", action="store_true", help="give the ship the Cylon Wardriver's Jamming mode: adds a Jammer (jams enemy squadrons and missiles in range) and the Jamming button. Run again with new --jam-range / --jam-missile-chance to change it")
+    g_abil.add_argument("--jam-range", type=float, help="--jamming: jam range in game units (default 500; the Wardriver squadron has 150)")
+    g_abil.add_argument("--jam-missile-chance", type=float, help="--jamming: chance (0-1) to jam each missile in range (default 0.6, the Wardriver's)")
+    g_abil.add_argument("--jam-speed", help="jamming: speed penalty this ship's jamming gives (number, or 'global'); written to deadlock-jamming.txt, needs the custom-module DLL's CustomJamming")
+    g_abil.add_argument("--jam-evade", help="jamming: evasion penalty this ship's jamming gives (number, or 'global')")
+    g_abil.add_argument("--jam-accuracy", help="jamming: accuracy penalty this ship's jamming gives (number, or 'global')")
     g_abil.add_argument("--augury", action="store_true", help="give the ship the Cylon guardian basestar's Predictive Augury ability (module + button in the Actions radial menu)")
     g_abil.add_argument("--augury-uses", default="1", help="--augury: number of uses per battle (maxAmmunition, default 1 = the guardian basestar). The game has no true unlimited setting: 'unlimited' = 999, which the button shows as 999/999")
     g_abil.add_argument("--stealth", metavar="ORION_BUNDLE", help="give the ship the Colonial Orion's stealth ability: path to the Orion bundle (encrypted game file or decrypted .dec). Adds the Stealth module, the button in the Actions radial menu and the two stealth effect objects")
@@ -3154,6 +3354,11 @@ LIMITS
     g_slot.add_argument("--slot-parts", default="buttons,bays,icons", help="(for testing) which parts --fighter-slots adds: any of buttons, bays, icons")
     g_out.add_argument("--mount-layout", help=argparse.SUPPRESS)
     g_out.add_argument("--prefab-fields", type=json.loads, help=argparse.SUPPRESS)
+    g_abil.add_argument("--flak", action="append", default=[], metavar="FIELD=VALUE",
+                        help="edit the ship's flak field (repeatable), e.g. --flak FlakRange.Min=120 --flak BaseDamagePerTick.HullDamage=1.5; "
+                             "fields: BaseDamagePerTick.{HullDamage,ArmourDamage,SubSystemDamage,SubsystemSpreadCount,SubsystemSpreadDamage,"
+                             "AppliesIrradiatedStatus,IrradiatedTurns,IrradiatedPercentage,Range}, FlakRange.Min/Max, FlakAreaLength, FlakAreaRadius, "
+                             "FlakExplosionsPerTick (see docs/game/flak.md); --inspect shows the current values")
     g_out.add_argument("--inspect", action="store_true", help="report weapon mounts and current prefab settings")
     g_out.add_argument("--no-encrypt", action="store_true", help="write a plain bundle into the configured work tree")
     g_out.add_argument("--encrypt", action="store_true", help=argparse.SUPPRESS)      # the default now; kept so old commands still work
@@ -3215,6 +3420,8 @@ def main():
                 if adds_launch or adds_munitions:
                     raise ValueError("remove slots with --bay-layout or add them with --fighter-slots / --utility-slots / "
                                      "--munition-slots, not both in one run")
+        from deadlock_tools import flak as flak_mod
+        flak_changes = flak_mod.parse(a.flak) if a.flak and not (a.list_mounts or a.inspect) else None
         mount_layout = None
         if a.mount_layout:
             with open(a.mount_layout, encoding="utf-8") as source:
@@ -3243,6 +3450,7 @@ def main():
             mini_jump={"delay": a.jump_delay, "duration": a.jump_duration,
                        "range": tuple(map(float, a.jump_range.split(","))),
                        "cooldown": a.jump_cooldown} if a.mini_jump else None,
+            jamming={"range": a.jam_range, "missile_chance": a.jam_missile_chance} if a.jamming else None,
             augury={"uses": 999 if a.augury_uses.lower() in ("unlimited", "inf", "infinite")
                     else int(a.augury_uses)} if a.augury else None,
             stealth={"donor": a.stealth, "battery": a.stealth_battery,
@@ -3257,6 +3465,7 @@ def main():
             normalize_ability_submenu=a.normalize_ability_submenu,
             support_settings=configured_support_settings(a) if not (a.list_mounts or a.inspect) else {},
             turnaround_repair_actions=a.turnaround_repair_actions, mount_layout=mount_layout,
+            flak=flak_changes,
         )
         if a.realign_bays and not (a.list_mounts or a.inspect):
             from deadlock_tools import bays as bay_mod
@@ -3273,6 +3482,10 @@ def main():
             print("bay layout: %d bays, %d launch buttons, %d munition buttons, %d munition launchers" % (
                 result["bays"], result["launchButtons"], result["munitionButtons"], result["launchers"]))
         if a.inspect:
+            bundle = read_bundle(a.src)
+            offset, size, *_ = bundle["nodes"][0]
+            for line in flak_mod.describe(flak_mod.read(SerFile(bundle["data"][offset:offset + size]))):
+                print(line)
             entries = sm.read(a.src)["entries"]
             print("subsystem crew modifiers: %s" % (len(entries) or "none"))
             for entry in entries: print("  " + sm.describe(entry))
@@ -3290,6 +3503,13 @@ def main():
     except ValueError as error:
         raise SystemExit(str(error)) from None
     if a.list_mounts or a.inspect: return
+    penalties = {key: (None if str(getattr(a, opt)).strip().lower() in ("global", "-", "") else getattr(a, opt))
+                 for opt, key in JAM_PENALTY_OPTIONS.items() if getattr(a, opt) is not None}
+    if penalties:
+        try:
+            print(set_ship_jamming(tmp, os.path.dirname(a.dst), [a.bundles] if a.bundles else [], penalties))
+        except ValueError as error:
+            raise SystemExit(str(error)) from None
     if a.encrypt:
         open(a.dst, "wb").write(xor_bytes(open(tmp, "rb").read())); os.remove(tmp)
         print("encrypted ->", a.dst)

@@ -3,5 +3,8 @@
   "levels": "/path/to/BSG_Data",
   "mercury_dec": "/path/to/decrypted/colonialmercury.dec",
   "orion_dec": "/path/to/decrypted/colonialorion.dec",
-  "mercury_enc": "/path/to/encrypted/colonialmercury"
+  "mercury_enc": "/path/to/encrypted/colonialmercury",
+  "managed": "/path/to/BSG_Data/Managed",
+  "game_data": "/path/to/BSG_Data (any copy with globalgamemanagers.assets)",
+  "raptor_enc": "/path/to/encrypted/colonialraptor (vanilla fighter bundle)"
 }

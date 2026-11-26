@@ -301,6 +301,17 @@ def check(dll):
             if e.code not in (0, None): print(e)
 
 
+def skirmish_settings_path(out=None, existing=False):
+    """deadlock-skirmish.txt in the work tree's StreamingAssets (or <out>/bundles); existing=True falls back to the
+    game's configured bundle folder when the work tree has none"""
+    from deadlock_tools import skirmish
+    path = os.path.join(config.out_dir("bundles", out, create=not existing), skirmish.FILE)
+    if existing and not os.path.isfile(path):
+        game = config.setting("bundles", required=False)
+        if game and os.path.isfile(os.path.join(game, skirmish.FILE)): return os.path.join(game, skirmish.FILE)
+    return path
+
+
 def _managed_dir(levels, dll):
     """the game's Managed/ folder: <levels>/Managed, else the folder holding the configured DLL"""
     inside = os.path.join(levels, "Managed")
@@ -320,11 +331,42 @@ def main():
     ap.add_argument("--munition-load", action="store_true", help="patch/revert the munition load check")
     ap.add_argument("--repair-bay-actions", type=int, help="assign indexed shortcuts and key mappings to repair actions (1-16)")
     ap.add_argument("--repair-bay-shortcuts", action="store_true", help="revert indexed repair-bay shortcut support and its staged key mappings")
+    ap.add_argument("--skirmish-ships", type=int, nargs="?", const=0, metavar="N",
+                    help="patch: ships per skirmish / multiplayer fleet (1-99, stock 10); revert: give the flag alone (back to the level data). Needs the custom-module DLL")
+    ap.add_argument("--fleet-caps", nargs="?", const="", metavar="A,B",
+                    help="patch: extra skirmish fleet-point cap choices, e.g. 32000,64000 ('none' for none); revert: give the flag alone (default 32000,64000). Needs the custom-module DLL")
+    ap.add_argument("--campaign-ships", type=int, nargs="?", const=0, metavar="N",
+                    help="patch: capital ships a campaign fleet takes into battle (1-99, stock 7; the one support slot is fixed); revert: give the flag alone. Needs the custom-module DLL")
     a = ap.parse_args(); a.dll = a.dll or a.dll_opt
     original = config.setting("dll", a.dll)
     if a.cmd == "check":
         src = original if a.dll else config.latest(original, "dll", a.out, quiet=True)
-        print("checking", src); check(src); return
+        print("checking", src); check(src)
+        from deadlock_tools import skirmish
+        settings_path = skirmish_settings_path(a.out, existing=True)
+        for line in skirmish.describe(skirmish.read(settings_path)): print(line)
+        if b"CustomSkirmishFleetCap" not in open(src, "rb").read(): print("  (needs the custom-module DLL; this DLL has none, so the stock limits apply)")
+        return
+    fleet_opts = a.skirmish_ships is not None or a.fleet_caps is not None or a.campaign_ships is not None
+    skirmish_only = fleet_opts and not (
+        a.max_rank is not None or a.command_nodes is not None or a.munition_load or a.repair_bay_actions is not None or a.repair_bay_shortcuts)
+    if fleet_opts:
+        from deadlock_tools import skirmish
+        path = skirmish_settings_path(a.out)
+        try:
+            if a.cmd == "patch":
+                if a.skirmish_ships == 0: ap.error("--skirmish-ships needs a number when patching (1-99)")
+                if a.campaign_ships == 0: ap.error("--campaign-ships needs a number when patching (1-99)")
+                caps = skirmish.parse_caps(a.fleet_caps) if a.fleet_caps is not None else None
+                if a.fleet_caps == "": ap.error("--fleet-caps needs a list when patching, e.g. 32000,64000 (or 'none')")
+                _settings, log = skirmish.update(path, ships=a.skirmish_ships, fleet_caps=caps, campaign_ships=a.campaign_ships)
+            else:
+                _settings, log = skirmish.update(path, clear_ships=a.skirmish_ships is not None, clear_caps=a.fleet_caps is not None,
+                                                 clear_campaign=a.campaign_ships is not None)
+        except ValueError as error: raise SystemExit(str(error))
+        for line in log or ["fleet limits unchanged"]: print(line)
+        print("fleet limits ->", path if os.path.isfile(path) else "(none: stock behaviour of the custom-module DLL)")
+        if skirmish_only: return
     cur = config.latest(original, "dll", a.out, a.fresh)
     out = os.path.join(config.out_dir("dll", a.out), os.path.basename(original))
     if os.path.exists(out) and config.same_file(out, original): raise SystemExit("refusing to overwrite the original %s - choose another output folder" % original)

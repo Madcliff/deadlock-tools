@@ -33,7 +33,8 @@ Without it, the save goes into the work tree. **Discard changes** throws away le
 | Decrypt / encrypt | Decrypt, Encrypt, Check, key override | `/api/xor` → `xor` |
 | **Level data ↔ bundle** | every value both files hold, side by side, with ✓/✗, per-row **Use level** / **Use bundle**, and *make all match* buttons; *Keep hull & armour linked while editing* | none (stages edits for Save ship); see [game/bundle-level-agreement.md](game/bundle-level-agreement.md) |
 | Field groups | level fields; bundle hull & armour and subsystems inside *Hull & armour*; bundle slot controls inside *Carrier & munition slots* | staged for Save ship |
-| Bundle option cards | Ship systems, Custom ship modules, Abilities (installed + add), Weapons, Output | staged for Save ship |
+| Bundle option cards | Ship systems, Custom ship modules, Abilities (installed + add; includes Jamming: range, missile chance), Weapons, Output | staged for Save ship |
+| Flak field | top and side diagram of the zone(s) against the hull (largest hull mesh's bounds, ship scale applied) with drag handles for distance, length and radius; one input per FlakField field with help text; per-turn damage readout at full and 0 Armory health; zone size; Armory FlakDamageRange; stock ships table | `/api/bundle/stats` (read, `flak`); staged for Save ship → `weapons --flak FIELD=VALUE …` |
 | Module subsystems | one row per driver: module, driving subsystem, % at 0 and at full health; per-module total and stock driver; **Add subsystem**, **Remove** | `/api/bundle/stats` (read); staged for Save ship → `weapons --module-subsystem … / --clear-module-subsystems` |
 | Crew bonuses from subsystem health | one row per modifier: crew stat, source subsystem, bonus at 0 and at full health, effect note; **Add modifier**, **Remove** | `/api/bundle/stats` (read, with the stat catalog); staged for Save ship → `weapons --subsystem-modifier … / --clear-subsystem-modifiers` |
 | Research, veterancy, advantages | per-ship research rows and veterancy ranks | staged for Save ship |
@@ -53,6 +54,7 @@ Patches that are not tied to one ship or to the commander tree.
 |---|---|
 | Current DLL (status of every patch) | `/api/dll/check` → `dll check` |
 | Repair action shortcuts, Munition load fix, Start from the original DLL → **Patch DLL** | `/api/dll/patch` → `dll patch --repair-bay-actions/--munition-load [--fresh]` |
+| Fleet limits: ships per skirmish fleet, extra fleet caps, capital ships per campaign fleet → **Save fleet limits** / **Reset to defaults** | `/api/dll/skirmish`, `/api/dll/skirmish/save` → `deadlock-fleet.txt` (same as `dll patch/revert --skirmish-ships --fleet-caps --campaign-ships`) |
 | **Revert ticked patches** (munition load, repair shortcuts) | `/api/dll/revert` → `dll revert --munition-load/--repair-bay-shortcuts` |
 
 Commander rank and node patches are on the Commanders tab. The custom-module and commander DLL code is rebuilt
@@ -76,12 +78,18 @@ Everything about commanders: level tables and the DLL limits that must match the
 | View | Save button | Endpoint |
 |---|---|---|
 | Squadron prefabs (fighter count, hull pool, loss thresholds, …) | Save squadron changes | `/api/squadrons`, `/api/squadrons/save` |
+| — Abilities card: one collapsible box per ability (Remove / Keep in its header) with its settings (chaff supply, ranges, chances …), **Remove** / **Keep** per ability, **Add ability** (ability + donor squadron; Stealth: battery, cooldown, active at battle start) | Save squadron changes | `/api/squadrons/save` (`abilities`) → `shipdb setsquadronability` |
+| — Munitions (in the Abilities card): add (own faction only), move up, remove | Save squadron changes | `/api/squadrons/save` (`munitions`) → `shipdb setsquadronmunitions` |
+| — Research card: per campaign researchable, cost, mission, label, unlocked at start | Save squadron changes | `/api/squadrons/save` (`research`) → `shipdb setsquadronresearch` |
+| — Launch bays card: launch from the same bays as (squadron), **Add to launch bays** (immediate) | writes carrier bundles | `/api/squadrons/bays` → `shipdb setsquadronbays` |
+| **Copy and add a squadron type…** (donor prefab, prefab name, table name, info-panel name, blueprint heading/description, copy the donor's research) | Create squadron type (immediate) | `/api/squadrons/create` → `shipdb addsquadron` |
 | Carrier allocations (which squadrons each carrier may field) | Save allocations | `/api/allocations`, `/api/allocations/save` |
+| Jamming effects (global speed / evasion / accuracy penalty; per squadron type or ship overrides) | Save jamming effects | `/api/jamming`, `/api/jamming/save` → `shipdb setjamming` |
 
 ## Database
 
 The remaining `shipdb` table commands, grouped by subject: Ships (list, inspect, veterancy, XP per rank, copy
-veterancy), Munitions, Research (list, bulk add), Fleet limits, Fleet map icons, and Squadrons (bulk hull factor). Write
+veterancy), Munitions, Research (list, bulk add), Fleet limits (campaign fleet limits; skirmish fleet size: Show / Change skirmish fleet size → `shipdb skirmishinfo` / `setskirmishinfo`), Fleet map icons, and Squadrons (bulk hull factor). Write
 forms show current values first and have one **Run and save** button. Endpoint: `/api/tools`, `/api/tools/run` →
 `shipdb <command>`. The commander commands (`commanders`, `setcommanders`, `fixspecs`) are on the Commanders tab.
 
@@ -92,7 +100,7 @@ Search, edit and add strings in `resources.assets`: **Load file**, **Add string*
 
 ## Armaments
 
-Weapon and munition definitions in the level data: edit, clone, **Save weapon** / **Save munition** / **Save clone**.
+Weapon and munition definitions in the level data: edit, clone, **Save weapon** / **Save munition** / **Save clone**. Munitions: **Combat** section (damage, blast, irradiation, speed, range, accuracy, turn rate; **Save combat stats** → `/api/munitions/combat/save` → `shipdb setmunitionstats`), **Copy as a new munition…** (name, displayed name, blueprint heading/description, researchable like the donor) → `/api/munitions/create` → `shipdb addmunition`.
 Endpoint: `/api/armaments`.
 
 ## Settings

@@ -65,6 +65,8 @@ SQUADRON ALLOCATIONS (which squadron types each capital ship may carry; Squadron
 FLEET LIMITS (campaign)
   python -m deadlock_tools shipdb fleetinfo                              (show MaxShips = ships per fleet group, StartingFleetPointCap ...)
   python -m deadlock_tools shipdb setfleetinfo MaxShips 10 [StartingFleetPointCap 6000]
+  python -m deadlock_tools shipdb skirmishinfo                           (ships per skirmish / multiplayer fleet: maxShips, stock 10)
+  python -m deadlock_tools shipdb setskirmishinfo maxShips 20
 
 FLEET MAP ICONS
   python -m deadlock_tools shipdb fleeticons                             (list the war-room icon tables)
@@ -1024,6 +1026,79 @@ def fleetinfo_cmd(a):
         print("NOTE: the limit is read from the game data when needed (not stored in saves); the fleet screens may only have a fixed number of ship slots, so test larger values.")
 
 
+SKIRMISH_FIELDS = {"maxShips": (1, 99), "maxShipsConsole": (1, 99)}
+
+
+def load_skirmish(S, buf):
+    """find the SkirmishDataTables MonoBehaviour (level6/7/8/9; maxShips = ships per skirmish/multiplayer fleet on PC).
+    Returns (pid, abs_off, size, parsed)."""
+    ti = S.typedef_index("SkirmishDataTables")
+    try:
+        if struct.unpack(">I", buf[4:8])[0] != len(buf): raise LookupError("not a serialized file")
+        table = read_objects(buf)
+    except LookupError: raise
+    except Exception: raise LookupError("not a readable serialized file")
+    for pid, off, size, cid, _e in table:
+        if cid != 114: continue
+        r = Reader(S, buf[off:off + size], 32)
+        try: res = r.obj(ti)
+        except Exception: continue
+        maps = res.get("SkirmishMissionInfo") if r.p == size else None
+        # other scripts' objects can parse as this layout (mission levels: 240-byte objects reading maxShips 1220),
+        # so require sane ship counts and named skirmish maps with an environment scene
+        if (maps and all(isinstance(m, dict) and m.get("name") and str(m.get("Environment", "")).startswith("skirmish") for m in maps)
+                and 1 <= res.get("maxShips", 0) <= 999 and 1 <= res.get("maxShipsConsole", 0) <= 999):
+            return pid, off, size, res
+    raise LookupError("no skirmish table in this file")
+
+
+def skirmishinfo_cmd(a):
+    """skirmishinfo / setskirmishinfo: SkirmishDataTables.maxShips (ships per skirmish and multiplayer fleet on PC, stock 10)
+    and maxShipsConsole (stock 8, console builds)"""
+    paths = []; rest = list(a.args)
+    while rest and os.path.exists(rest[0]): paths.append(rest.pop(0))
+    files = []
+    for pth in paths:
+        if os.path.isdir(pth): files += [os.path.join(pth, f_) for f_ in sorted(os.listdir(pth))]   # not backup subfolders
+        else: files.append(pth)
+    seen = set(); files = [f_ for f_ in files if not (os.path.basename(f_) in seen or seen.add(os.path.basename(f_)))]
+    if not files: raise SystemExit("give the level files or the folder that contains them")
+    S = Schema(a.dll); outdir = a.out
+    edits = []
+    if a.cmd == "setskirmishinfo":
+        if not rest or len(rest) % 2: raise SystemExit("usage: shipdb setskirmishinfo maxShips 20")
+        for i in range(0, len(rest), 2):
+            fld = rest[i]
+            if fld not in SKIRMISH_FIELDS: raise SystemExit("no skirmish field %r (fields: %s)" % (fld, ", ".join(SKIRMISH_FIELDS)))
+            try: val = int(rest[i + 1])
+            except ValueError: raise SystemExit("%s needs a whole number, got %r" % (fld, rest[i + 1]))
+            lo, hi = SKIRMISH_FIELDS[fld]
+            if not lo <= val <= hi: raise SystemExit("%s must be between %d and %d" % (fld, lo, hi))
+            edits.append((fld, val))
+        os.makedirs(outdir, exist_ok=True)
+    done = []
+    for f_ in files:
+        base = os.path.basename(f_)
+        if not base.startswith("level") or base.endswith(".resS"): continue
+        src = chain_source(a, f_, outdir, quiet=not edits)
+        buf = bytearray(open(src, "rb").read())
+        try: pid, off, size, res = load_skirmish(S, bytes(buf))
+        except LookupError: continue
+        if not edits:
+            print("%s: maxShips %s, maxShipsConsole %s (%d skirmish maps)" % (base, res["maxShips"], res["maxShipsConsole"], len(res["SkirmishMissionInfo"]))); continue
+        for fld, val in edits:
+            pos, _code = res["_off"][fld]
+            struct.pack_into("<i", buf, off + pos, val)
+            print("[ok] %-8s SkirmishDataTables.%s: %s -> %s" % (base, fld, res[fld], val))
+        open(os.path.join(outdir, base), "wb").write(bytes(buf))
+        chk = load_skirmish(S, bytes(buf))[3]
+        assert all(chk[f] == v for f, v in edits), "verification failed"
+        done.append(base)
+    if edits:
+        print("\npatched %d file(s): %s\nPatched copies are in %s/ (same file names). Back up the originals, then copy them over." % (len(done), ", ".join(done) or "none", outdir))
+        print("NOTE: both players of a multiplayer game need the same value. Saved skirmish fleets with more ships than maxShips are deleted when loaded, so lowering it later removes larger fleets.")
+
+
 def vet_lines(db, s):
     out = []
     for rk in s["CrewVeterancyRankEffects"]:
@@ -1286,7 +1361,7 @@ def commanders_cmd(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["list", "vet", "show", "set", "setvet", "setxp", "copyvet", "fleeticons", "fleeticon", "munitions", "setmunition", "blueprints", "addblueprint", "addvet", "removevet", "fleetinfo", "setfleetinfo", "commanders", "setcommanders", "fixspecs", "squadrons", "setsquadron", "allocations", "setallocation"])
+    ap.add_argument("cmd", choices=["list", "vet", "show", "set", "setvet", "setxp", "copyvet", "fleeticons", "fleeticon", "munitions", "setmunition", "blueprints", "addblueprint", "addvet", "removevet", "fleetinfo", "setfleetinfo", "skirmishinfo", "setskirmishinfo", "commanders", "setcommanders", "fixspecs", "squadrons", "setsquadron", "allocations", "setallocation", "squadronabilities", "setsquadronability", "addsquadron", "setsquadronbays", "squadronmunitions", "setsquadronmunitions", "squadronresearch", "setsquadronresearch", "addmunition", "jamming", "setjamming", "munitionstats", "setmunitionstats"])
     ap.prog = "deadlock shipdb"
     ap.add_argument("args", nargs="*", help="the command's own arguments (ship name, field, value ...)")
     config.add_path_args(ap, "levels", "dll", "out")
@@ -1305,6 +1380,20 @@ def main():
     ap.add_argument("--fresh", action="store_true", help="ignore earlier work-tree edits and start again from the original files")
     ap.add_argument("--factory", default="FleetModelFactory", help="FleetModelFactory (war-room fleet icon, default) or ProjectionFactory")
     ap.add_argument("--add-missing", action="store_true", help="fleeticon: append a missing target ship entry, copying the donor prefab pointer")
+    ap.add_argument("--donor", help="setsquadronability add: squadron prefab to copy the ability from (default: the first that has it)")
+    ap.add_argument("--launch-like", help="setsquadronbays: squadron prefab whose launch bays the type should use (default: the stock squadron its name contains)")
+    ap.add_argument("--battery", type=float, help="setsquadronability add stealth: battery size (default 100, the Orion's)")
+    ap.add_argument("--cooldown", type=int, help="setsquadronability add stealth: turns before stealth can be used again (default 1)")
+    ap.add_argument("--stealth-active", action="store_true", help="setsquadronability add stealth: stealthed when the battle starts")
+    ap.add_argument("--table-name", help="addsquadron: SquadronDataTable name of the new type (default: the prefab name without 'Squadron')")
+    ap.add_argument("--display-name", help="addsquadron / addmunition: name (new localisation string; default: the donor's)")
+    ap.add_argument("--heading", help="addsquadron: blueprint heading (new localisation string; default: the donor's)")
+    ap.add_argument("--description", help="addsquadron: blueprint description (new localisation string; default: the donor's)")
+    ap.add_argument("--munition-id", type=int, help="addmunition: munition id (default: the next free one)")
+    ap.add_argument("--no-research", action="store_true", help="addmunition: do not copy the donor's research entries")
+    ap.add_argument("--type-id", type=int, help="addsquadron: squadron type id (default: the next free one)")
+    ap.add_argument("--managed", help="squadron prefab commands: the game's Managed folder (default: <levels>/Managed or the DLL's folder)")
+    ap.add_argument("--game-data", help="squadron prefab commands: folder with globalgamemanagers.assets (default: the levels folder)")
     ap.add_argument("--bundle-name", help="fleeticon: battle ShipFactory asset bundle name for the target ship (default: lowercase ship name without spaces)")
     a = ap.parse_args()
     _normalise(a)
@@ -1314,9 +1403,36 @@ def main():
         allocation_cmd(a); return
     if a.cmd in ("squadrons", "setsquadron"):
         squadron_cmd(a); return
+    if a.cmd in ("munitionstats", "setmunitionstats"):
+        from deadlock_tools import munition_types
+        try: munition_types.stats_cli(a)
+        except (ValueError, RuntimeError) as e: raise SystemExit(str(e))
+        return
+    if a.cmd in ("jamming", "setjamming"):
+        from deadlock_tools import jamming
+        jamming.cli(a); return
+    if a.cmd == "addmunition":
+        from deadlock_tools import munition_types
+        try: munition_types.cli(a)
+        except (ValueError, RuntimeError) as e: raise SystemExit(str(e))
+        return
+    if a.cmd in ("squadronresearch", "setsquadronresearch"):
+        from deadlock_tools import squadron_research
+        squadron_research.cli(a); return
+    if a.cmd in ("squadronmunitions", "setsquadronmunitions"):
+        from deadlock_tools import squadron_types
+        squadron_types.munitions_cli(a); return
+    if a.cmd in ("squadronabilities", "setsquadronability", "addsquadron", "setsquadronbays"):
+        from deadlock_tools import squadron_types
+        try: squadron_types.cli(a)
+        except (ValueError, RuntimeError) as e: raise SystemExit(str(e))
+        return
     if a.cmd in ("fleetinfo", "setfleetinfo"):
         a.args = [a.level0] + a.args
         fleetinfo_cmd(a); return
+    if a.cmd in ("skirmishinfo", "setskirmishinfo"):
+        a.args = [a.level0] + a.args
+        skirmishinfo_cmd(a); return
     if a.cmd in ("blueprints", "addblueprint"):
         a.args = [a.level0] + a.args
         blueprint_cmd(a); return

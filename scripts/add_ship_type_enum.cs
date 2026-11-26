@@ -5,9 +5,10 @@ using Mono.Cecil;
 
 // Adds ship IDs to the game's ShipType enum. Fleet placement iterates this
 // enum to build its collision-radius map, so every ship row in the level
-// tables needs a member here.
+// tables needs a member here. With --squadron / --munition it adds to the
+// squadron or munition enum instead (campaign stock data iterates those).
 //
-// usage: add_ship_type_enum INPUT_DLL OUTPUT_DLL ID=NAME [ID=NAME ...]
+// usage: add_ship_type_enum INPUT_DLL OUTPUT_DLL [--squadron|--munition] ID=NAME [ID=NAME ...]
 //        add_ship_type_enum INPUT_DLL OUTPUT_DLL SHIP_ID ENUM_NAME   (older form)
 public static class AddShipTypeEnum
 {
@@ -16,6 +17,12 @@ public static class AddShipTypeEnum
         if (args.Length < 3)
             throw new ArgumentException("usage: add_ship_type_enum INPUT_DLL OUTPUT_DLL ID=NAME [ID=NAME ...]");
 
+        bool squadron = args.Skip(2).Contains("--squadron");
+        bool munition = args.Skip(2).Contains("--munition");
+        args = args.Where(a => a != "--squadron" && a != "--munition").ToArray();
+        string anchorName = munition ? "ColonialRaptorTorpedo" : squadron ? "ColonialRaptorSquadron" : "ColonialBattlestarMercury";
+        int anchorValue = munition ? 12 : squadron ? 2 : 29;
+        string what = munition ? "munition type" : squadron ? "squadron type" : "ship type";
         var wanted = new List<KeyValuePair<int, string>>();
         if (args.Length == 4 && !args[2].Contains("=") && !args[3].Contains("="))
             wanted.Add(new KeyValuePair<int, string>(Int32.Parse(args[2]), args[3]));
@@ -38,7 +45,7 @@ public static class AddShipTypeEnum
         });
 
         var shipType = assembly.MainModule.Types.Single(t => t.IsEnum && t.Fields.Any(f =>
-            f.Name == "ColonialBattlestarMercury" && f.HasConstant && Convert.ToInt32(f.Constant) == 29));
+            f.Name == anchorName && f.HasConstant && Convert.ToInt32(f.Constant) == anchorValue));
         int added = 0;
         foreach (var item in wanted)
         {
@@ -48,8 +55,8 @@ public static class AddShipTypeEnum
             if (sameValue != null)
             {
                 if (sameValue.Name != enumName)
-                    throw new InvalidOperationException("ship ID " + shipId + " is already assigned to enum member " + sameValue.Name);
-                Console.WriteLine("Ship type enum already contains " + enumName + "=" + shipId);
+                    throw new InvalidOperationException(what + " ID " + shipId + " is already assigned to enum member " + sameValue.Name);
+                Console.WriteLine(what + " enum already contains " + enumName + "=" + shipId);
                 continue;
             }
             if (shipType.Fields.Any(f => f.Name == enumName))
@@ -58,7 +65,7 @@ public static class AddShipTypeEnum
             shipType.Fields.Add(new FieldDefinition(enumName,
                 FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.HasDefault,
                 assembly.MainModule.TypeSystem.Int32) { Constant = shipId });
-            Console.WriteLine("Added ship type enum member " + enumName + "=" + shipId);
+            Console.WriteLine("Added " + what + " enum member " + enumName + "=" + shipId);
             added++;
         }
         if (added == 0)

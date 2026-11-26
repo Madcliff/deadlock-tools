@@ -41,13 +41,15 @@ mcs -target:library -out:"$work_dir/CustomModules.dll" \
   "$repo_dir/dll_modules/CustomSkirmishFleetCap.cs" \
   "$repo_dir/dll_modules/CustomBattleHud.cs" \
   "$repo_dir/dll_modules/CustomSubsystemModifiers.cs" \
-  "$repo_dir/dll_modules/CustomModuleSubsystems.cs"
+  "$repo_dir/dll_modules/CustomModuleSubsystems.cs" \
+  "$repo_dir/dll_modules/CustomStealthFallback.cs" \
+  "$repo_dir/dll_modules/CustomJamming.cs"
 
 mcs -out:"$work_dir/merge_custom_modules.exe" -r:"$cecil" \
   "$repo_dir/scripts/merge_custom_modules.cs"
 
 current="$source_dll"
-types=(CustomModuleSubsystems CustomArmourRepairModule CustomSquadronReplacementModule CustomDroneResupplyModule CustomMagazineCapacityModule CustomRepairBaySlots CustomBattleHud CustomInstantPlatingModule CustomInstantPlatingAction CustomEmpPulseModule CustomEmpPulseAction CustomTargetedEmpModule CustomTargetedEmpAction CustomCommanderStatModifiers CustomSkirmishFleetCap CustomSubsystemModifiers)
+types=(CustomModuleSubsystems CustomArmourRepairModule CustomSquadronReplacementModule CustomDroneResupplyModule CustomMagazineCapacityModule CustomRepairBaySlots CustomBattleHud CustomInstantPlatingModule CustomInstantPlatingAction CustomEmpPulseModule CustomEmpPulseAction CustomTargetedEmpModule CustomTargetedEmpAction CustomCommanderStatModifiers CustomSkirmishFleetCap CustomSubsystemModifiers CustomStealthFallback CustomJamming)
 for index in "${!types[@]}"; do
   next="$work_dir/merged-$index.dll"
   mono "$work_dir/merge_custom_modules.exe" "$current" "$work_dir/CustomModules.dll" \

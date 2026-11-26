@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 GAME_MANAGED INPUT_DLL OUTPUT_DLL ID=NAME [ID=NAME ...]" >&2
+  echo "Usage: $0 GAME_MANAGED INPUT_DLL OUTPUT_DLL [--squadron|--munition] ID=NAME [ID=NAME ...]" >&2
   echo "       $0 GAME_MANAGED INPUT_DLL OUTPUT_DLL SHIP_ID ENUM_NAME" >&2
   exit 2
 fi
