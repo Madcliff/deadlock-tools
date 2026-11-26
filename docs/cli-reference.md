@@ -65,6 +65,7 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 | Task | Options |
 |---|---|
 | Inspect the prefab or list only its mounts | `--inspect`, `--list-mounts` |
+| Change every turret of one weapon type to another | `--swap-weapon [WHERE:]OLD=NEW` (repeatable; WHERE = quadrant, mount-name prefix or all; OLD may be `*`), e.g. `--swap-weapon fore:4=121` |
 | Duplicate or resize mounts | `--copies`, `--clone SELECTOR=N`, `--scale SELECTOR=S`, `--clone-scale` |
 | Respace cloned mounts | `--respace SELECTOR=GAP` (move existing clones so every turret is at least GAP game units apart; originals stay put) |
 | Scale the whole ship | `--ship-scale S` (absolute, 1 = stock; turrets keep their size). See [docs/game/ship-scale.md](game/ship-scale.md) |

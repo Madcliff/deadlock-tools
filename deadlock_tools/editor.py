@@ -2706,9 +2706,32 @@ function weaponLayout(bundle){
    el('label',{class:'f'},'New turret weapon',newWeapon),placeNear,cancelAdd),
    el('p',{class:'hint'},'Click a position in the hull view. The new turret inherits depth and facing from a nearby mount; refine them after placing.'));
  const tools=el('div',{class:'row layout-tools'},layerSelect,mountSelect,projection,addButton);
+ // Change every turret of one weapon type to another (same as weapons --swap-weapon); staged for Save ship.
+ const swapFrom=el('select',{'aria-label':'Change turrets with weapon'}),swapTo=el('select',{'aria-label':'to weapon'});
+ const swapWhere=el('select',{'aria-label':'in'});
+ const swapButton=el('button',{class:'sec',type:'button',onclick:()=>{
+   const from=Number(swapFrom.value),to=Number(swapTo.value),where=swapWhere.value;let hits=0;
+   rows.forEach(row=>{if(row.weapon===from&&(where==='all'||String(row.quadrant)===where)){row.weapon=to;hits++}});
+   status.textContent=hits?hits+' turret(s) changed to '+(weapons[to]||'type '+to)+' (not saved yet).':'No turret matched.';
+   render();
+ }},'Change');
+ const swapRow=el('div',{class:'row layout-tools'},el('span',{class:'hint'},'Change all'),swapFrom,el('span',{class:'hint'},'to'),swapTo,
+   el('span',{class:'hint'},'in'),swapWhere,swapButton);
+ function renderSwap(){
+   const typeName=id=>weapons[id]||'Type '+id;
+   const present=[...new Set(rows.map(row=>row.weapon))].sort((a,b)=>a-b);
+   const keep=(select,value)=>{if([...select.options].some(o=>o.value===value))select.value=value};
+   const prevFrom=swapFrom.value,prevTo=swapTo.value,prevWhere=swapWhere.value;
+   swapFrom.replaceChildren(...present.map(id=>el('option',{value:id},typeName(id)+' ('+rows.filter(r=>r.weapon===id).length+')')));
+   const all=[...new Set([...Object.keys(weapons).map(Number),...present])].sort((a,b)=>a-b);
+   swapTo.replaceChildren(...all.map(id=>el('option',{value:id},typeName(id))));
+   swapWhere.replaceChildren(el('option',{value:'all'},'all quadrants'),...quadrants.map((name,id)=>el('option',{value:String(id)},name)));
+   keep(swapFrom,prevFrom);keep(swapTo,prevTo);keep(swapWhere,prevWhere);
+   swapRow.hidden=layer!=='mounts'||!rows.length;
+ }
  const reload=el('button',{class:'sec',onclick:()=>{if(!dirty()||confirm('Discard unsaved weapon layout changes?'))load(true)}},'Reload');
  const changed=()=>{if(typeof updPend==='function')updPend()};
- panel.append(el('h3',{},'Weapon layout'),el('p',{class:'hint'},'Turrets, squadron launch bays and munition launchers. Changes are saved with the rest of the ship by Save ship in the top bar.'),status,tools,placement,workspace,slotPanel,el('div',{class:'row layout-footer'},reload));
+ panel.append(el('h3',{},'Weapon layout'),el('p',{class:'hint'},'Turrets, squadron launch bays and munition launchers. Changes are saved with the rest of the ship by Save ship in the top bar.'),status,tools,swapRow,placement,workspace,slotPanel,el('div',{class:'row layout-footer'},reload));
  let source='', loaded='', revision='', rows=[], original=[], hull=[], weapons={}, quadrants=[], active=0, request=0, busy=false, drag, clipboard, placing=false;
  let layer='mounts', bayInfo=null, bays=[], bayOriginal=[], launchers=[], launcherOriginal=[], sel={bays:0,launchers:0};
  let removedSlots=new Set(), removedMunitions=new Set(), removedLaunchers=new Set(), levelBase=null;
@@ -2775,7 +2798,7 @@ function weaponLayout(bundle){
      layer==='launchers'?item.name+(removedLaunchers.has(item.id)?' (removed)':''):item.name+(item.clone?' (new)':''))));
    mountSelect.selectedIndex=index;
    addButton.hidden=layer!=='mounts';
-   renderPlacement();renderFields();renderSlots();draw();
+   renderSwap();renderPlacement();renderFields();renderSlots();draw();
  }
  function draw(){
    if(!context||!rows.length)return;

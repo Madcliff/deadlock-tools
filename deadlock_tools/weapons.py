@@ -1630,6 +1630,53 @@ def bundle_mount_layout(path):
     return {"revision": layout_revision(bundle), "mounts": mounts, "quadrants": MOUNT_QUADRANTS, "hull": hull}
 
 
+def parse_swap_weapon(text):
+    """'[WHERE:]OLD=NEW' -> (where, old or None for '*', new)"""
+    where, _, rule = str(text).rpartition(":")
+    old, eq, new = rule.partition("=")
+    try:
+        new_type = int(new)
+        old_type = None if old.strip() == "*" else int(old)
+    except ValueError:
+        raise ValueError("--swap-weapon needs [WHERE:]OLD=NEW with numeric weapon types (OLD may be *), got %r" % text) from None
+    if not eq or new_type < 0 or (old_type is not None and old_type < 0):
+        raise ValueError("--swap-weapon needs [WHERE:]OLD=NEW with numeric weapon types (OLD may be *), got %r" % text)
+    return (where.strip().lower() or "all"), old_type, new_type
+
+
+def swap_weapon_spec(layout, rules, spec=None):
+    """A --mount-layout spec that changes weapon types by rule, merged into an existing spec (or a new one).
+    layout: bundle_mount_layout of the source; rules: parse_swap_weapon tuples. Returns (spec, log)."""
+    rows = {}
+    if spec and spec.get("changes"):
+        for row in spec["changes"]:
+            rows.setdefault((row["id"], row.get("clone", False), id(row) if row.get("clone") else 0), row)
+    names = {m["id"]: m["name"] for m in layout["mounts"]}
+    for mount in layout["mounts"]:
+        key = (mount["id"], False, 0)
+        if key not in rows:
+            rows[key] = {"id": mount["id"], "clone": False, "new_mount": False, "weapon": mount["weapon"],
+                         "quadrant": mount["quadrant"], "scale": mount["scale"], "angles": dict(mount["angles"]),
+                         "position": dict(mount["position"])}
+    log, original = [], {key: row["weapon"] for key, row in rows.items()}
+    for where, old, new in rules:
+        hits = 0
+        for key, row in rows.items():
+            quad = MOUNT_QUADRANTS[row["quadrant"]] if 0 <= row["quadrant"] < len(MOUNT_QUADRANTS) else str(row["quadrant"])
+            name = names.get(row["id"], "")
+            if where != "all" and where != quad and not name.lower().startswith(where):
+                continue
+            if old is not None and row["weapon"] != old:
+                continue
+            row["weapon"] = new; hits += 1
+        if not hits:
+            raise ValueError("--swap-weapon %s:%s=%d matches no turret" % (where, "*" if old is None else old, new))
+        log.append("%s: %d turret(s) %s -> weapon %d" % (where, hits, "of any type" if old is None else "with weapon %d" % old, new))
+    changed = [row for key, row in rows.items() if row.get("clone") or row["weapon"] != original[key] or
+               (spec and any(r is row for r in spec.get("changes") or []))]
+    return {"revision": (spec or {}).get("revision") or layout["revision"], "changes": changed}, log
+
+
 def layout_mount_edits(spec, bundle, prefab, mounts, value, new_pid):
     if not isinstance(spec, dict) or spec.get("revision") != layout_revision(bundle):
         raise ValueError("The source bundle changed. Reload the weapon layout before saving.")
@@ -3289,6 +3336,7 @@ LIMITS
     g_weap.add_argument("--ship-scale", type=float, metavar="S", help="set the WHOLE ship's size (model, turrets, launch bays, collision zones, hit points) to S times the stock size, e.g. 1.25 = 25%% bigger; repeating it is harmless. Also scales its collision exclusion radius and miss-sphere radius; set the same CollisionExclusionZoneRadius on the Ships page so fleet deployment spacing matches")
     g_weap.add_argument("--clone-scale", type=float, metavar="S", help="size of the CLONED turrets (1 = same as the original, 0.6 = 60%% - mesh, barrel position and collider all shrink). Helps clones fit beside their neighbours")
     g_weap.add_argument("--scale", action="append", default=[], metavar="SELECTOR=S", help="resize EXISTING turrets matching SELECTOR (same selectors as --clone), repeatable, e.g. --scale fore=0.7. Visual/physical size only; damage and range are unchanged")
+    g_weap.add_argument("--swap-weapon", action="append", default=[], metavar="[WHERE:]OLD=NEW", help="change every turret with weapon type OLD to type NEW (repeatable). WHERE limits it to a quadrant (fore, rear, port, starboard, dorsal, ventral), a mount-name prefix, or all (default); OLD may be * for any type. Weapon type ids are in --list-mounts and the editor's Armaments tab, e.g. --swap-weapon fore:4=121")
     g_weap.add_argument("--list-mounts", action="store_true", help="print every weapon mount (name, quadrant, weapon type, position) and the groups usable with --clone, then exit")
     g_slot.add_argument("--munition-slots", type=int, help="make the prefab have this many munition slot actions (needed for the battle UI to show them). Mercury: 4")
     g_slot.add_argument("--fighter-slots", type=int, help="final FighterSlots value (as set in the level files) - adds launch buttons/bays. Mercury default is 3")
@@ -3426,6 +3474,9 @@ def main():
         if a.mount_layout:
             with open(a.mount_layout, encoding="utf-8") as source:
                 mount_layout = json.load(source)
+        if a.swap_weapon and not (a.list_mounts or a.inspect):
+            mount_layout, swap_log = swap_weapon_spec(bundle_mount_layout(a.src), [parse_swap_weapon(t) for t in a.swap_weapon], mount_layout)
+            for line in swap_log: print("swap weapon: " + line)
         double_weapons(
             a.src, tmp,
             offset=off, copies=a.copies,

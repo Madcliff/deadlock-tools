@@ -41,6 +41,7 @@ Without it, the save goes into the work tree. **Discard changes** throws away le
 | Ship localisation | opens the Localisation tab filtered to the ship | |
 | Weapon layout view | **Edit** layer (Turrets / Launch bays / Munition launchers), projection, drag the selected layer's objects, **Reload** | `/api/bundle/layout` (read, includes `bays.read_layout`); staged for Save ship |
 | — Turrets | add/clone/reset turrets, weapon, quadrant, angles, mesh scale | `weapons --mount-layout` |
+| — Change all … to … in … | swap every turret of one weapon type (with counts) to another, in all quadrants or one | staged as layout edits → `weapons --mount-layout`; CLI equivalent `weapons --swap-weapon` |
 | — Launch bays | name, slot, can launch / can dock, dock range, position, squadron types (named from the SquadronDataTable), launch path drawn dashed | `weapons --bay-layout` (`bays`) |
 | — Munition launchers | position, launch points (add/remove), **Remove launcher** (the last one stays while the ship has munition slots) | `weapons --bay-layout` (`launchers`, `removeLaunchers`) |
 | — Realign launch bays | lays the cloned bays out as mirrored pairs in slot order and renames them (staged; review, then Save ship) | `/api/bays/realign` → `bays.realign_spec`; saved as `weapons --bay-layout` |
