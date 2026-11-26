@@ -12,3 +12,4 @@ build/
 *.log
 venv/
 .venv/
+HANDOFF.local.md
