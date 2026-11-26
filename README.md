@@ -31,7 +31,7 @@ Run any tool with `-h` for its full help. After `pip install -e .`, `deadlock <t
 
 ## Guides
 
-- [Unreleased changes](docs/release-notes-unreleased.md) lists the current working-tree additions; [release notes](docs/release-notes-0.6.0.md) cover the latest tagged release.
+- [Unreleased changes](docs/release-notes-unreleased.md) lists the current working-tree additions; [release notes](docs/release-notes-0.6.1.md) cover the latest tagged release.
 - [Editing and installing a mod](docs/workflows.md) covers the browser editor, file types, slot changes, DLL prompts, testing in game, and rollback.
 - [Command-line reference](docs/cli-reference.md) covers all command families, common flags, and examples.
 - [Technical findings](docs/technical-findings.md) records the DLL patches, bundle dependencies, carrier UI findings, and verification limits.
