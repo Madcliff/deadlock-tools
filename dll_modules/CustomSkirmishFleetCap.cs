@@ -25,7 +25,15 @@ using UnityEngine;
 public static class CustomSkirmishFleetCap
 {
     public const string FileName = "deadlock-fleet.txt";
-    public static readonly int[] DefaultCaps = { 32000, 64000 };
+    public static readonly int[] DefaultCaps = MakeDefaultCaps();
+
+    private static int[] MakeDefaultCaps()        // no array initializer (see CustomJamming): explicit stores
+    {
+        int[] caps = new int[2];
+        caps[0] = 32000;
+        caps[1] = 64000;
+        return caps;
+    }
 
     private static bool loaded;
     private static int ships;              // 0 = keep the level data's value

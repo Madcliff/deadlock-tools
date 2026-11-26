@@ -137,3 +137,14 @@ and writes only the requested candidate output.
 
 - `CustomStealthFallback.cs`: static helpers that `StealthModule` / `StealthBatteryWidget` call instead of the TechLab rate getters and `IsOffline`, so stealth works on ships without a Tech Bay (squadrons). Injected by `InjectStealthFallbackHooks`.
 - `CustomJamming.cs`: per-jammer jamming penalties read from `StreamingAssets/deadlock-jamming.txt`; Jammer flags and the penalty reads are routed through it by `InjectJammingHooks`, which also lets the Jam / JamCancel commands act on capital ships with a Jammer (`CanCommandJam` in place of the stock squadron-only `ShipInfo.IsProxy` check).
+
+### Writing modules: two rules
+
+- **No array initializers** (`int[] a = { 1, 2 };`, `new float[] { ... }`). The compiler may store their values as
+  `<PrivateImplementationDetails>` data, which `merge_custom_modules.cs` does not copy. The merged DLL then needs
+  the temporary `CustomModules` assembly and throws "Could not load file or assembly 'CustomModules'" in game.
+  Allocate the array and assign the elements; the merge refuses a DLL that still references `CustomModules`.
+- **Only library calls the game's runtime has.** `build_custom_modules.sh` compiles with `-nostdlib` against the
+  game's `Managed/mscorlib.dll`, `System.dll` and `System.Core.dll`, so a call that would be missing in game is a
+  build error. Before 0.6.1, `string.Split(char, StringSplitOptions)` compiled and threw `MissingMethodException`
+  in game.

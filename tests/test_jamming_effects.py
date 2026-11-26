@@ -72,6 +72,9 @@ class JammingDllHooks(unittest.TestCase):
         self.assertTrue(found, out)
         self.assertGreaterEqual(int(found.group(1)), 2)
         self.assertIn("16 penalty read(s)", out)
+        # the merge refuses a DLL that still references the temporary CustomModules assembly (0.6.0 shipped one:
+        # an array initializer in CustomJamming crashed fighters attacking jammed ships)
+        self.assertNotIn("still references", out)
         self.assertIn("Added the extra fleet-cap choices", out)
         self.assertIn("Routed skirmish ships-per-fleet through CustomSkirmishFleetCap (3 read(s))", out)
         self.assertRegex(out, r"Routed campaign capital ships-per-fleet through CustomSkirmishFleetCap \(\d+ read\(s\)\)")

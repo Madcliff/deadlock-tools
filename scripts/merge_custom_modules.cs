@@ -822,6 +822,25 @@ static class MergePrototype
             InjectStealthFallbackHooks(mod, destType);
         if (srcType.Name == "CustomJamming")
             InjectJammingHooks(mod, destType);
+        // Every reference must point into the merged DLL: one left pointing at the temporary CustomModules assembly
+        // (e.g. an array initializer's <PrivateImplementationDetails> data, which is not copied) throws
+        // "Could not load file or assembly 'CustomModules'" in game, wherever that code runs.
+        var leftover = new List<string>();
+        foreach (var type in mod.GetTypes())
+            foreach (var method in type.Methods.Where(m => m.HasBody))
+                foreach (var ins in method.Body.Instructions)
+                {
+                    var member = ins.Operand as MemberReference;
+                    var owner = member == null ? null : (member as TypeReference) ?? member.DeclaringType;
+                    var scope = owner == null ? null : owner.Scope as AssemblyNameReference;
+                    if (scope != null && scope.Name == source.Name.Name)
+                        leftover.Add(type.FullName + "::" + method.Name + " -> " + member.FullName);
+                }
+        if (leftover.Count > 0)
+            throw new InvalidOperationException("the merged DLL still references " + source.Name.Name + " (avoid array initializers in dll_modules):\n  " +
+                                                string.Join("\n  ", leftover.Take(10)));
+        foreach (var unused in mod.AssemblyReferences.Where(r => r.Name == source.Name.Name).ToList())
+            mod.AssemblyReferences.Remove(unused);
         target.Write(args[2]);
         Console.WriteLine("Merged " + destType.FullName + " into " + args[2]);
     }

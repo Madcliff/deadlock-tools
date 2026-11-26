@@ -89,7 +89,10 @@ public static class CustomJamming
                 if (line.Length == 0 || line.StartsWith("#")) continue;
                 string[] parts = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length < 2) continue;
-                float[] values = { float.NaN, float.NaN, float.NaN };
+                // no array initializer: the compiler stores those as a <PrivateImplementationDetails> data blob that the
+                // merge does not copy (the merged DLL then needs the missing CustomModules assembly)
+                float[] values = new float[3];
+                values[0] = values[1] = values[2] = float.NaN;
                 for (int i = 2; i < parts.Length; i++)
                 {
                     string[] kv = parts[i].Split(new char[] { '=' });
