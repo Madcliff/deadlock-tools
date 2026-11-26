@@ -14,7 +14,7 @@ cecil="/usr/lib/mono/gac/Mono.Cecil/0.11.1.0__0738eb9f132ed756/Mono.Cecil.dll"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/deadlock-custom-modules.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
-for assembly in mscorlib.dll System.dll System.Core.dll Assembly-CSharp.dll Assembly-CSharp-firstpass.dll UnityEngine.dll UnityEngine.CoreModule.dll UnityEngine.UI.dll; do
+for assembly in mscorlib.dll System.dll System.Core.dll Assembly-CSharp.dll Assembly-CSharp-firstpass.dll UnityEngine.dll UnityEngine.CoreModule.dll UnityEngine.UI.dll UnityEngine.TextRenderingModule.dll UnityEngine.UIModule.dll; do
   [[ -f "$managed_dir/$assembly" ]] || { echo "Missing game reference: $managed_dir/$assembly" >&2; exit 1; }
 done
 [[ -f "$source_dll" ]] || { echo "Missing source DLL: $source_dll" >&2; exit 1; }
@@ -30,6 +30,7 @@ mcs -target:library -nostdlib -out:"$work_dir/CustomModules.dll" \
   -r:"$managed_dir/UnityEngine.dll" \
   -r:"$managed_dir/UnityEngine.CoreModule.dll" \
   -r:"$managed_dir/UnityEngine.UI.dll" \
+  -r:"$managed_dir/UnityEngine.TextRenderingModule.dll" -r:"$managed_dir/UnityEngine.UIModule.dll" \
   "$repo_dir/dll_modules/CustomArmourRepairModule.cs" \
   "$repo_dir/dll_modules/CustomSquadronReplacementModule.cs" \
   "$repo_dir/dll_modules/CustomDroneResupplyModule.cs" \

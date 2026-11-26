@@ -75,6 +75,7 @@ class JammingDllHooks(unittest.TestCase):
         # the merge refuses a DLL that still references the temporary CustomModules assembly (0.6.0 shipped one:
         # an array initializer in CustomJamming crashed fighters attacking jammed ships)
         self.assertNotIn("still references", out)
+        self.assertIn("Fit ability buttons to the screen in 2 ShipInfoPanel method(s)", out)
         self.assertIn("Added the extra fleet-cap choices", out)
         self.assertIn("Routed skirmish ships-per-fleet through CustomSkirmishFleetCap (3 read(s))", out)
         self.assertRegex(out, r"Routed campaign capital ships-per-fleet through CustomSkirmishFleetCap \(\d+ read\(s\)\)")

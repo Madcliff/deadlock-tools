@@ -232,6 +232,28 @@ static class MergePrototype
     static void InjectBattleHud(ModuleDefinition module, TypeDefinition helper)
     {
         var panel = module.Types.Single(t => t.Name == "ShipInfoPanel");
+        // Ability buttons: after every ShipInfoPanel method that assigns actions to its command buttons, let
+        // CustomBattleHud.FitCommandButtons switch them to two columns when one would not fit on screen.
+        var fit = helper.Methods.Single(m => m.Name == "FitCommandButtons");
+        int fitted = 0;
+        foreach (var method in panel.Methods.Where(m => m.HasBody && m.Body.Instructions.Any(i =>
+                     (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) && i.Operand is MethodReference r &&
+                     r.Name == "set_AttachedAction" && r.DeclaringType.Name == "ShipInfoPanelCommandButtonWidget")).ToList())
+        {
+            var fitIl = method.Body.GetILProcessor();
+            foreach (var ret in method.Body.Instructions.Where(i => i.OpCode == OpCodes.Ret).ToArray())
+            {
+                ret.OpCode = OpCodes.Nop;
+                var loadThis = Instruction.Create(OpCodes.Ldarg_0);
+                var call = Instruction.Create(OpCodes.Call, fit);
+                fitIl.InsertAfter(ret, loadThis);
+                fitIl.InsertAfter(loadThis, call);
+                fitIl.InsertAfter(call, Instruction.Create(OpCodes.Ret));
+            }
+            fitted++;
+        }
+        if (fitted == 0) throw new InvalidOperationException("no ShipInfoPanel method assigns command button actions");
+        Console.WriteLine("Fit ability buttons to the screen in " + fitted + " ShipInfoPanel method(s)");
         var show = panel.Methods.Single(m => m.Name == "CGEOMHHFFDI");
         var refresh = helper.Methods.Single(m => m.Name == "RefreshRepairCard");
         var fields = new[] { "ECPOPMDBACP", "regenerativeHullResinWidget", "MOFBMPAEICL" }
