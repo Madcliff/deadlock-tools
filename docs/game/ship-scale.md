@@ -96,6 +96,13 @@ donor's values (match by GameObject name: local position, rotation, `InitialAngl
 Mercury this way: 48 mounts (10 fore railguns), the 20 bow clones removed (backup
 `work-backups/mk2-reset-mounts-20261125-025213`).
 
+`parts=("position",)` (any of `RESET_PARTS`: position, rotation, angles, scale, weapon, quadrant) and
+`remove_extra=False` limit the reset; on 2026-11-26 that put two nudged MK2 turrets back in place while keeping the
+new weapon type 121 ("colonial super heavy railgun", 12 damage) on its bow and stern guns.
+
+On 2026-11-26 the MK2 was also returned to the Mercury's own scale (root scale 1.0, collision radius 90, stock-size
+turrets), so the ×1.25 figures above describe the earlier version.
+
 `upper_rows=2` gives a more compact mouth: 15 under the jaw (8 at z 80.58, 7 at z 83.78), 9 across the floor
 including one on the centre line, and 3 pairs down the grooves to z 69.0.
 

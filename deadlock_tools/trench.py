@@ -420,14 +420,22 @@ def trench_layout(src, dst, selector="fore", gap=4.0, upper_rows=1, floor_rows=N
     return report
 
 
-def reset_mounts(src, donor, dst, selector="all", encrypt=None):
+RESET_PARTS = ("position", "rotation", "angles", "scale", "weapon", "quadrant")
+
+
+def reset_mounts(src, donor, dst, selector="all", encrypt=None, parts=RESET_PARTS, remove_extra=True):
     """Put the weapon mounts matching selector back to how donor (e.g. the vanilla bundle a ship was copied from) has
     them, and write dst.
 
     Mounts are matched by GameObject name. A matched mount takes the donor's local position, local rotation,
     InitialAngles, MeshScale, WeaponType and Quadrant; its Transform scale is left alone, so a ship scaled with
     --ship-scale keeps stock-size turrets, laid out in proportion on the bigger hull. Mounts the donor does not have
-    (clones such as Fore01_x2) are removed with their GameObjects. Returns a report dict."""
+    (clones such as Fore01_x2) are removed with their GameObjects unless remove_extra is False.
+    parts limits what is copied: any of RESET_PARTS, e.g. ("position",) puts turrets back in place but keeps their
+    weapon types. Returns a report dict."""
+    unknown = set(parts) - set(RESET_PARTS)
+    if unknown:
+        raise ValueError("unknown reset parts: %s (choose from %s)" % (", ".join(sorted(unknown)), ", ".join(RESET_PARTS)))
     bundle, prefab, _resource = _open(src)
     if encrypt is None:
         with open(src, "rb") as fh: encrypt = not fh.read(7) == b"UnityFS"
@@ -456,13 +464,16 @@ def reset_mounts(src, donor, dst, selector="all", encrypt=None):
         dmb = dvalue(d["mount"].pid); dtr = dvalue(d["transform"].pid)
         tr = fields(m["transform"].pid); mb = fields(m["mount"].pid)
         before = (dict(tr["m_LocalPosition"]), dict(tr["m_LocalRotation"]), dict(mb["InitialAngles"]), mb["MeshScale"], mb["WeaponType"], mb["Quadrant"])
-        tr["m_LocalPosition"] = dict(dtr["m_LocalPosition"]); tr["m_LocalRotation"] = dict(dtr["m_LocalRotation"])
-        mb["InitialAngles"] = dict(dmb["InitialAngles"]); mb["MeshScale"] = dmb["MeshScale"]
-        mb["WeaponType"] = dmb["WeaponType"]; mb["Quadrant"] = dmb["Quadrant"]
+        if "position" in parts: tr["m_LocalPosition"] = dict(dtr["m_LocalPosition"])
+        if "rotation" in parts: tr["m_LocalRotation"] = dict(dtr["m_LocalRotation"])
+        if "angles" in parts: mb["InitialAngles"] = dict(dmb["InitialAngles"])
+        if "scale" in parts: mb["MeshScale"] = dmb["MeshScale"]
+        if "weapon" in parts: mb["WeaponType"] = dmb["WeaponType"]
+        if "quadrant" in parts: mb["Quadrant"] = dmb["Quadrant"]
         if before != (tr["m_LocalPosition"], tr["m_LocalRotation"], mb["InitialAngles"], mb["MeshScale"], mb["WeaponType"], mb["Quadrant"]):
             changed += 1
     log.append("%d of %d matched mount(s) changed back to the donor's values" % (changed, len(theirs)))
-    extra = [m for m in mine if m["name"] not in theirs]
+    extra = [m for m in mine if m["name"] not in theirs] if remove_extra else []
     def remove_subtree(transform):
         go = value(transform)["m_GameObject"]["m_PathID"]
         for child in value(transform)["m_Children"]:
@@ -501,7 +512,7 @@ def reset_mounts(src, donor, dst, selector="all", encrypt=None):
         _b2, p2, _r2 = _open(tmp)
         v2 = lambda pid: p2.read(p2.by_pid[pid])[0]
         left = [m for m in _mounts(p2, v2) if _selected(m["name"], m["quad"], selector)]
-        if sorted(m["name"] for m in left) != sorted(theirs):
+        if remove_extra and sorted(m["name"] for m in left) != sorted(theirs):
             raise ValueError("re-read check failed: the written bundle does not have exactly the donor's mounts")
         with open(tmp, "rb") as fh: data = fh.read()
         with open(dst, "wb") as fh: fh.write(w.xor_bytes(data) if encrypt else data)

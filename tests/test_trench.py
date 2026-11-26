@@ -99,6 +99,24 @@ class ResetMounts(unittest.TestCase):
             report = trench.reset_mounts(back, VANILLA, laid)            # idempotent: nothing to change or remove
             self.assertEqual((report["changed"], report["removed"]), (0, []))
             self.assertEqual(local(back), local(VANILLA))
+            # positions only: weapon types stay as they are
+            moved = os.path.join(tmp, "moved"); kept = os.path.join(tmp, "kept")
+            _b, prefab, _r = trench._open(back); value = lambda pid: prefab.read(prefab.by_pid[pid])[0]
+            mount = trench._mounts(prefab, value)[0]
+            tr = value(mount["transform"].pid); tr["m_LocalPosition"]["y"] += 1.0
+            mb = value(mount["mount"].pid); mb["WeaponType"] = 121
+            cab = prefab.rebuild(replaced={mount["transform"].pid: prefab.write(mount["transform"], tr),
+                                           mount["mount"].pid: prefab.write(mount["mount"], mb)})
+            bundle = _b; (_o1, _s1, f1, n1), (o2, s2, f2, n2) = bundle["nodes"][0], bundle["nodes"][1]
+            from deadlock_tools import weapons as W
+            W.write_bundle(moved, bundle, [(f1, n1, cab), (f2, n2, bundle["data"][o2:o2 + s2])])
+            report = trench.reset_mounts(moved, VANILLA, kept, parts=("position",), remove_extra=False)
+            self.assertEqual(report["changed"], 1)
+            after = local(kept)
+            self.assertEqual(after[mount["name"]][1], local(VANILLA)[mount["name"]][1])     # back in place
+            self.assertEqual(after[mount["name"]][3], 121)                                 # weapon kept
+            with self.assertRaises(ValueError):
+                trench.reset_mounts(back, VANILLA, kept, parts=("colour",))
 
 
 if __name__ == "__main__":
