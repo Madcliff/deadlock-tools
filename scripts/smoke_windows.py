@@ -5,16 +5,34 @@ import shutil
 import socket
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
+from tempfile import mkdtemp
 import time
 from urllib.error import URLError
 from urllib.request import build_opener, ProxyHandler
 
 
+def remove_tree(directory, seconds=30):
+    """Delete the test folder. Windows can keep the copied .exe locked for a moment after the editor is killed
+    (the one-file launcher's child exiting, or Defender scanning it), so retry before giving up; a folder left in
+    the runner's temp directory is not a test failure."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            shutil.rmtree(directory)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as error:
+            if time.monotonic() >= deadline:
+                print(f"warning: could not remove {directory}: {error}")
+                return
+            time.sleep(1)
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
-    with TemporaryDirectory(prefix="Deadlock Tools test ") as temp:
-        directory = Path(temp)
+    directory = Path(mkdtemp(prefix="Deadlock Tools test "))
+    try:
         app = directory / executable.name
         shutil.copy2(executable, app)
         subprocess.run([str(app), "weapons", "-h"], cwd=directory, check=True, timeout=60)
@@ -50,6 +68,8 @@ def main():
                 subprocess.run(["taskkill", "/PID", str(gui.pid), "/T", "/F"],
                                capture_output=True, check=False, timeout=15)
                 gui.wait(timeout=15)
+    finally:
+        remove_tree(directory)
 
 
 if __name__ == "__main__":
