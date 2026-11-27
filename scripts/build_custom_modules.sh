@@ -32,6 +32,9 @@ mcs -target:library -nostdlib -out:"$work_dir/CustomModules.dll" \
   -r:"$managed_dir/UnityEngine.UI.dll" \
   -r:"$managed_dir/UnityEngine.TextRenderingModule.dll" -r:"$managed_dir/UnityEngine.UIModule.dll" \
   "$repo_dir/dll_modules/CustomArmourRepairModule.cs" \
+  "$repo_dir/dll_modules/CustomArmourRepairDrones.cs" \
+  "$repo_dir/dll_modules/CustomArmourRepairDroneModule.cs" \
+  "$repo_dir/dll_modules/CustomArmourRepairDroneAction.cs" \
   "$repo_dir/dll_modules/CustomSquadronReplacementModule.cs" \
   "$repo_dir/dll_modules/CustomDroneResupplyModule.cs" \
   "$repo_dir/dll_modules/CustomMagazineCapacityModule.cs" \
@@ -54,7 +57,7 @@ mcs -out:"$work_dir/merge_custom_modules.exe" -r:"$cecil" \
   "$repo_dir/scripts/merge_custom_modules.cs"
 
 current="$source_dll"
-types=(CustomModuleSubsystems CustomArmourRepairModule CustomSquadronReplacementModule CustomDroneResupplyModule CustomMagazineCapacityModule CustomRepairBaySlots CustomBattleHud CustomInstantPlatingModule CustomInstantPlatingAction CustomEmpPulseModule CustomEmpPulseAction CustomTargetedEmpModule CustomTargetedEmpAction CustomCommanderStatModifiers CustomSkirmishFleetCap CustomSubsystemModifiers CustomStealthFallback CustomJamming)
+types=(CustomModuleSubsystems CustomArmourRepairModule CustomSquadronReplacementModule CustomArmourRepairDroneModule CustomDroneResupplyModule CustomMagazineCapacityModule CustomRepairBaySlots CustomBattleHud CustomInstantPlatingModule CustomInstantPlatingAction CustomEmpPulseModule CustomEmpPulseAction CustomTargetedEmpModule CustomTargetedEmpAction CustomCommanderStatModifiers CustomSkirmishFleetCap CustomSubsystemModifiers CustomStealthFallback CustomJamming CustomArmourRepairDroneAction CustomArmourRepairDrones)
 for index in "${!types[@]}"; do
   next="$work_dir/merged-$index.dll"
   mono "$work_dir/merge_custom_modules.exe" "$current" "$work_dir/CustomModules.dll" \

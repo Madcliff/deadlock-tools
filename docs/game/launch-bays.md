@@ -65,6 +65,11 @@ on the port side, four pairs of them on the same spot.
 Mercury Mk II result (2026-11-24): slots 2–13 as six mirrored pairs, 8 bays per side, closest moved pair 3.0 units
 apart; vipers bays and the fore docking bays unchanged.
 
+The local Mk II's side-tube update gives fighter slots 0–11 launch-only points using the stock port tube for
+even slots and the stock starboard tube for odd slots. They use the original tube transforms and launch paths.
+The fore and rear hangar points assigned to those slots handle docking. Support slots 12–15 still launch and dock
+at the rear hangars. The fighter tube points include the custom missile Viper squadron (type 116).
+
 ## The `--bay-layout` spec
 
 ```json

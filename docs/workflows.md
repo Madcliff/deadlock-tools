@@ -75,7 +75,12 @@ Select a ship, choose its bundle, and enable the desired controls under **Abilit
 |---|---|---|
 | Turnaround repair bay | Defender | A docking bay and a free position in the Fighters menu. The tool makes a docking-only bay available to the supported fighters. |
 | Targeted resupply | Celestra | A position for the Restock Munitions submenu. Both stock restock controls are transferred. |
-| Deploy plating | Celestra | A matching shared asset reference for the plating drone. The installed DLL permits the launching ship in the target filter if it meets the standard armour and subsystem checks. Verify self-targeting through the battle UI. |
+| Deploy plating | Celestra | A matching shared asset reference for the plating drone. **Save ship** builds the DLL that allows the launching ship as a target when it passes the normal plating checks. Install the matching DLL with the bundle. |
+| Hull Repair Drones | Hydra | Transfers the ability, its action and the shared repair drone dependencies. The editor exposes stock capacity, drones per launch, repair rate, lifetime and launch delay. |
+| Armour Repair Drones | Hydra | Uses the same drone bank in armour mode. It restores the weakest damaged facing up to its calculated maximum armour. Both modes use the stock target picker and can target the casting ship with the custom DLL. |
+| Coordinated Reload | Hydra | Copies the shared reload pulse. The stock ability derives its range from the ship's DRADIS. |
+| Machine Learning Matrix | Gorgon | Requires a Tech Bay. The transfer copies and remaps the local beam prefab. |
+| RSpam | Medusa | Requires a Tech Bay. The stock ability targets allied ships with Cylon processor modules. The transfer copies and remaps the beam prefab. The donor's AI ship priority order is editable as a list of ship type IDs. |
 | Technical support | Defender | A Raptor-compatible launch bay and a Raptor available in battle. |
 | Marine reinforcement | Defender | A Raptor-compatible launch bay and a Raptor available in battle. |
 

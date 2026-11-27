@@ -1,13 +1,15 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.UI;
+using Object = UnityEngine.Object;
 
 /// <summary>
 /// Battle ship panel additions: refreshes local armour, adds the armour repair card to the vanilla status stack, and
-/// lays the ability buttons out in two columns only when the stock single column would push the right-hand panel off
-/// the screen (ships with many abilities, squadrons and munitions, such as a heavily modded carrier).
+/// lays the ability buttons out in two columns for configured ship types.
 /// </summary>
 public static class CustomBattleHud
 {
@@ -17,22 +19,116 @@ public static class CustomBattleHud
     private static readonly MethodInfo ArmourRefresh = typeof(ShipInfoPanel).GetMethod("KNABGBMAIKE", Private);
 
     private static readonly FieldInfo CommandList = typeof(ShipInfoPanel).GetField("commandButtonWidgetList", Private);
+    private static readonly FieldInfo SlotList = typeof(ShipInfoPanel).GetField("slotList", Private);
     private static readonly FieldInfo RightPanels = typeof(ShipInfoPanel).GetField("rightPanels", Private);
     private static readonly Dictionary<Text, bool> labelBestFit = new Dictionary<Text, bool>();
     private static float stockSpacing = -1f;
-    private const float ScreenMargin = 8f;
+    private const string LayoutFile = "deadlock-battle-hud.txt";
+    private static HashSet<int> doubleColumnShips;
+    private static readonly HashSet<int> fourSlotColumnShips = new HashSet<int>();
+    private static readonly Dictionary<GridLayoutGroup, Vector2> stockSlotSizes = new Dictionary<GridLayoutGroup, Vector2>();
+    private static readonly Dictionary<RectTransform, float> stockWidths = new Dictionary<RectTransform, float>();
+    private static readonly Dictionary<RectTransform, float> stockStatusX = new Dictionary<RectTransform, float>();
+
+    private static void ResizeWidth(RectTransform rect, float extra)
+    {
+        float width;
+        if (!stockWidths.TryGetValue(rect, out width))
+        {
+            width = rect.rect.width;
+            if (width <= 0f) return;
+            stockWidths.Add(rect, width);
+        }
+        rect.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, width + extra);
+    }
+
+    private static void LoadLayouts()
+    {
+        if (doubleColumnShips == null)
+        {
+            doubleColumnShips = new HashSet<int>();
+            try
+            {
+                string path = Path.Combine(Application.streamingAssetsPath, LayoutFile);
+                if (File.Exists(path))
+                {
+                    foreach (string raw in File.ReadAllLines(path))
+                    {
+                        int comment = raw.IndexOf('#');
+                        string line = (comment < 0 ? raw : raw.Substring(0, comment)).Trim();
+                        const string slotsPrefix = "slots4 ";
+                        bool slots = line.StartsWith(slotsPrefix, StringComparison.Ordinal);
+                        int id;
+                        if (int.TryParse(slots ? line.Substring(slotsPrefix.Length).Trim() : line,
+                            NumberStyles.None, CultureInfo.InvariantCulture, out id))
+                            (slots ? fourSlotColumnShips : doubleColumnShips).Add(id);
+                    }
+                }
+            }
+            catch (IOException error)
+            {
+                Debug.LogWarning("CustomBattleHud: " + error.Message);
+            }
+            catch (UnauthorizedAccessException error)
+            {
+                Debug.LogWarning("CustomBattleHud: " + error.Message);
+            }
+        }
+    }
+
+    private static void FitSlots(ShipInfoPanel panel, RectTransform right, bool fourColumns)
+    {
+        var list = SlotList == null ? null : SlotList.GetValue(panel) as Component;
+        if (list == null) return;
+        var grid = list.GetComponent<GridLayoutGroup>();
+        var rect = list.transform as RectTransform;
+        if (grid == null || rect == null) return;
+        var slotPanel = rect.parent as RectTransform;
+        var main = slotPanel == null ? null : slotPanel.parent as RectTransform;
+        var status = right.parent == null ? null : right.parent.Find("HackingAndBoarding") as RectTransform;
+        if (slotPanel != null && main != null && main.parent == right && status != null)
+        {
+            const float extraWidth = 80f;
+            float extra = fourColumns ? extraWidth : 0f;
+            ResizeWidth(right, extra);
+            ResizeWidth(main, extra);
+            ResizeWidth(slotPanel, extra);
+            ResizeWidth(rect, extra);
+            float x;
+            if (!stockStatusX.TryGetValue(status, out x))
+            {
+                x = status.anchoredPosition.x;
+                stockStatusX.Add(status, x);
+            }
+            status.anchoredPosition = new Vector2(x - extra, status.anchoredPosition.y);
+        }
+        Vector2 stockSize;
+        if (!stockSlotSizes.TryGetValue(grid, out stockSize))
+        {
+            stockSize = grid.cellSize;
+            stockSlotSizes.Add(grid, stockSize);
+        }
+        grid.constraintCount = fourColumns ? 4 : 2;
+        float usableWidth = rect.rect.width - grid.padding.horizontal;
+        if (usableWidth <= 3f * grid.spacing.x) usableWidth = 2f * stockSize.x + grid.spacing.x;
+        grid.cellSize = fourColumns
+            ? new Vector2(Mathf.Min(stockSize.x, (usableWidth - 3f * grid.spacing.x) / 4f), stockSize.y)
+            : stockSize;
+    }
 
     /// <summary>Called after the panel assigns actions to its ability buttons (merge: InjectBattleHud).</summary>
     public static void FitCommandButtons(ShipInfoPanel panel)
     {
         if (panel == null || CommandList == null || RightPanels == null) return;
+        LoadLayouts();
+        var ship = Selected == null ? null : Selected.GetValue(panel) as ShipInfo;
         var list = CommandList.GetValue(panel) as Component;
         var right = RightPanels.GetValue(panel) as Component;
         if (list == null || right == null) return;
         RectTransform listRect = list.transform as RectTransform;
         RectTransform rightRect = right.transform as RectTransform;
-        RectTransform screen = rightRect == null ? null : rightRect.parent as RectTransform;
-        if (listRect == null || rightRect == null || screen == null) return;
+        if (listRect == null || rightRect == null) return;
+        FitSlots(panel, rightRect, ship != null && fourSlotColumnShips.Contains((int)ship.ShipType));
 
         var buttons = new List<RectTransform>();
         foreach (Transform child in listRect)
@@ -45,12 +141,7 @@ public static class CustomBattleHud
         foreach (var button in buttons) buttonHeight = Mathf.Max(buttonHeight, LayoutUtility.GetPreferredHeight(button));
         if (buttonHeight <= 0f) buttonHeight = 30f;
 
-        // height of the button list in one column vs. as laid out now; the right-hand panel grows by the difference
-        int count = buttons.Count;
-        float oneColumn = count == 0 ? 0f : count * buttonHeight + (count - 1) * spacing;
-        LayoutRebuilder.ForceRebuildLayoutImmediate(rightRect);
-        float withOneColumn = rightRect.rect.height - LayoutUtility.GetPreferredHeight(listRect) + oneColumn;
-        bool needed = withOneColumn > screen.rect.height - ScreenMargin;
+        bool needed = ship != null && doubleColumnShips.Contains((int)ship.ShipType);
 
         if (needed && grid == null)
         {

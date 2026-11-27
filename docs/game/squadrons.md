@@ -189,11 +189,14 @@ object. It stays in its carrier's `ShipInfo.Children`, so it can be revived.
 so a destroyed squadron never came back: the module filled its counter, saw the squadron still dead, and retried
 every tick. Seen 2026-11-25 in a battle with the Colonial Mercury MK2: `ColonialRaptorSquadron_0031` died 312 s in
 and was not replaced over the remaining ~600 s. The module now does steps 1–3 itself and then sets the hull to one
-fighter's share (the smallest loss threshold). Then it finishes the landing teardown as before (removes the squadron
+fighter's share (the smallest loss threshold). The rebuild now calls the native ship revive before applying that
+one-fighter hull value. It clears the squadron's temporary disable, queued orders, and targets, and clears jamming,
+ship disable, and pending weapon targets on the squadron and its individual craft. The squadron returns to AutoFire.
+Then it finishes the landing teardown as before (removes the squadron
 from the simulation, registers the docked fighters, sets the action to 0, deactivates the GameObject), so the
 carrier's normal hangar repair (`RepairCrew.FighterRepairRate`) refills it from there. Status, `Force` and the
-`FightersDocked` publish go through reflection, because the status property and the `Force` field have obfuscated
-names in this build.
+`FightersDocked` publish use the game's docked state and event. Gun batteries are collected at the start of each
+simulation turn from active, living ships. A squadron relaunched after that collection can miss that turn.
 
 ## Where a squadron type lives
 
@@ -389,9 +392,25 @@ prefabs and 0 on capital ships. On a stock DLL a capital ship's Jam order is acc
 lights because the command exists), then does nothing, so the button reads "off" again next turn (the game log still
 lists `<ship> - Jam` each time). `InjectJammingHooks` swaps that `IsProxy` read for `CustomJamming.CanCommandJam` (IsProxy
 or a Jammer on the ship) in every method that then calls `set_JamActive` (the two handlers plus an unused decoy).
-Everything after that is stock: `ShipInfo.Tick` calls `Jammer.Tick` for any ship; while `jamActive` it jams enemy ships
+`ShipInfo.Tick` calls `Jammer.Tick` for any ship. While `jamActive` it jams enemy ships
 that are `IsProxy` (squadrons, not capital ships) and in range, and rolls against guided missiles. It switches off on
 `JamCancel`, a Hack order, or its ship's death.
+
+**Capital jammer battery.** The custom DLL charges 10 power per 120 battle ticks while a capital ship's jammer is
+active. A ship with Stealth, such as the Mercury Mk II, spends its existing battery charge. Stealth recharge pauses
+while jamming, and simultaneous stealth still has its own drain. A capital ship without Stealth starts with a
+separate 100-power reserve and recovers 24 power per 120 ticks while jamming is off. The reserve lives on the battle
+instance and has no HUD meter. Empty batteries shut jamming off and block activation until there is enough charge
+for a tick. Squadron and missile jammers keep their existing behavior.
+
+The jammer checks for the ship's Stealth component at runtime, so the order in which you add the abilities does
+not affect battery sharing. **Save ship** prepares the custom DLL for bundles with a Jammer, including ships with
+no other custom modules.
+
+Ships → Abilities → Jamming exposes battery drain, reserve capacity and reserve recharge. These per-ship overrides
+live in `deadlock-jamming.txt` as `drain`, `reserve` and `recharge`. Drain and recharge are measured per 120
+battle ticks. A zero drain makes jamming free. Reserve and reserve recharge apply only when there is no Stealth
+module. Clearing an override restores the default.
 
 ## Launch bays
 

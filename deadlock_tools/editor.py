@@ -1304,10 +1304,19 @@ class Project:
         return sd.Db(self.dll, dst, self.S), clean
 
     def apply(self, edits, fresh=False):
-        log = []; os.makedirs(self.work_paths["levels"], exist_ok=True)
+        import tempfile
+
+        if not edits:
+            return []
+        log = []
+        outputs = []
         scalar = [e for e in edits if "field" in e]; vets = [e for e in edits if "vet" in e]; resea = [e for e in edits if "research" in e]
-        with self.lock:
+        with self.lock, tempfile.TemporaryDirectory(prefix="ship-levels-") as staged:
             for f in self.table_files:
+                name = os.path.basename(f)
+                target = os.path.join(self.work_paths["levels"], name)
+                if os.path.exists(target) and config.same_file(target, f):
+                    raise ValueError("refusing to overwrite the original %s - choose another output folder" % f)
                 db = sd.Db(self.dll, self.src_for(f, fresh), self.S)
                 for e in scalar:
                     s = db.find(e["ship"]); fld = e["field"]
@@ -1320,7 +1329,7 @@ class Project:
                         db.write_int(off, int(fv))
                     elif kind == "bool": struct.pack_into("<B", db.buf, db.base + off, 1 if v in (True, 1, "1", "true", "True") else 0)
                     else: raise ValueError("%s is not a simple number/flag" % fld)
-                dst = os.path.join(self.work_paths["levels"], os.path.basename(f)); config.write(dst, db.buf, f)
+                dst = os.path.join(staged, name); config.write(dst, db.buf, f)
                 wanted = {}
                 for e in vets:
                     db, clean = self._set_vet(db, dst, e["ship"], e["vet"]); wanted[e["ship"]] = clean
@@ -1335,11 +1344,14 @@ class Project:
                     want = {rk: dict(effs) for rk, effs in clean}
                     if set(have) != set(want) or any(set(have[k]) != set(want[k]) or any(abs(have[k][i] - want[k][i]) > 1e-4 for i in want[k]) for k in want):
                         raise ValueError("verification failed for the veterancy of %s" % name)
-                log.append("wrote %s" % dst)
+                with open(dst, "rb") as stream:
+                    outputs.append((stream.read(), target))
+                log.append("wrote %s" % target)
+            self._promote(outputs, "ship-levels")
+            self._view = None
             for e in scalar: log.append("%s.%s = %s" % (e["ship"], e["field"], e["value"]))
             for e in resea: log.append("%s: research entries updated (%d campaign(s))" % (e["ship"], len(e["research"])))
             for e in vets: log.append("%s: veterancy updated (%d rank(s) with effects)" % (e["ship"], len([r for r in e["vet"] if r["effects"]])))
-        self._view = None
         return log
 
     # ---- the other command-line commands (shipdb) ----
@@ -1407,7 +1419,7 @@ class Project:
             if g.title in ("positional arguments", "options"): continue
             for a in g._group_actions:
                 if not a.option_strings or a.dest in ("help", "out", "bundles", "inspect", "bay_layout", "list_bays", "realign_bays") or a.help == argparse.SUPPRESS: continue   # bays: Weapon layout view
-                donor_choice = a.dest in ("defender_donor", "celestra_donor", "stealth")
+                donor_choice = a.dest == "stealth" or a.dest.removesuffix("_donor") in wmod.SUPPORT_DONOR_BUNDLES and a.dest.endswith("_donor")
                 choices = self.bundle_files() if donor_choice else (list(a.choices) if a.choices else None)
                 kind = "choice" if donor_choice else "bool" if isinstance(a, argparse._StoreTrueAction) else "choice" if a.choices else "list" if isinstance(a, argparse._AppendAction) else "text"
                 out.append({"group": g.title, "ability": ability_group.get(a.dest), "dest": a.dest, "flag": a.option_strings[-1], "kind": kind, "help": (a.help or "").replace("%%", "%"), "choices": choices,
@@ -1736,8 +1748,8 @@ class Project:
                     finally:
                         if os.path.exists(temporary): os.unlink(temporary)
         output = r.stdout + r.stderr
-        penalties = {key: (None if str(opts.get(opt)).strip().lower() in ("global", "-", "") else opts.get(opt))
-                     for opt, key in wmod.JAM_PENALTY_OPTIONS.items() if opts.get(opt) not in (None, False)}
+        penalties = {key: (None if str(opts.get(opt)).strip().lower() in ("global", "default", "-", "") else opts.get(opt))
+                     for opt, key in wmod.JAM_OVERRIDE_OPTIONS.items() if opts.get(opt) is not None and opts.get(opt) is not False}
         if r.returncode == 0 and produced and penalties:
             try:
                 output += "\n" + wmod.set_ship_jamming(dst, self.work_paths["bundles"], [self.bundles] if self.bundles else [], penalties)
@@ -1861,11 +1873,14 @@ class Project:
                 component_names.append(name)
         custom_types = {"CustomArmourRepairModule", "CustomSquadronReplacementModule",
                         "CustomDroneResupplyModule", "CustomMagazineCapacityModule",
-                        "CustomInstantPlatingModule", "CustomInstantPlatingAction"}
+                        "CustomInstantPlatingModule", "CustomInstantPlatingAction",
+                        "CustomArmourRepairDroneModule", "CustomArmourRepairDroneAction"}
         custom_types.update({"CustomSubsystemModifiers", "CustomModuleSubsystems"})
         custom_types.update({"CustomEmpPulseModule", "CustomEmpPulseAction",
                              "CustomTargetedEmpModule", "CustomTargetedEmpAction"})
         module_count = sum(name in custom_types for name in component_names)
+        # These stock prefab types also use hooks from the custom DLL.
+        uses_ability_hooks = any(name in component_names for name in ("Jammer", "DeployPlatingModule", "HullRepairModule"))
         action_count = component_names.count("TurnaroundRepairBayAction")
         repair_module_count = component_names.count("TurnaroundRepairBayModule")
         if action_count != repair_module_count:
@@ -1874,7 +1889,7 @@ class Project:
         if action_count > 8:
             raise ValueError("the editor supports at most 8 repair bays")
 
-        wants_custom = bool(module_count or action_count)
+        wants_custom = bool(module_count or action_count or uses_ability_hooks)
         if not wants_custom:
             if patches:
                 return self.dll_patch(patches)
@@ -2422,7 +2437,7 @@ function plannedStats(bundle){
 }
 function bundleOptionValues(bundle){
  const opts={};
- for(const area of [bundle.slots,bundle.sections])area.querySelectorAll('[data-d]').forEach(input=>{opts[input.dataset.d]=input.type==='checkbox'?input.checked:input.value});
+ for(const area of [bundle.slots,bundle.sections,bundle.installedAbilities])area.querySelectorAll('[data-d]').forEach(input=>{opts[input.dataset.d]=input.type==='checkbox'?input.checked:input.value});
  return opts;
 }
 // Everything the Save ship button would write to the bundle. strict=true validates and throws.
@@ -2440,8 +2455,17 @@ function shipBundleChanges(bundle,strict=false){
  if(slotValue('fighter_slots')&&slotValue('utility_slots')&&Number(slotValue('fighter_slots'))+Number(slotValue('utility_slots'))!==stats.launch_actions)changed.push('fighter_slots','utility_slots');
  const groupsInput=bundle.slots?.querySelector('[data-d="squadron_groups"]');
  if(strict&&changed.includes('squadron_groups')&&groupsInput&&!groupsInput.checkValidity())throw new Error('Squadron groups: '+groupsInput.validationMessage);
+ if(strict)for(const input of bundle.installedAbilities.querySelectorAll('[data-d]')){
+   if(changed.includes(input.dataset.d)&&!input.reportValidity())throw new Error(input.validationMessage);
+ }
  const options={};
  for(const [name,value] of Object.entries(opts)){
+   if(name.startsWith('jam_battery_')){
+     if(changed.includes(name))options[name]=value.trim()||'default';
+     continue;
+   }
+   if(name==='group_repair_bays')continue;
+   if(name==='turnaround_repair_actions'&&!changed.includes(name)&&!opts.turnaround_repair_bay&&!opts.group_repair_bays)continue;
    if(['munition_slots','fighter_slots','utility_slots','squadron_groups'].includes(name)&&!changed.includes(name))continue;
    options[name]=value;
  }
@@ -2450,22 +2474,31 @@ function shipBundleChanges(bundle,strict=false){
    for(const input of area.querySelectorAll('[data-prefab-field]')){
      const inputs=input.matches('fieldset')?[...input.querySelectorAll('input')]:[input];
      if(strict&&inputs.some(field=>!field.reportValidity()))throw new Error('Enter a valid value for the highlighted bundle field.');
-     const value=input.matches('fieldset')?Object.fromEntries(inputs.map(field=>[field.dataset.axis,field.valueAsNumber]))
+     const priorityList=input.dataset.prefabField==='RSpamModule.shipPrioritiesAI';
+     const value=priorityList?(input.value.trim()?input.value.split(',').map(Number):[])
+       :input.matches('fieldset')?Object.fromEntries(inputs.map(field=>[field.dataset.axis,field.valueAsNumber]))
        :input.type==='checkbox'?input.checked:input.tagName==='SELECT'?Number(input.value):input.valueAsNumber;
      const original=JSON.parse(input.dataset.original);
-     const same=input.matches('fieldset')?Object.keys(value).every(axis=>value[axis]===original[axis]):value===original;
+     const same=priorityList?JSON.stringify(value)===JSON.stringify(original)
+       :input.matches('fieldset')?Object.keys(value).every(axis=>value[axis]===original[axis]):value===original;
      if(!same&&!(typeof value==='number'&&Number.isNaN(value)&&!strict))prefab[input.dataset.prefabField]=value;
    }
  }
  const layout=strict?bundle.layout.pending():null,layoutCount=bundle.layout.count();
  return {count:changed.length+Object.keys(prefab).length+layoutCount,options,changedOptions:changed,prefab,layout};
 }
+let savingShip=false;
+const pendingBundleUpdates=new Map();
 function updPend(){
  const n=Object.keys(state.pending).length+shipBundleChanges(activeBundle).count;
- if(n)state.saveStatus=null;
- $('#pend').className=n||!state.saveStatus?'hint':state.saveStatus.cls;
- $('#pend').textContent=n?n+' unsaved change'+(n>1?'s':''):state.saveStatus?.text||'';
- $('#apply').disabled=!n;$('#discard').disabled=!n;renderList();
+ const dllPending=pendingBundleUpdates.has(activeBundle?.currentFile);
+ if(n&&state.saveStatus?.cls==='msg-ok')state.saveStatus=null;
+ const count=n?n+' unsaved change'+(n>1?'s':''):'';
+ if(!savingShip){
+   $('#pend').className=state.saveStatus?.cls||'hint';
+   $('#pend').textContent=[state.saveStatus?.text,count,dllPending?'DLL/UI update pending':''].filter(Boolean).join(' · ');
+ }
+ $('#apply').disabled=savingShip||(!n&&!dllPending);$('#discard').disabled=savingShip||!n;renderList();
  activeBundle?.refreshAgreement?.();
 }
 function renderList(){const q=$('#q').value.toLowerCase();const dirty=new Set(Object.values(state.pending).map(p=>p.ship));const box=$('#list');box.replaceChildren(...state.ships.filter(s=>(s.name+' '+s.faction+' '+s.class).toLowerCase().includes(q)).map(s=>el('div',{class:'ship'+(s.name===state.cur?' on':''),onclick:()=>openShip(s.name)},el('span',{},dirty.has(s.name)?el('span',{class:'dot'},'● '):'',s.name),el('small',{},s.faction[0]+' · '+s.class))))}
@@ -2599,19 +2632,32 @@ function showCloneShipForm(){
   el('div',{class:'card'},el('h3',{},'New ship'),el('div',{class:'grid'},field('Copy ship settings from',donor),field('Donor source',donorLayer),field('Database ship name',name),field('In-game display name',display),field('New bundle file name',bundle),field('Donor bundle file',donorBundle),field('Research list',list),field('Blueprint heading',header),field('Blueprint description',description)),el('p',{class:'hint'},'The current work copy is used by default so its edited stats, abilities, and bundle settings carry over. Choose the configured base folder to copy vanilla values. The new ship is written to the work tree.'),el('div',{class:'row'},save),message));
 }
 $('#load-bundle').onclick=async()=>{try{const file=await pickPath({files:true,start:state.info.bundle_dir||state.info.home,title:'Load a ship bundle'});if(file)openBundleFile(file)}catch(e){alert(e.message)}};
-$('#discard').onclick=()=>{state.pending={};if(state.data){renderShip();if(activeBundle?.currentFile){activeBundle.activatePath(activeBundle.currentFile);activeBundle.layout.refresh()}}updPend()};
+$('#discard').onclick=()=>{state.pending={};state.saveStatus=null;if(state.data){renderShip();if(activeBundle?.currentFile){activeBundle.activatePath(activeBundle.currentFile);activeBundle.layout.refresh()}}updPend()};
 // The one save for the Ships tab: level record edits, bundle prefab fields, bundle options and the weapon layout.
 async function saveShip(){
+ if(savingShip)return;
  const b=$('#apply'),pend=$('#pend'),bundle=activeBundle,edits=Object.values(state.pending);
+ const fresh=$('#fresh').checked;
  const say=(text,cls='hint')=>{state.saveStatus=cls==='hint'?null:{text,cls};pend.className=cls;pend.textContent=text;if(bundle?.message){bundle.message.className=cls;bundle.message.textContent=text}};
- let bundleSaved=null,levelSaved=false,changes;
+ let bundleSaved=null,levelSaved=false,dllUpdated=false,changes;
+ const updateBundle=async file=>{
+   say('Updating the custom-module DLL and UI assets…');
+   const update=await api('/api/editor/update',{bundle:file,patches:pendingBundleUpdates.get(file)});
+   bundle.output.hidden=false;
+   bundle.output.textContent+='\n\n'+update.output;
+   if(!update.ok)throw new Error('DLL/UI update failed (see the bundle output).');
+   pendingBundleUpdates.delete(file);
+   dllUpdated=update.updated;
+ };
  try{changes=shipBundleChanges(bundle,true)}catch(e){say(e.message,'msg-bad');return}
  const writesBundle=changes.count>0;
  if(writesBundle&&!bundle.currentFile){say('Choose a bundle file before saving bundle changes.','msg-bad');return}
  const overwrite=writesBundle&&bundle.overwriteBox?.checked;
  if(overwrite&&!confirm('Replace the opened bundle file? A backup is made beside it.\n\n'+bundle.currentFile))return;
- b.disabled=true;
+ savingShip=true;
+ b.disabled=$('#discard').disabled=true;
  try{
+  if(pendingBundleUpdates.has(bundle?.currentFile))await updateBundle(bundle.currentFile);
   if(writesBundle){
    say('Checking bundle requirements…');
    const patches=await bundlePatchOptions(changes.options);
@@ -2621,26 +2667,26 @@ async function saveShip(){
    bundle.output.textContent=result.cmd+'\n\n'+result.output;bundle.output.hidden=false;
    if(!result.ok)throw new Error('The bundle tool reported an error (see the output under Saving the bundle).');
    bundleSaved=result;
-   say('Updating the custom-module DLL and UI assets…');
-   const update=await api('/api/editor/update',{bundle:result.dst,patches});
-   bundle.output.textContent+='\n\n'+update.output;
-   if(!update.ok)throw new Error('The bundle was saved, but the DLL/UI update failed (see the output).');
-   bundleSaved.update=update;
+   pendingBundleUpdates.set(result.dst,patches);
+   bundle.activatePath(result.dst,true);
+   bundle.layout.refresh();
+   await updateBundle(result.dst);
   }
-  let log=[];
-  if(edits.length){say('Saving the level data…');log=(await api('/api/apply',{edits,fresh:$('#fresh').checked})).log;levelSaved=true}
-  state.pending={};
+  if(edits.length){
+   say('Saving the level data…');
+   await api('/api/apply',{edits,fresh});
+   levelSaved=true;
+   for(const [id,edit] of Object.entries(state.pending))if(edits.includes(edit))delete state.pending[id];
+  }
   await loadShips();if(state.cur)await openShip(state.cur);
-  if(bundleSaved){openedBundles.set(bundle.ship,bundleSaved.dst);bundle.activatePath(bundleSaved.dst);bundle.layout.refresh()}
-  updPend();
   const parts=[];
   if(levelSaved)parts.push('level data ('+edits.length+' change'+(edits.length>1?'s':'')+')');
   if(bundleSaved)parts.push('bundle '+bundleSaved.dst.split(/[\\/]/).pop()+(overwrite?' (over the opened file; backup made)':''));
-  if(bundleSaved?.update?.updated)parts.push('custom-module DLL');
+  if(dllUpdated||!parts.length)parts.push('DLL/UI update');
   say('Saved '+parts.join(', ')+(overwrite?'.':' to the work folder.'),'msg-ok');
  }catch(e){
   say((bundleSaved?'Bundle saved. ':'')+(levelSaved?'Level data saved. ':'')+e.message,'msg-bad');
- }finally{b.disabled=!(Object.keys(state.pending).length+shipBundleChanges(activeBundle).count)}
+ }finally{savingShip=false;updPend()}
 }
 $('#apply').onclick=saveShip;
 document.querySelectorAll('header nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('on',x===b));for(const id of ['#pend','#apply','#discard'])$(id).hidden=b.dataset.t!=='ships';for(const t of ['ships','dll','commanders','squadrons','tools','localisation','armaments','settings'])$('#tab-'+t).hidden=t!==b.dataset.t;if(b.dataset.t==='dll')loadDll();if(b.dataset.t==='commanders')loadCommanders();if(b.dataset.t==='squadrons')loadSquadrons();if(b.dataset.t==='tools')loadTools();if(b.dataset.t==='localisation')loadLocalisation();if(b.dataset.t==='armaments')loadArmaments();if(b.dataset.t==='settings')loadSettings()});
@@ -2896,8 +2942,17 @@ function weaponLayout(bundle){
    const edit=()=>{changed();draw();renderSlots()};
    const number=(value,write,attrs={})=>el('input',{type:'number',step:'any',required:true,value,disabled:busy||gone,...attrs,
      oninput:event=>{const input=event.target;if(input.validity.valid&&Number.isFinite(input.valueAsNumber))write(input.valueAsNumber);edit()}});
-   const vector=(name,target)=>el('fieldset',{class:'layout-vector'},el('legend',{},name),...[... 'xyz'].map(axis=>
-     label(axis.toUpperCase(),number(round(target[axis]),value=>{target[axis]=value}))));
+   const vector=(name,target,axes='xyz')=>el('fieldset',{class:'layout-vector'},el('legend',{},name),...[...axes].map(axis=>
+     label(axis.toUpperCase(),number(axes==='xyzw'?target[axis]:round(target[axis]),value=>{target[axis]=value}))));
+   const points=layer==='bays'?item.launchPath:item.launchPoints;
+   const pointsBox=el('div',{class:'layout-points'});
+   const renderPoints=()=>pointsBox.replaceChildren(...points.map((point,index)=>el('div',{class:'row'},
+     vector('Launch point '+(index+1),point),
+     el('button',{type:'button',class:'sec',disabled:busy||gone||points.length<2,onclick:()=>{
+       points.splice(index,1);renderPoints();edit()}},'Remove point'))));
+   const addPoint=el('button',{type:'button',class:'sec',disabled:busy||gone,onclick:()=>{
+     points.push({...points.at(-1)||{x:0,y:0,z:0}});renderPoints();edit()}},'Add point');
+   renderPoints();
    const original=(layer==='bays'?bayOriginal:launcherOriginal)[sel[layer]];
    const reset=el('button',{type:'button',class:'sec',disabled:busy||gone,onclick:()=>{
      (layer==='bays'?bays:launchers)[sel[layer]]=structuredClone(original);render()}},'Reset');
@@ -2915,15 +2970,9 @@ function weaponLayout(bundle){
        label('Slot (launches this squadron slot)',number(item.slot,value=>{item.slot=Math.round(value)},{step:1,min:0})),
        el('div',{class:'row'},check('Can launch','canLaunch','Squadrons leave from here'),check('Can dock','canDock','Squadrons return here')),
        label('Dock range',number(item.dockRange,value=>{item.dockRange=value},{min:0})),
-       vector('Local position','position'in item?item.position:{}),compat,
-       el('p',{class:'hint'},'Launch path: '+(item.launchPath?.length||0)+' point(s), drawn dashed from the selected bay.'+(item.icon?'':' No build-screen icon marker.')),
-       el('div',{class:'row'},reset));
+       vector('Local position',item.position),vector('Local rotation (quaternion)',item.rotation,'xyzw'),compat,
+       el('h4',{},'Launch path'),pointsBox,el('div',{class:'row'},addPoint,reset));
    }else{
-     const pointsBox=el('div',{class:'layout-points'});
-     const renderPoints=()=>pointsBox.replaceChildren(...item.launchPoints.map((point,index)=>el('div',{class:'row'},
-       vector('Launch point '+(index+1),point),
-       el('button',{type:'button',class:'sec',disabled:busy||gone||item.launchPoints.length<2,onclick:()=>{item.launchPoints.splice(index,1);renderPoints();edit()}},'Remove point'))));
-     renderPoints();
      const alive=launchers.filter(other=>!removedLaunchers.has(other.id));
      const needed=bayInfo.munitionButtons.length-removedMunitions.size>0;
      const remove=el('button',{type:'button',class:'sec',disabled:busy||(!gone&&alive.length<=1&&needed),
@@ -2931,8 +2980,7 @@ function weaponLayout(bundle){
          if(gone)removedLaunchers.delete(item.id);else removedLaunchers.add(item.id);render()}},gone?'Keep launcher':'Remove launcher');
      fields.append(el('strong',{},item.name),el('span',{class:'hint'},item.path),vector('Local position',item.position),
        el('p',{class:'hint'},'Munitions leave from these points (offsets from the launcher).'),pointsBox,
-       el('div',{class:'row'},el('button',{type:'button',class:'sec',disabled:busy||gone,onclick:()=>{
-         item.launchPoints.push({...item.launchPoints[item.launchPoints.length-1]||{x:0,y:0,z:0}});renderPoints();edit()}},'Add point'),reset,remove));
+       el('div',{class:'row'},addPoint,reset,remove));
    }
  }
  // Squadron slots and munition slots: buttons in the battle radial menus. Removing one also lowers the ship's level count.
@@ -3179,7 +3227,7 @@ function shipBundleFields(ship,initialFile=''){
 }
 function loadBundleTools(bundle,bundleOptions,initialFile=''){
  const {ship,source,slots,sections,actions}=bundle;
- for(const option of bundleOptions)if(['defender_donor','celestra_donor','stealth'].includes(option.dest))option.choices=state.info.bundle_files.slice();
+ for(const option of bundleOptions)if(option.dest==='stealth'||option.dest.endsWith('_donor'))option.choices=state.info.bundle_files.slice();
  const get=id=>source.querySelector('#'+id)??actions.querySelector('#'+id);
  const path=el('input',{type:'text',id:'bpath',value:initialFile,placeholder:'path to a ship bundle (encrypted game file or decrypted .dec)',style:'flex:1;min-width:280px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'});
  let statsRequest=0,compareRequest=0,compareData=null;
@@ -3192,6 +3240,8 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
    delete bundle.stats.dataset.source;
    for(const area of [bundle.slots,bundle.sections])area.querySelectorAll('[data-d]').forEach(input=>{
      input.disabled=false;
+     if(input.dataset.d.startsWith('jam_battery_')||input.dataset.d==='turnaround_repair_actions')
+       input.closest('label').hidden=false;
      if(input.type==='checkbox')input.checked=false;
      else input.value='';
    });
@@ -3214,16 +3264,16 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
        const input=bundle.sections.querySelector('[data-d="'+dest+'"]');
        if(input){const installed=Boolean(result.abilities[script]);input.checked=installed;input.disabled=installed}
      }
-     for(const [dest,key] of [['jam_speed','speed'],['jam_evade','evade'],['jam_accuracy','accuracy']]){
+     for(const [dest,key] of [['jam_speed','speed'],['jam_evade','evade'],['jam_accuracy','accuracy'],['jam_battery_drain','drain'],['jam_battery_reserve','reserve'],['jam_battery_recharge','recharge']]){
        const input=bundle.sections.querySelector('[data-d="'+dest+'"]');
-       if(input){const v=result.jamming?.values?.[key];input.value=v===undefined?'':String(v);input.placeholder='global'}
+       if(input){const v=result.jamming?.values?.[key];input.value=v===undefined?'':String(v);input.placeholder=dest.startsWith('jam_battery_')?'default':'global'}
      }
      const groupsInput=bundle.slots.querySelector('[data-d="squadron_groups"]');
      if(groupsInput&&!groupsInput.dataset.manual)groupsInput.value=(result.squadron_groups||[]).join(',');
      const labels={MaxHullPoints:'Hull',defaultArmourFront:'Front',defaultArmourRear:'Rear',
        defaultArmourLeft:'Port',defaultArmourRight:'Starboard',defaultArmourTop:'Top',defaultArmourBottom:'Bottom'};
      const modifierFields=result.modifier_fields||[];
-     const fieldLabels={'Jammer.jamRange':'Jam range','Jammer.jamMissileChance':'Chance to jam each missile (0-1)','CustomInstantPlatingModule.cooldownTurns':'Cooldown (battle turns)','CustomInstantPlatingModule.activationDelayTicks':'Activation delay after turn starts (ticks)','CustomEmpPulseModule.cooldownTurns':'Cooldown (battle turns)','CustomEmpPulseModule.detonationDelayTicks':'Activation delay after turn starts (ticks)','CustomEmpPulseModule.range':'EMP range (units)','CustomEmpPulseModule.subsystemDamage':'Subsystem maximum health reduced','CustomEmpPulseModule.recoveryTicks':'Subsystem recovery (ticks)','CustomEmpPulseModule.disableSquadronTicks':'Fighter stun duration (ticks)','CustomEmpPulseModule.fighterEvadeDebuffTicks':'Fighter evade debuff duration (ticks)','CustomTargetedEmpModule.range':'EMP blast radius (units)','CustomTargetedEmpModule.detonationDelayTicks':'Activation delay after turn starts (ticks)','CustomTargetedEmpModule.subsystemDamage':'Subsystem maximum health reduced','CustomTargetedEmpModule.recoveryTicks':'Subsystem recovery (ticks)','CustomTargetedEmpModule.disableSquadronTicks':'Fighter stun duration (ticks)','CustomTargetedEmpModule.fighterEvadeDebuffTicks':'Fighter evade debuff duration (ticks)','CustomTargetedEmpModule.chargesPerCooldown':'Charges per turn','CustomTargetedEmpModule.burstIntervalTicks':'Ticks between separate bursts','CustomTargetedEmpModule.targetRange':'Map targeting range (units)',baseRate:'Armour repair per tick, per facing',modifierRate:'Crew bonus weight',modifierField:'Crew bonus to use',
+     const fieldLabels={basePlatingPerTick:'Resupply per battle tick',resupplyHullRepairDrones:'Resupply Hull Repair Drones',resupplyArmourRepairDrones:'Resupply Armour Repair Drones',repairArmour:'Repair armour instead of hull',droneStack:'Drone capacity',droneSalvo:'Drones per launch',droneRepairRate:'Drone repair rate',droneLifetime:'Drone lifetime',launchDelayTicks:'Launch delay (ticks)','Jammer.jamRange':'Jam range','Jammer.jamMissileChance':'Chance to jam each missile (0-1)','CustomInstantPlatingModule.cooldownTurns':'Cooldown (battle turns)','CustomInstantPlatingModule.activationDelayTicks':'Activation delay after turn starts (ticks)','CustomEmpPulseModule.cooldownTurns':'Cooldown (battle turns)','CustomEmpPulseModule.detonationDelayTicks':'Activation delay after turn starts (ticks)','CustomEmpPulseModule.range':'EMP range (units)','CustomEmpPulseModule.subsystemDamage':'Subsystem maximum health reduced','CustomEmpPulseModule.recoveryTicks':'Subsystem recovery (ticks)','CustomEmpPulseModule.disableSquadronTicks':'Fighter stun duration (ticks)','CustomEmpPulseModule.fighterEvadeDebuffTicks':'Fighter evade debuff duration (ticks)','CustomTargetedEmpModule.range':'EMP blast radius (units)','CustomTargetedEmpModule.detonationDelayTicks':'Activation delay after turn starts (ticks)','CustomTargetedEmpModule.subsystemDamage':'Subsystem maximum health reduced','CustomTargetedEmpModule.recoveryTicks':'Subsystem recovery (ticks)','CustomTargetedEmpModule.disableSquadronTicks':'Fighter stun duration (ticks)','CustomTargetedEmpModule.fighterEvadeDebuffTicks':'Fighter evade debuff duration (ticks)','CustomTargetedEmpModule.chargesPerCooldown':'Charges per turn','CustomTargetedEmpModule.burstIntervalTicks':'Ticks between separate bursts','CustomTargetedEmpModule.targetRange':'Map targeting range (units)',baseRate:'Armour repair per tick, per facing',modifierRate:'Crew bonus weight',modifierField:'Crew bonus to use',
        baseTicksPerReplacement:'Base ticks to replace one squadron',basePlatingPerTick:'Drone reserve restored per tick',
        capacityMultiplier:'Magazine capacity multiplier','MunitionResupplyRange.Min':'Damaged Armory work rate (%)',
        'MunitionResupplyRange.Max':'Full Armory work rate (%)',portPlating:'Port plating per use',
@@ -3286,7 +3336,11 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
        const original=field.kind==='bool'?Boolean(field.value):field.value;
        const attrs={'data-prefab-field':field.key,'data-original':JSON.stringify(original)};
        let control;
-       if(field.kind==='vector'){
+       if(field.kind==='int_list'){
+         control=el('label',{class:'f'},'AI ship priorities (ship type IDs)',
+           el('input',{...attrs,value:original.join(', '),pattern:' *[0-9]+( *, *[0-9]+)* *',
+             title:'Comma-separated ship type IDs, highest priority first. Clear the field to use no explicit priorities.'}));
+       }else if(field.kind==='vector'){
          control=el('fieldset',attrs,el('legend',{},label),
            ...['x','y','z'].map(axis=>el('label',{class:'f'},axis.toUpperCase(),
              numberInput({'data-axis':axis},field.value[axis],'any'))));
@@ -3302,7 +3356,8 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
          else if(['CustomEmpPulseModule.subsystemDamage','CustomEmpPulseModule.recoveryTicks','CustomEmpPulseModule.fighterEvadeDebuffTicks','CustomTargetedEmpModule.subsystemDamage','CustomTargetedEmpModule.recoveryTicks','CustomTargetedEmpModule.fighterEvadeDebuffTicks'].includes(field.key))input.min=0;
          else if(field.key==='CustomTargetedEmpModule.chargesPerCooldown'){input.min=1;input.max=16}
          else if(field.key==='CustomTargetedEmpModule.burstIntervalTicks'){input.min=1;input.max=99999}
-         else if(name==='baseTicksPerReplacement')input.min=1;
+         else if(name==='baseTicksPerReplacement'||name==='droneSalvo')input.min=1;
+         else if(script==='HullRepairModule')input.min=0;
          else if(script==='CustomInstantPlatingModule')input.min=0;
          control=el('label',{class:'f',title:fieldHelp[field.key]||fieldHelp[name]||field.key},label,input);
        }
@@ -3331,6 +3386,32 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
        }
        const group=abilities.get(script)||subsystem?.controls||(labels[name]?primary:advanced);
        group.push(control);
+     }
+     const jammerFields=abilities.get('Jammer');
+     if(jammerFields){
+       for(const [name,label,fallback,min] of [
+         ['jam_battery_drain','Battery drain per turn',10,0],
+         ['jam_battery_reserve','Reserve capacity without Stealth',100,0],
+         ['jam_battery_recharge','Reserve recharge per turn',24,0]]){
+         const original=bundle.sections.querySelector('[data-d="'+name+'"]');
+         if(!original)continue;
+         original.closest('label').hidden=true;
+         jammerFields.push(el('label',{class:'f'},label,
+           el('input',{type:'number',step:'any',min,max:1000,value:original.value,placeholder:String(fallback),'data-d':name})));
+       }
+       jammerFields.push(el('p',{class:'hint'},'Ships with Stealth share its battery. Clear an override to restore its default.'));
+     }
+     const repairFields=abilities.get('TurnaroundRepairBayModule');
+     if(repairFields){
+       const count=[...abilities.keys()].filter(name=>name.startsWith('TurnaroundRepairBayModule')).length;
+       const original=bundle.sections.querySelector('[data-d="turnaround_repair_actions"]');
+       if(original)original.closest('label').hidden=true;
+       repairFields.push(el('label',{class:'f'},'Total turnaround repair bays',
+         el('input',{type:'number',step:1,min:count,max:8,value:count,required:true,'data-d':'turnaround_repair_actions'}),
+         el('span',{class:'orig'},'Increase this total and use Save ship to add indexed repair bays.')));
+       repairFields.push(el('label',{class:'f chk'},
+         el('input',{type:'checkbox','data-d':'group_repair_bays'}),
+         'Group existing bays under Fighters → Repair Bay'));
      }
      const squadronFields=abilities.get('CustomSquadronReplacementModule');
      if(squadronFields?.length){
@@ -3423,7 +3504,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      state.info=await api('/api/config',{levels:state.info.levels,dll:state.info.dll,bundles:folder,work:state.info.work});
      bundleForm=undefined;
      sel.replaceChildren(el('option',{value:''},state.info.bundle_files.length?'Choose a bundle from this folder':'No bundles found in this folder'),...state.info.bundle_files.map(name=>el('option',{value:name},name)));
-     for(const dest of ['defender_donor','celestra_donor','stealth']){
+     for(const dest of ['defender_donor','celestra_donor','hydra_donor','gorgon_donor','medusa_donor','stealth']){
        const donor=sections.querySelector('[data-d="'+dest+'"]');
        if(donor){const previous=donor.value;donor.replaceChildren(el('option',{value:''},'Choose a bundle from this folder'),...state.info.bundle_files.map(name=>el('option',{value:name},name)));if(state.info.bundle_files.includes(previous))donor.value=previous}
      }
@@ -3451,6 +3532,10 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
        left.set(input.dataset.prefabField,value);
      }
      for(const input of bundle.installedAbilities.querySelectorAll('[data-prefab-field]')){
+       if(input.dataset.prefabField==='RSpamModule.shipPrioritiesAI'){
+         left.set(input.dataset.prefabField,input.value.trim()?input.value.split(',').map(Number):[]);
+         continue;
+       }
        const value=input.matches('fieldset')?Object.fromEntries([...input.querySelectorAll('input')].map(axis=>[axis.dataset.axis,axis.valueAsNumber])):input.type==='checkbox'?input.checked:input.valueAsNumber;
        left.set(input.dataset.prefabField,value);
      }
@@ -3496,7 +3581,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
     };
     i=el('input',attrs);return el('label',{class:'f chk',title:o.help},i,bundleFieldLabel(o))
   }
-  if(o.kind==='choice'){const autoDonor={defender_donor:'colonialdefender',celestra_donor:'colonialcelestra'}[o.dest];
+  if(o.kind==='choice'){const autoDonor={defender_donor:'colonialdefender',celestra_donor:'colonialcelestra',hydra_donor:'cylonhydra',gorgon_donor:'cylongorgon',medusa_donor:'cylonmedusa'}[o.dest];
     i=el('select',{'data-d':o.dest},[el('option',{value:''},autoDonor?'Automatic ('+autoDonor+' from the configured bundle folder)':o.choices?'Choose a bundle':'(default)'),...(o.choices||[]).map(c=>el('option',{value:c},c))])}
   else if(o.kind==='list'){i=el('textarea',{'data-d':o.dest,rows:2,placeholder:'one per line, e.g. '+(o.metavar||'fore=1'),style:'padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'})}
   else i=el('input',{type:'text','data-d':o.dest,placeholder:o.default||o.metavar||''});
@@ -3539,7 +3624,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
     sections.append(el('div',{class:'card'},el('h3',{},group==='Output'?'Bundle output':group),grid));
   }
  }
- const actionsAbilityFlags=new Set(['mini_jump','augury','stealth','jamming','targeted_resupply','deploy_plating','technical_support','marine_reinforcement','custom_instant_plating','custom_emp_pulse','custom_targeted_emp']);
+ const actionsAbilityFlags=new Set(['mini_jump','augury','stealth','jamming','targeted_resupply','deploy_plating','hull_repair_drones','armour_repair_drones','coordinated_reload','machine_learning_matrix','rspam','technical_support','marine_reinforcement','custom_instant_plating','custom_emp_pulse','custom_targeted_emp']);
  bundle.sections.addEventListener('change',event=>{
    if(!actionsAbilityFlags.has(event.target.dataset.d))return;
    const enabled=[...bundle.sections.querySelectorAll('input[type=checkbox][data-d]')].filter(input=>actionsAbilityFlags.has(input.dataset.d)&&input.checked).length;
@@ -3802,7 +3887,7 @@ async function bundlePatchOptions(options){
  const required=[
  ].filter(patch=>options[patch.option]);
  const patches={};
- if(options.turnaround_repair_bay){
+ if(options.turnaround_repair_bay||options.turnaround_repair_actions){
    const count=Number(options.turnaround_repair_actions||1);
    if(!Number.isInteger(count)||count<1||count>8)throw new Error('Turnaround repair bays must be between 1 and 8.');
    patches.repair_bay_actions=count;

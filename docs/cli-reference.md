@@ -71,7 +71,7 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 | Scale the whole ship | `--ship-scale S` (absolute, 1 = stock; turrets keep their size). See [docs/game/ship-scale.md](game/ship-scale.md) |
 | Control turret placement | `--layout offset\|mid\|free`, `--offset`, `--gap`, `--min-gap`, `--no-mirror`, `--no-hull-follow` |
 | Add carrier and munition controls | `--fighter-slots`, `--utility-slots`, `--munition-slots`, `--bay-offset`, `--icon-offset`, `--slot-parts`, `--split-squadrons`, `--squadron-groups` (submenu sizes in slot order, any number of groups; they must add up to FighterSlots + UtilityFighterSlots and never change those counts) |
-| Edit launch bays, munition launchers, remove slots | `--list-bays` (ids), `--bay-layout FILE.json`, `--realign-bays` (cloned bays as mirrored port/starboard pairs). See [docs/game/launch-bays.md](game/launch-bays.md) |
+| Edit launch bays, munition launchers, remove slots | `--list-bays` (ids), `--bay-layout FILE.json` (including launch bay `rotation` in quaternion coordinates and `launchPath` points), `--realign-bays` (cloned bays as mirrored port/starboard pairs). See [docs/game/launch-bays.md](game/launch-bays.md) |
 | Align bay types with database slot order or move a marker | `--align-launch-bays` with both slot totals, `--bay-icon SLOT=X,Y,Z` (repeatable) |
 | Passive ship systems | `--hull-regen` (positive, hull only), `--munition-factory` |
 | Flak field | `--flak FIELD=VALUE` (repeatable), editing the ship's FlakField: `BaseDamagePerTick.HullDamage` / `ArmourDamage` / `SubSystemDamage` / `SubsystemSpreadCount` / `SubsystemSpreadDamage` / `AppliesIrradiatedStatus` / `IrradiatedTurns` / `IrradiatedPercentage` / `Range`, `FlakRange.Min` / `FlakRange.Max`, `FlakAreaLength`, `FlakAreaRadius`, `FlakExplosionsPerTick`. Unknown fields, negative values and a Max below Min are refused; a Min above Max raises Max to Min + 1. Only ships that already have flak. `--inspect` lists the values. See [game/flak.md](game/flak.md) |
@@ -85,6 +85,12 @@ Run `python -m deadlock_tools weapons BUNDLE [OPTIONS]`. Use a file path or a na
 | Defender and Celestra support abilities | `--turnaround-repair-bay`, `--targeted-resupply`, `--deploy-plating`, `--technical-support`, `--marine-reinforcement` |
 | Override support donor bundles | `--defender-donor PATH`, `--celestra-donor PATH` (default: `colonialdefender` / `colonialcelestra` from the configured bundle folder, then the work folder) |
 | Tune Deploy Plating | `--plating-supply`, `--plating-drone-load`, `--plating-facing-cap`, `--plating-rate` |
+| Hydra Hull Repair Drones | `--hull-repair-drones`, `--hydra-donor`, `--hull-drone-capacity`, `--hull-drone-salvo`, `--hull-drone-repair-rate`, `--hull-drone-lifetime`, `--hull-drone-launch-delay` |
+| Armour Repair Drones | `--armour-repair-drones` adds a standalone armour-drone bank and action with independent stock, salvo size, repair rate, lifetime and launch delay. It can be installed alongside Hull Repair Drones. Both can target their own ship with the custom DLL. |
+| Hydra Coordinated Reload | `--coordinated-reload`, `--reload-reduction`, `--reload-delay`, `--reload-cooldown` |
+| Gorgon Machine Learning Matrix | `--machine-learning-matrix`, `--matrix-range`, `--matrix-evade-per-hit`, `--matrix-maximum-evade`. Requires a Tech Bay. |
+| Medusa RSpam | `--rspam`, `--rspam-power`, `--rspam-overclocking`, `--rspam-range`, `--rspam-beams`, `--rspam-ai-targets`, `--rspam-ai-priorities 116,120,20` (ship IDs in order, or `none`). Requires a Tech Bay and allied Cylon processor targets. |
+| Capital jamming battery | `--jam-battery-drain`, `--jam-battery-reserve`, `--jam-battery-recharge`. Drain and recharge are charge per 120 battle ticks. Use `default` to clear an override. |
 | Group abilities in the battle menu | `--ability-submenu` |
 
 ```bash
@@ -113,15 +119,15 @@ The last two commands are a separate recipe. Combine the desired prefab options 
 
 Supply only the options you want to change. When adding an ability to a new bundle, include its ability flag. Use `--inspect` to read the settings back.
 
-Custom module flags append the matching MonoScript and MonoBehaviour records to the ship bundle. Armour repair clears Hull Resin's negative-rate armour flag and preserves positive hull repair. Squadron replacement clears the `ShipInfo` flag used by the legacy Munition Factory revive patch while keeping the Munition Factory itself for ordinary resupply. The matching custom-module DLL must be installed before launching the game. Drone resupply defaults to 1 plating per battle tick (120 per 120-tick turn at the base rate); ships can configure their own rate in the editor.
+Custom module flags append the matching MonoScript and MonoBehaviour records to the ship bundle. Armour repair clears Hull Resin's negative-rate armour flag and preserves positive hull repair. Squadron replacement clears the `ShipInfo` flag used by the legacy Munition Factory revive patch while keeping the Munition Factory itself for ordinary resupply. The matching custom-module DLL must be installed before launching the game. Drone resupply defaults to 1 plating per battle tick (120 per 120-tick turn at the base rate); ships can configure their own rate in the editor. Hull and armour drone banks are opt-in and each receive the same crew- and subsystem-adjusted rate, in drones per battle tick. Fractional units accumulate until a whole drone can be returned. For CLI edits on ships with Drone Resupply installed, use `--prefab-fields '{"CustomDroneResupplyModule.resupplyHullRepairDrones":true,"CustomDroneResupplyModule.resupplyArmourRepairDrones":true}'` and set each flag independently.
 
 Experimental EMP adds a battle action and configurable ship module. Activating it queues the pulse for the start of the next turn; `detonationDelayTicks` adds a configurable delay after that event (default 0). The default range is 1,000 units and cooldown is one turn. It reduces enemy subsystem maximum health by 8 for 240 ticks, stuns enemy squadrons for 360 ticks (`disableSquadronTicks`), applies the game's native jamming evade penalty for 360 ticks (`fighterEvadeDebuffTicks`), and immediately destroys hostile missiles in range. Its target scan includes child fighter ships, which the game's regular radius query omits. The detonation notification reports fighter squadrons stunned, fighters jammed, and missiles destroyed. The 360-tick duration matches the vanilla Cylon Virus Mine's default jamming field; durations remain independently configurable. Team and faction checks exclude friendly ships and missiles. It does not alter munition capacity or stockpiles.
 
 Instant Plating also queues its effect: activation applies the configured extra armour at the start of the next turn, with `activationDelayTicks` as an optional additional delay (default 0). Both abilities can be cancelled by activating the queued action again before the turn starts; once the start event occurs, the delay/effect cannot be cancelled. Both delay settings are simulation ticks: 10 ticks per second and 120 ticks per 12-second turn. The EMP fighter-stun duration remains independently configurable.
 
 Use `--turnaround-repair-actions N` to add or reconcile 1–8 independent turnaround repair bays. The tool writes one
-repair module and one Fighters action per bay; the matching DLL creates a launch-slot button per module and assigns
-indexed shortcuts. To install the ability on a new bundle, also pass `--turnaround-repair-bay` (the Defender donor is picked automatically).
+repair module and one action per bay under **Fighters → Repair Bay**. At eight bays, open **Other** for bays 7–8.
+The matching DLL also creates a launch-slot button per module and assigns indexed shortcuts. To install the ability on a new bundle, also pass `--turnaround-repair-bay` (the Defender donor is picked automatically).
 
 ## UI layout
 

@@ -24,7 +24,13 @@ that changed in one go:
 
 The bundle is written once per save. Prerequisites such as turnaround-repair shortcuts are checked first. Under
 **Saving the bundle**, *Save over the opened bundle file* writes over the source file after copying it to the backups folder.
-Without it, the save goes into the work tree. **Discard changes** throws away level, bundle and layout edits.
+Without it, the save goes into the work tree. **Save ship** reloads the saved bundle and retries a failed DLL/UI
+update against that copy. Level edits are staged and verified across every affected file before they are
+promoted to the work tree. If level validation fails, the editor keeps those edits pending with the error visible.
+**Discard changes** throws away pending level, bundle and layout edits.
+To add turnaround repair bays, set **Total turnaround repair bays** under **Installed Abilities → Turnaround Repair Bay**.
+The editor creates the paired modules and actions for **Fighters → Repair Bay**.
+Use **Group existing bays under Fighters → Repair Bay** and save to move the existing bays with their current total.
 
 | Area | Controls | Endpoint → tool |
 |---|---|---|
@@ -33,7 +39,8 @@ Without it, the save goes into the work tree. **Discard changes** throws away le
 | Decrypt / encrypt | Decrypt, Encrypt, Check, key override | `/api/xor` → `xor` |
 | **Level data ↔ bundle** | every value both files hold, side by side, with ✓/✗, per-row **Use level** / **Use bundle**, and *make all match* buttons; *Keep hull & armour linked while editing* | none (stages edits for Save ship); see [game/bundle-level-agreement.md](game/bundle-level-agreement.md) |
 | Field groups | level fields; bundle hull & armour and subsystems inside *Hull & armour*; bundle slot controls inside *Carrier & munition slots* | staged for Save ship |
-| Bundle option cards | Ship systems, Custom ship modules, Abilities (installed + add; includes Jamming: range, missile chance), Weapons, Output | staged for Save ship |
+| Bundle option cards | Ship systems, Custom ship modules (including Armour Repair Drones), and Abilities (including Jamming battery settings, Hull Repair Drones, and RSpam AI ship priorities), Weapons, Output | staged for Save ship |
+| Drone Resupply | Under **Installed Abilities → Custom drone resupply**, use **Resupply Hull Repair Drones** and **Resupply Armour Repair Drones** independently. | staged for Save ship |
 | Flak field | top and side diagram of the zone(s) against the hull (largest hull mesh's bounds, ship scale applied) with drag handles for distance, length and radius; one input per FlakField field with help text; per-turn damage readout at full and 0 Armory health; zone size; Armory FlakDamageRange; stock ships table | `/api/bundle/stats` (read, `flak`); staged for Save ship → `weapons --flak FIELD=VALUE …` |
 | Module subsystems | one row per driver: module, driving subsystem, % at 0 and at full health; per-module total and stock driver; **Add subsystem**, **Remove** | `/api/bundle/stats` (read); staged for Save ship → `weapons --module-subsystem … / --clear-module-subsystems` |
 | Crew bonuses from subsystem health | one row per modifier: crew stat, source subsystem, bonus at 0 and at full health, effect note; **Add modifier**, **Remove** | `/api/bundle/stats` (read, with the stat catalog); staged for Save ship → `weapons --subsystem-modifier … / --clear-subsystem-modifiers` |
@@ -42,7 +49,7 @@ Without it, the save goes into the work tree. **Discard changes** throws away le
 | Weapon layout view | **Edit** layer (Turrets / Launch bays / Munition launchers), projection, drag the selected layer's objects, **Reload** | `/api/bundle/layout` (read, includes `bays.read_layout`); staged for Save ship |
 | — Turrets | add/clone/reset turrets, weapon, quadrant, angles, mesh scale | `weapons --mount-layout` |
 | — Change all … to … in … | swap every turret of one weapon type (with counts) to another, in all quadrants or one | staged as layout edits → `weapons --mount-layout`; CLI equivalent `weapons --swap-weapon` |
-| — Launch bays | name, slot, can launch / can dock, dock range, position, squadron types (named from the SquadronDataTable), launch path drawn dashed | `weapons --bay-layout` (`bays`) |
+| — Launch bays | name, slot, can launch / can dock, dock range, local position and quaternion rotation, squadron types, and editable launch path points with add/remove controls | `weapons --bay-layout` (`bays`) |
 | — Munition launchers | position, launch points (add/remove), **Remove launcher** (the last one stays while the ship has munition slots) | `weapons --bay-layout` (`launchers`, `removeLaunchers`) |
 | — Realign launch bays | lays the cloned bays out as mirrored pairs in slot order and renames them (staged; review, then Save ship) | `/api/bays/realign` → `bays.realign_spec`; saved as `weapons --bay-layout` |
 | — Squadron slots / Munition slots tables | **Remove slot** / **Remove** per row (toggle back with **Keep**); lowers FighterSlots / UtilityFighterSlots / MunitionSlots as level edits | `weapons --bay-layout` (`removeSlots`, `removeMunitions`) |

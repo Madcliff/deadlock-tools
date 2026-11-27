@@ -125,6 +125,7 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
         // normal query, then add the battle's complete ship list so child
         // squadrons can receive the same enemy/range checks below.
         List<DestructableAssetInfo> targets = GetEmpShipTargets(battle, source, queryRange);
+        ShipInfo sourceOwner = FleetOwner(source);
         int affected = 0;
         int fightersStunned = 0;
         int fightersJammed = 0;
@@ -134,9 +135,15 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
             foreach (DestructableAssetInfo asset in targets)
             {
                 ShipInfo target = asset as ShipInfo;
-                if (target == null || target == source || !target.LGGHLAEAKEP) continue;
-                if (target.OHJMJFMNIDE == source.OHJMJFMNIDE || target.Faction == source.Faction) continue;
+                if (target == null || !target.LGGHLAEAKEP || !IsHostile(source, sourceOwner, target)) continue;
                 if (Vector3.Distance(centre, target.transform.position) > radius) continue;
+
+                FighterSquadron squadron = target.FighterSquadron;
+                if (squadron != null)
+                {
+                    ShipInfo squadronShip = squadron.GetComponent<ShipInfo>();
+                    if (squadronShip != null && !IsHostile(source, sourceOwner, squadronShip)) continue;
+                }
 
                 bool hit = false;
                 if (damage > 0f)
@@ -152,7 +159,6 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
                     }
                 }
 
-                FighterSquadron squadron = target.FighterSquadron;
                 if (squadron != null)
                 {
                     if (!squadron.HKEFOEDOADO && disableSquadronTicks > 0)
@@ -202,14 +208,14 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
             if (active != null)
             {
                 foreach (Missile missile in active)
-                    AddMissileCandidate(source, centre, radius, missile, seenMissiles, missiles);
+                    AddMissileCandidate(source, sourceOwner, centre, radius, missile, seenMissiles, missiles);
             }
         }
 
         // This also handles a future game build where the proxy list is renamed
         // or a missile has spawned but has not yet registered with the proxy.
         foreach (Missile missile in UnityEngine.Object.FindObjectsOfType<Missile>())
-            AddMissileCandidate(source, centre, radius, missile, seenMissiles, missiles);
+            AddMissileCandidate(source, sourceOwner, centre, radius, missile, seenMissiles, missiles);
 
         int missilesDestroyed = 0;
         foreach (Missile missile in missiles)
@@ -221,6 +227,9 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
             affected++;
         }
         lastPulseMissilesDestroyed = missilesDestroyed;
+        Debug.Log(AbilityLabel + " from " + source.name + ": affected " + affected
+            + " hostile target(s), stunned " + fightersStunned + " squadron(s), jammed "
+            + fightersJammed + " fighter(s), destroyed " + missilesDestroyed + " missile(s).");
 
         if (squadronTicksLeft > 0 || jammedFighters.Count > 0) SubscribeTicks();
         // Show every detonation point, even when no enemy happens to be in
@@ -282,11 +291,32 @@ public class CustomEmpPulseModule : EventReceiverBehaviour, GFHJMNJPKPC, FNHOFNE
         targets.Add(ship);
     }
 
-    private void AddMissileCandidate(ShipInfo source, Vector3 centre, float radius, Missile missile, HashSet<int> seen, List<Missile> candidates)
+    private static ShipInfo FleetOwner(ShipInfo ship)
+    {
+        // Squadron craft may refer to a squadron proxy before reaching the carrier.
+        for (int depth = 0; depth < 8; depth++)
+        {
+            ShipInfo parent = ship.Mothership;
+            if (parent == null || parent == ship) break;
+            ship = parent;
+        }
+        return ship;
+    }
+
+    private static bool IsHostile(ShipInfo source, ShipInfo sourceOwner, ShipInfo target)
+    {
+        ShipInfo targetOwner = FleetOwner(target);
+        return target != source && target.OHJMJFMNIDE != source.OHJMJFMNIDE && target.Faction != source.Faction
+            && targetOwner != sourceOwner && targetOwner.OHJMJFMNIDE != sourceOwner.OHJMJFMNIDE
+            && targetOwner.Faction != sourceOwner.Faction;
+    }
+
+    private void AddMissileCandidate(ShipInfo source, ShipInfo sourceOwner, Vector3 centre, float radius, Missile missile,
+        HashSet<int> seen, List<Missile> candidates)
     {
         if (missile == null || !missile.LGGHLAEAKEP || !seen.Add(missile.GetInstanceID())) return;
         ShipInfo launcher = missile.JLKJLJBOJOG();
-        if (launcher == null || launcher.OHJMJFMNIDE == source.OHJMJFMNIDE || launcher.Faction == source.Faction) return;
+        if (launcher == null || !IsHostile(source, sourceOwner, launcher)) return;
         if (Vector3.Distance(centre, missile.transform.position) <= radius)
             candidates.Add(missile);
     }

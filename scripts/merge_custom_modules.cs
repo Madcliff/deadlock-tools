@@ -23,12 +23,12 @@ static class MergePrototype
 
     static bool IsHudModule(string name)
     {
-        return name == "CustomInstantPlatingModule" || name == "CustomEmpPulseModule" || name == "CustomTargetedEmpModule" || name == "CustomBattleHud" || name == "CustomArmourRepairModule" || name == "CustomModuleSubsystems";
+        return name == "CustomArmourRepairDroneModule" || name == "CustomInstantPlatingModule" || name == "CustomEmpPulseModule" || name == "CustomTargetedEmpModule" || name == "CustomBattleHud" || name == "CustomArmourRepairModule" || name == "CustomModuleSubsystems";
     }
 
     static string MethodName(MethodReference method, TypeDefinition sourceType, ModuleDefinition target)
     {
-        if (sourceType.Name != "CustomInstantPlatingAction" && sourceType.Name != "CustomEmpPulseAction" && sourceType.Name != "CustomTargetedEmpAction") return method.Name;
+        if (sourceType.Name != "CustomInstantPlatingAction" && sourceType.Name != "CustomEmpPulseAction" && sourceType.Name != "CustomTargetedEmpAction" && sourceType.Name != "CustomArmourRepairDroneAction") return method.Name;
         var property = sourceType.Properties.FirstOrDefault(p => p.GetMethod != null && p.GetMethod.Name == method.Name);
         if (property == null) return method.Name;
         return target.Types.Single(t => t.Name == "ActionBase").Properties
@@ -733,6 +733,155 @@ static class MergePrototype
             }
         }
         Console.WriteLine("Let capital ships with a Jammer take jam orders (" + gates + " check(s))");
+
+        var tickBattery = helper.Methods.Single(m => m.Name == "TickBattery");
+        var allowActivation = helper.Methods.Single(m => m.Name == "AllowActivation");
+        var pauseRecharge = helper.Methods.Single(m => m.Name == "PauseStealthRecharge");
+        var jammerType = module.Types.Single(t => t.Name == "Jammer");
+        var tick = jammerType.Methods.Single(m => m.Name == "Tick" && !m.HasParameters);
+        var setActive = jammerType.Methods.Single(m => m.Name == "set_JamActive");
+        var recharge = module.Types.Single(t => t.Name == "StealthModule").Methods.Single(m => m.Name == "MDGAAEOJBBE");
+        if (tick.Body.Instructions.Any(i => i.Operand is MethodReference m && m.FullName == tickBattery.FullName))
+            return;
+
+        var tickIl = tick.Body.GetILProcessor();
+        var tickStart = tick.Body.Instructions[0];
+        tickIl.InsertBefore(tickStart, Instruction.Create(OpCodes.Ldarg_0));
+        tickIl.InsertBefore(tickStart, Instruction.Create(OpCodes.Call, tickBattery));
+
+        var activationIl = setActive.Body.GetILProcessor();
+        var activationStart = setActive.Body.Instructions[0];
+        activationIl.InsertBefore(activationStart, Instruction.Create(OpCodes.Ldarg_0));
+        activationIl.InsertBefore(activationStart, Instruction.Create(OpCodes.Ldarg_1));
+        activationIl.InsertBefore(activationStart, Instruction.Create(OpCodes.Call, allowActivation));
+        activationIl.InsertBefore(activationStart, Instruction.Create(OpCodes.Starg, setActive.Parameters[0]));
+
+        var rechargeIl = recharge.Body.GetILProcessor();
+        var rechargeStart = recharge.Body.Instructions[0];
+        rechargeIl.InsertBefore(rechargeStart, Instruction.Create(OpCodes.Ldarg_0));
+        rechargeIl.InsertBefore(rechargeStart, Instruction.Create(OpCodes.Call, pauseRecharge));
+        rechargeIl.InsertBefore(rechargeStart, Instruction.Create(OpCodes.Brfalse, rechargeStart));
+        rechargeIl.InsertBefore(rechargeStart, Instruction.Create(OpCodes.Ret));
+        Console.WriteLine("Injected capital jammer battery drain, activation check and shared battery recharge guard");
+    }
+
+    static void AllowDroneSelfTarget(ModuleDefinition module, string targetMethod)
+    {
+        var battle = module.Types.Single(t => t.Name == "BattleManager");
+        var targets = battle.Methods.Single(m => m.Name == targetMethod);
+        var predicate = ((MethodReference)targets.Body.Instructions.First(i => i.OpCode == OpCodes.Ldftn).Operand).Resolve();
+        var filterCall = predicate.Body.Instructions.Single(i =>
+            i.Operand is MethodReference m && m.Name == "MEFGJONDLMN");
+        var rejected = (Instruction)filterCall.Next.Operand;
+        var platingChecks = filterCall.Next.Next;
+        var stockFilter = ((MethodReference)filterCall.Operand).Resolve();
+        var shipChecks = stockFilter.Body.Instructions.Select(i => i.Operand).OfType<MethodReference>()
+            .Single(m => m.Name == "MCLMJCIALMA");
+        var first = predicate.Body.Instructions[0];
+        var moduleField = (FieldReference)first.Next.Operand;
+        var shipGetter = (MethodReference)first.Next.Next.Operand;
+        var il = predicate.Body.GetILProcessor();
+        // Self-targeting uses the stock ship checks with allowSelf=true, then the same plating-specific checks as allies.
+        foreach (var instruction in new[] {
+            Instruction.Create(OpCodes.Ldarg_0),
+            Instruction.Create(OpCodes.Ldfld, moduleField),
+            Instruction.Create(OpCodes.Callvirt, shipGetter),
+            Instruction.Create(OpCodes.Ldarg_1),
+            Instruction.Create(OpCodes.Bne_Un, first),
+            Instruction.Create(OpCodes.Ldarg_1),
+            Instruction.Create(OpCodes.Ldarg_1),
+            Instruction.Create(OpCodes.Ldc_I4_0),
+            Instruction.Create(OpCodes.Ldc_I4_1),
+            Instruction.Create(OpCodes.Call, shipChecks),
+            Instruction.Create(OpCodes.Brfalse, rejected),
+            Instruction.Create(OpCodes.Br, platingChecks)
+        }) il.InsertBefore(first, instruction);
+        predicate.Body.MaxStackSize = Math.Max(predicate.Body.MaxStackSize, 4);
+        Console.WriteLine("Enabled eligible casters in " + targetMethod);
+    }
+
+    static void InjectRepairDroneHooks(ModuleDefinition module, TypeDefinition helper)
+    {
+        AllowDroneSelfTarget(module, "GetRepairHullTargets");
+        var repair = module.Types.Single(t => t.Name == "HullRepairModule");
+        var drone = module.Types.Single(t => t.Name == "HullRepairDrone");
+        var canTarget = repair.Methods.Single(m => m.Name == "CanTargetAlly");
+        var hullRead = canTarget.Body.Instructions.Single(i =>
+            i.Operand is MethodReference m && m.Name == "get_HullPoints");
+        var tail = hullRead.Previous;
+        var targetIl = canTarget.Body.GetILProcessor();
+        while (tail.Next != null) targetIl.Remove(tail.Next);
+        tail.OpCode = OpCodes.Ldarg_0;
+        targetIl.Append(Instruction.Create(OpCodes.Ldarg_1));
+        targetIl.Append(Instruction.Create(OpCodes.Call, helper.Methods.Single(m => m.Name == "HasRepairDamage")));
+        targetIl.Append(Instruction.Create(OpCodes.Ret));
+
+        var apply = helper.Methods.Single(m => m.Name == "ApplyRepair");
+        int sites = 0;
+        foreach (var method in drone.Methods.Where(m => m.HasBody))
+        {
+            var il = method.Body.GetILProcessor();
+            foreach (var call in method.Body.Instructions.Where(i =>
+                i.Operand is MethodReference m && m.DeclaringType.Name == "ShipInfo" && m.Name == "RepairHull").ToArray())
+            {
+                // Keep the call instruction as a branch target and preserve the original stack arguments.
+                call.OpCode = OpCodes.Ldarg_0;
+                call.Operand = null;
+                il.InsertAfter(call, Instruction.Create(OpCodes.Call, apply));
+                method.Body.MaxStackSize = Math.Max(method.Body.MaxStackSize, 5);
+                sites++;
+            }
+        }
+        if (sites == 0) throw new InvalidOperationException("no HullRepairDrone hull repair calls found");
+
+        var action = module.Types.Single(t => t.Name == "HullRepairAction");
+        var nativeBank = helper.Methods.Single(m => m.Name == "NativeBank");
+        foreach (var method in action.Methods.Where(m => m.HasBody))
+            foreach (var lookup in method.Body.Instructions.Where(i =>
+                i.Operand is GenericInstanceMethod m && m.Name == "LKKHJFMPODB" &&
+                m.GenericArguments.Count == 1 && m.GenericArguments[0].Name == repair.Name))
+                lookup.Operand = nativeBank;
+
+        var ship = module.Types.Single(t => t.Name == "ShipInfo");
+        var nativeGetter = ship.Methods.Single(m => m.Name == "get_HullRepairModule");
+        var getterIl = nativeGetter.Body.GetILProcessor();
+        var getterStart = nativeGetter.Body.Instructions[0];
+        getterIl.InsertBefore(getterStart, Instruction.Create(OpCodes.Ldarg_0));
+        getterIl.InsertBefore(getterStart, Instruction.Create(OpCodes.Call, nativeBank));
+        getterIl.InsertBefore(getterStart, Instruction.Create(OpCodes.Ret));
+        var actionModule = action.Fields.Single(f => f.FieldType.Name == repair.Name);
+        var label = helper.Methods.Single(m => m.Name == "RepairLabel");
+        foreach (var method in action.Methods.Where(m => m.Name == "get_Text" || m.Name == "get_DefaultText"))
+        {
+            var il = method.Body.GetILProcessor();
+            foreach (var textCall in method.Body.Instructions.Where(i =>
+                i.Operand is MethodReference m && m.Name == "GetItem" &&
+                i.Previous.Operand is int id && id == 0x37d).ToArray())
+            {
+                var loadThis = Instruction.Create(OpCodes.Ldarg_0);
+                var load = Instruction.Create(OpCodes.Ldfld, actionModule);
+                var call = Instruction.Create(OpCodes.Call, label);
+                il.InsertAfter(textCall, loadThis);
+                il.InsertAfter(loadThis, load);
+                il.InsertAfter(load, call);
+            }
+        }
+
+        var button = module.Types.Single(t => t.Name == "RepairHullDronesSlotButton");
+        var update = button.Methods.Single(m => m.Name == "UpdateInfo");
+        var refresh = button.Methods.Single(m => m.Name == "LABAAHNGOOI");
+        var refreshIl = refresh.Body.GetILProcessor();
+        var refreshStart = refresh.Body.Instructions[0];
+        refreshIl.InsertBefore(refreshStart, Instruction.Create(OpCodes.Ldarg_1));
+        refreshIl.InsertBefore(refreshStart, Instruction.Create(OpCodes.Isinst, drone));
+        refreshIl.InsertBefore(refreshStart, Instruction.Create(OpCodes.Brtrue, refreshStart));
+        refreshIl.InsertBefore(refreshStart, Instruction.Create(OpCodes.Ret));
+        var updateIl = update.Body.GetILProcessor();
+        var updateStart = update.Body.Instructions[0];
+        updateIl.InsertBefore(updateStart, Instruction.Create(OpCodes.Ldarg_2));
+        updateIl.InsertBefore(updateStart, Instruction.Create(OpCodes.Brtrue, updateStart));
+        updateIl.InsertBefore(updateStart, Instruction.Create(OpCodes.Ret));
+        Console.WriteLine("Injected armour repair drone mode and repair-widget guards (" + sites + " repair calls)");
     }
 
     static void Main(string[] args)
@@ -813,7 +962,7 @@ static class MergePrototype
             foreach (var h in m.Body.ExceptionHandlers)
                 body.ExceptionHandlers.Add(new ExceptionHandler(h.HandlerType) { CatchType = h.CatchType == null ? null : ImportType(h.CatchType, mod, srcType, destType), TryStart=map[h.TryStart], TryEnd=h.TryEnd==null?null:map[h.TryEnd], HandlerStart=map[h.HandlerStart], HandlerEnd=h.HandlerEnd==null?null:map[h.HandlerEnd], FilterStart=h.FilterStart==null?null:map[h.FilterStart] });
         }
-        if (srcType.Name == "CustomInstantPlatingAction" || srcType.Name == "CustomEmpPulseAction" || srcType.Name == "CustomTargetedEmpAction")
+        if (srcType.Name == "CustomInstantPlatingAction" || srcType.Name == "CustomEmpPulseAction" || srcType.Name == "CustomTargetedEmpAction" || srcType.Name == "CustomArmourRepairDroneAction")
         {
             var actionBase = mod.Types.Single(t => t.Name == "ActionBase");
             destType.IsAbstract = false;
@@ -844,6 +993,10 @@ static class MergePrototype
             InjectStealthFallbackHooks(mod, destType);
         if (srcType.Name == "CustomJamming")
             InjectJammingHooks(mod, destType);
+        if (srcType.Name == "CustomDroneResupplyModule" && !updating)
+            AllowDroneSelfTarget(mod, "GetDeployPlatingTargets");
+        if (srcType.Name == "CustomArmourRepairDrones" && !updating)
+            InjectRepairDroneHooks(mod, destType);
         // Every reference must point into the merged DLL: one left pointing at the temporary CustomModules assembly
         // (e.g. an array initializer's <PrivateImplementationDetails> data, which is not copied) throws
         // "Could not load file or assembly 'CustomModules'" in game, wherever that code runs.

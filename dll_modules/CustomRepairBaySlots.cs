@@ -18,7 +18,7 @@ public static class CustomRepairBaySlots
         ShipInfo owner = ActionOwnerField.GetValue(action) as ShipInfo;
         if (owner == null) return null;
 
-        TurnaroundRepairBayAction[] actions = action.GetComponents<TurnaroundRepairBayAction>();
+        TurnaroundRepairBayAction[] actions = owner.GetComponentsInChildren<TurnaroundRepairBayAction>(true);
         TurnaroundRepairBayModule[] modules = owner.GetComponents<TurnaroundRepairBayModule>();
         int index = Array.IndexOf(actions, action);
         if (index < 0 || modules == null || index >= modules.Length) return null;

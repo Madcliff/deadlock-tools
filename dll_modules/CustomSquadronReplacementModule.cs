@@ -11,7 +11,14 @@ public sealed class CustomSquadronReplacementModule : EventReceiverBehaviour
     private static readonly MethodInfo LaunchPointGetter = typeof(FighterSquadron).GetMethod("get_LaunchPoint", InstanceMethods);
     private static readonly MethodInfo ActionSetter = typeof(FighterSquadron).GetMethod("set_Action", InstanceMethods);
     private static readonly MethodInfo StatusSetter = typeof(FighterSquadron).GetMethod("set_Status", InstanceMethods);
-    private static readonly FieldInfo ForceField = FindForceField();
+    private static readonly MethodInfo PendingActionSetter = typeof(FighterSquadron).GetMethod("set_PendingAction", InstanceMethods);
+    private static readonly MethodInfo PendingTargetSetter = typeof(FighterSquadron).GetMethod("set_PendingActionTarget", InstanceMethods);
+    private static readonly MethodInfo ActionTargetSetter = typeof(FighterSquadron).GetMethod("SetActionTarget", InstanceMethods);
+    private static readonly FieldInfo Orders = typeof(FighterSquadron).GetField("NNEDKAEKNJC", InstanceMethods);
+    private static readonly MethodInfo ReviveShip = typeof(ShipInfo).GetMethod("Revive", InstanceMethods);
+    private static readonly MethodInfo ShipDisabledSetter = typeof(ShipInfo).GetMethod("set_IsDisabled", InstanceMethods);
+    private static readonly MethodInfo PendingWeaponTargetSetter = typeof(ShipInfo).GetMethod("set_PendingWeaponTarget", InstanceMethods);
+    private static readonly MethodInfo SetWeaponMode = typeof(ShipInfo).GetMethod("ChangeWeaponsMode", InstanceMethods);
     private const int StatusUnlaunched = 1;              // FighterSquadron status enum: 1 Unlaunched (docked), 5 Destroyed
     private const int EventFightersDocked = 26;          // HMFMLKKCBDN.FightersDocked
     [SerializeField] public float baseTicksPerReplacement = 5f;
@@ -71,23 +78,22 @@ public sealed class CustomSquadronReplacementModule : EventReceiverBehaviour
                 ? bay.transform : ship.transform;
             child.transform.SetPositionAndRotation(hangar.position, hangar.rotation);
 
-            // Not ShipInfo.ReviveSquadron(): it returns at once unless BattleType is Survival (6), so in skirmish and
-            // campaign battles the squadron stayed dead. Do its dead-squadron branch here instead.
+            // ReviveSquadron is Survival-only. Revive resets the ship's native dead state and effects.
+            ReviveShip.Invoke(child, null);
+            child.SetInitialHullPoints(hull);
+            if (!(bool)AliveGetter.Invoke(child, null)) return;
+            ResetCombatState(child, squadron);
             if (StatusSetter != null)
                 StatusSetter.Invoke(squadron, new object[] {
                     System.Enum.ToObject(StatusSetter.GetParameters()[0].ParameterType, StatusUnlaunched) });
             if (IDIKLNMNBIC != null)
                 IDIKLNMNBIC.Publish((HMFMLKKCBDN)EventFightersDocked, child.gameObject);
-            ClearConstantForce(child);
-            child.SetInitialHullPoints(hull);
-            if (!(bool)AliveGetter.Invoke(child, null)) return;
             replacementProgress = 0f;
 
             // Finish the same teardown as a normal landing so regular hangar repair can take over.
             simulation.RemoveShip(child);
             foreach (ShipInfo fighter in squadron.GetActiveFighters())
                 squadron.RegisterDockedShip(fighter);
-            ActionSetter.Invoke(squadron, new object[] { (FighterSquadron.KDLNAOHHENN)0 });
             Recordable recorder = child.GetComponent<Recordable>();
             if (recorder != null) recorder.SetActive(false, 0);
             child.gameObject.SetActive(false);
@@ -97,20 +103,29 @@ public sealed class CustomSquadronReplacementModule : EventReceiverBehaviour
         replacementProgress = 0f;
     }
 
-    private static FieldInfo FindForceField()
+    private static void ResetCombatState(ShipInfo child, FighterSquadron squadron)
     {
-        // ShipInfo keeps its Force component in an obfuscated private field; find it by type.
-        foreach (FieldInfo field in typeof(ShipInfo).GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public))
-            if (field.FieldType.Name == "Force") return field;
-        return null;
+        squadron.HKEFOEDOADO = false;
+        object orders = Orders.GetValue(squadron);
+        if (orders != null) Orders.FieldType.GetMethod("Clear").Invoke(orders, null);
+        ActionSetter.Invoke(squadron, new object[] { (FighterSquadron.KDLNAOHHENN)0 });
+        PendingActionSetter.Invoke(squadron, new object[] { (FighterSquadron.KDLNAOHHENN)0 });
+        ActionTargetSetter.Invoke(squadron, new object[] { null });
+        PendingTargetSetter.Invoke(squadron, new object[] { null });
+
+        ResetShipCombatState(child);
+        foreach (ShipInfo fighter in squadron.GetAllFighters())
+            if (fighter != null) ResetShipCombatState(fighter);
+        // AutoFire = 0. The native setter also clears the current target on child craft.
+        SetWeaponMode.Invoke(child, new object[] {
+            System.Enum.ToObject(SetWeaponMode.GetParameters()[0].ParameterType, 0), null });
     }
 
-    private static void ClearConstantForce(ShipInfo child)
+    private static void ResetShipCombatState(ShipInfo fighter)
     {
-        object force = ForceField != null ? ForceField.GetValue(child) : null;
-        if (force == null || (force is Object && (Object)force == null)) return;
-        PropertyInfo constant = force.GetType().GetProperty("ConstantForce", InstanceMethods);
-        if (constant != null && constant.CanWrite) constant.SetValue(force, Vector3.zero, null);
+        fighter.IsJammed = false;
+        ShipDisabledSetter.Invoke(fighter, new object[] { false });
+        PendingWeaponTargetSetter.Invoke(fighter, new object[] { null });
     }
 
     private static float OneFighterHull(float maxHull, int maxFighters, float[] lossThresholds)

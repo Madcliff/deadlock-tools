@@ -17,6 +17,7 @@ from deadlock_tools import shipdb as sd
 
 FILE = "deadlock-jamming.txt"
 KEYS = {"speed": "MaxVelocityPenalty", "evade": "EvadePenalty", "accuracy": "AccuracyPenalty"}
+BATTERY_KEYS = ("drain", "reserve", "recharge")
 LIMIT = 1000.0
 
 
@@ -88,7 +89,7 @@ def read_overrides(path):
         for item in parts[2:]:
             key, sep, value = item.partition("=")
             try:
-                if sep and key in KEYS:
+                if sep and (key in KEYS or parts[0] == "ship" and key in BATTERY_KEYS):
                     values[key] = float(value)
             except ValueError:
                 continue
@@ -98,10 +99,11 @@ def read_overrides(path):
 
 def render(overrides):
     lines = ["# per-jammer jamming penalties for the custom-module DLL (CustomJamming); written by deadlock-tools",
-             "# kind id [speed=..] [evade=..] [accuracy=..]   (a missing key: the global DataTables.JammingPenalty)"]
+             "# kind id [speed=..] [evade=..] [accuracy=..]",
+             "# ship-only battery overrides: drain=.. reserve=.. recharge=.. (rates per 120 battle ticks)"]
     for (kind, ident), values in sorted(overrides.items()):
         if values:
-            lines.append("%s %d %s" % (kind, ident, " ".join("%s=%g" % (k, values[k]) for k in KEYS if k in values)))
+            lines.append("%s %d %s" % (kind, ident, " ".join("%s=%g" % (k, values[k]) for k in (*KEYS, *BATTERY_KEYS) if k in values)))
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
@@ -113,16 +115,19 @@ def set_override(overrides, kind, ident, values):
     entry = out.setdefault((kind, int(ident)), {})
     changes = []
     for key, value in values.items():
-        if key not in KEYS:
-            raise ValueError("jamming penalties are %s, not %r" % (", ".join(KEYS), key))
+        battery = key in BATTERY_KEYS and kind == "ship"
+        if key not in KEYS and not battery:
+            raise ValueError("unknown %s jamming setting %r" % (kind, key))
         if value in (None, ""):
             if key in entry:
-                changes.append("%s back to global" % key)
+                changes.append("%s back to %s" % (key, "default" if battery else "global"))
                 del entry[key]
             continue
         value = float(value)
-        if not -LIMIT <= value <= LIMIT:
-            raise ValueError("%s must be between %g and %g" % (key, -LIMIT, LIMIT))
+        minimum = 0 if battery else -LIMIT
+        if not minimum <= value <= LIMIT or (key == "reserve" and value == 0):
+            qualifier = "greater than zero and at most" if key == "reserve" else f"between {minimum:g} and"
+            raise ValueError(f"{key} must be {qualifier} {LIMIT:g}")
         if entry.get(key) != value:
             changes.append("%s %s -> %g" % (key, entry.get(key, "global"), value))
             entry[key] = value
