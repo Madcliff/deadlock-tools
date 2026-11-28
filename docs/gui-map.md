@@ -40,7 +40,9 @@ Use **Group existing bays under Fighters → Repair Bay** and save to move the e
 | **Level data ↔ bundle** | every value both files hold, side by side, with ✓/✗, per-row **Use level** / **Use bundle**, and *make all match* buttons; *Keep hull & armour linked while editing* | none (stages edits for Save ship); see [game/bundle-level-agreement.md](game/bundle-level-agreement.md) |
 | Field groups | level fields; bundle hull & armour and subsystems inside *Hull & armour*; bundle slot controls inside *Carrier & munition slots* | staged for Save ship |
 | Bundle option cards | Ship systems, Custom ship modules (including Armour Repair Drones), and Abilities (including Jamming battery settings, Hull Repair Drones, and RSpam AI ship priorities), Weapons, Output | staged for Save ship |
-| Drone Resupply | Under **Installed Abilities → Custom drone resupply**, use **Resupply Hull Repair Drones** and **Resupply Armour Repair Drones** independently. | staged for Save ship |
+| Custom module status | **Installed** modules have settings under **Abilities → Installed abilities**. Select **Available to add** modules in **Custom ship modules** to queue them for the next save. | staged for Save ship |
+| Vortex Crush | Add under **Custom ship modules → Custom vortex crush**. Under **Abilities → Installed abilities → Vortex Crush**, edit targeting, pull, collapse damage, **Hull damage from armour overflow (%)**, cooldown and **Friendly fire**. | staged for Save ship |
+| Drone Resupply | Under **Installed Abilities → Custom drone resupply**, set the Deploy Plating, Hull Repair Drone, and Armour Repair Drone rates together. Use the two repair-drone switches to enable each bank. | staged for Save ship |
 | Flak field | top and side diagram of the zone(s) against the hull (largest hull mesh's bounds, ship scale applied) with drag handles for distance, length and radius; one input per FlakField field with help text; per-turn damage readout at full and 0 Armory health; zone size; Armory FlakDamageRange; stock ships table | `/api/bundle/stats` (read, `flak`); staged for Save ship → `weapons --flak FIELD=VALUE …` |
 | Module subsystems | one row per driver: module, driving subsystem, % at 0 and at full health; per-module total and stock driver; **Add subsystem**, **Remove** | `/api/bundle/stats` (read); staged for Save ship → `weapons --module-subsystem … / --clear-module-subsystems` |
 | Crew bonuses from subsystem health | one row per modifier: crew stat, source subsystem, bonus at 0 and at full health, effect note; **Add modifier**, **Remove** | `/api/bundle/stats` (read, with the stat catalog); staged for Save ship → `weapons --subsystem-modifier … / --clear-subsystem-modifiers` |
@@ -76,7 +78,7 @@ Everything about commanders: level tables and the DLL limits that must match the
 |---|---|---|
 | Ranks & command tree | level rank count vs DLL cap and node status (warns on mismatch); ranks to add, XP growth, fleet-size trait every rank; max rank (follows the rank count), command nodes, step, first rank → **Save ranks & command tree**; **Restore DLL defaults** | `/api/tools/run setcommanders` → `shipdb setcommanders`, then `/api/dll/patch` → `dll patch --max-rank --command-nodes …`; `/api/dll/revert` → `dll revert --max-rank --command-nodes` |
 | Rank, XP and leadership table | expands to the read-only listing | `/api/tools/run commanders` → `shipdb commanders` |
-| Create a commander ability | stat, flat/percentage, bonus, branch, text | staged for Save commander tree |
+| Create a commander ability | ship stat or **Tylium per turn**, bonus, branch, text | staged for Save commander tree |
 | Tree preview + subsystem choices | add/remove/reorder choices; **Reset lists: each subsystem’s own three skills**; **Restore the game’s original lists**; **Restore loaded tree mapping** | the two reset buttons write immediately: `/api/tools/run fixspecs` → `shipdb fixspecs [--revert-specs]` |
 | Ability effect values | bonus, unlock rank, display style, flagship, localisation IDs | staged for Save commander tree |
 | **Save commander tree** | writes tables, new abilities, localisation, unlock-rank DLL code | `/api/commanders/save` |
@@ -131,3 +133,13 @@ None. When you add a CLI option, add its control to the tab that owns its subjec
 - `subsystem_modifiers.py` (subsystem crew modifiers in a bundle; the DLL side `CustomSubsystemModifiers` is already
   merged by the custom-module build) and `trench.py` (bow guns in the mouth trench, made for the Mercury MK2). Both have
   tests. When they get CLI options, add their controls to the Ships tab bundle cards and the weapon layout view.
+
+
+### DLL mechanics
+
+| Control | Endpoint | CLI |
+|---|---|---|
+| DLL → Mechanics | `POST /api/dll/mechanics` and `POST /api/dll/mechanics/save` | `dll mechanics --campaign-refit on --drone-self-targeting on --magazine-loadout-display on` |
+| Installed Abilities → Custom magazine capacity | Save ship stages the loadout preview alongside the DLL | `dll mechanics --magazine-bundle SHIP_BUNDLE` |
+
+Enable Campaign Mk II refit on the DLL page, then right-click the **ship name** of an eligible Jupiter or Mercury in the campaign fleet panel. Confirm the upgrade and save the campaign as usual.

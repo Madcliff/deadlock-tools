@@ -897,9 +897,9 @@ CUSTOM_MODULE_DEFINITIONS = {
     "CustomDroneResupplyModule": {
         "label": "Custom drone resupply",
         "fields": (("basePlatingPerTick", "float"), ("modifierRate", "float"), ("modifierField", "int"),
-                   ("resupplyHullRepairDrones", "bool"), ("resupplyArmourRepairDrones", "bool")),
+                   ("resupplyHullRepairDrones", "bool"), ("resupplyArmourRepairDrones", "bool"), ("armourDronesPerTick", "float"), ("hullDronesPerTick", "float")),
         "defaults": {"basePlatingPerTick": 1.0, "modifierRate": 1.0, "modifierField": 604,
-                     "resupplyHullRepairDrones": False, "resupplyArmourRepairDrones": False},
+                     "resupplyHullRepairDrones": False, "resupplyArmourRepairDrones": False, "armourDronesPerTick": 0.05, "hullDronesPerTick": -1.0},
     },
     "CustomMagazineCapacityModule": {
         "label": "Custom magazine capacity",
@@ -914,6 +914,15 @@ CUSTOM_MODULE_DEFINITIONS = {
         "defaults": {"range": 1000.0, "cooldownTurns": 1, "detonationDelayTicks": 0,
                      "subsystemDamage": 8.0, "recoveryTicks": 240,
                      "disableSquadronTicks": 360, "fighterEvadeDebuffTicks": 360},
+    },
+    "CustomVortexCrushModule": {
+        "label": "Vortex Crush",
+        "fields": (("targetRange", "float"), ("radius", "float"), ("pullPerTick", "float"),
+                   ("squadronPullMultiplier", "float"), ("collapseDamage", "float"),
+                   ("cooldownTurns", "int"), ("friendlyFire", "bool"), ("hullOverflowPercent", "float")),
+        "defaults": {"targetRange": 4000.0, "radius": 500.0, "pullPerTick": 2.0,
+                     "squadronPullMultiplier": 2.0, "collapseDamage": 40.0,
+                     "cooldownTurns": 2, "friendlyFire": True, "hullOverflowPercent": 25.0},
     },
     "CustomTargetedEmpModule": {
         "label": "Targeted EMP",
@@ -1030,7 +1039,7 @@ def upgrade_custom_module_fields(prefab):
             continue
         file_id, script = struct.unpack_from("<iq", prefab.raw(obj), 16)
         cls = classes.get(script) if file_id == 0 else None
-        if cls in ("CustomEmpPulseModule", "CustomTargetedEmpModule", "CustomDroneResupplyModule"):
+        if cls in ("CustomEmpPulseModule", "CustomTargetedEmpModule", "CustomDroneResupplyModule", "CustomVortexCrushModule"):
             by_type.setdefault((obj.tidx, script, cls), []).append(obj)
     replaced = {}
     changed = False
@@ -1528,7 +1537,7 @@ def print_bundle_settings(objects, value):
         ("Custom armour repair", "CustomArmourRepairModule", ("baseRate", "modifierRate", "modifierField")),
         ("Instant plating", "CustomInstantPlatingModule", (*INSTANT_PLATING_FIELDS, "cooldownTurns")),
         ("Custom squadron replacement", "CustomSquadronReplacementModule", ("baseTicksPerReplacement", "modifierRate", "modifierField")),
-        ("Custom drone resupply", "CustomDroneResupplyModule", ("basePlatingPerTick", "modifierRate", "modifierField", "resupplyHullRepairDrones", "resupplyArmourRepairDrones")),
+        ("Custom drone resupply", "CustomDroneResupplyModule", ("basePlatingPerTick", "modifierRate", "modifierField", "resupplyHullRepairDrones", "resupplyArmourRepairDrones", "armourDronesPerTick", "hullDronesPerTick")),
         ("Custom magazine capacity", "CustomMagazineCapacityModule", ("capacityMultiplier", "modifierRate", "modifierField")),
         ("Experimental EMP", "CustomEmpPulseModule", ("range", "cooldownTurns", "detonationDelayTicks", "subsystemDamage", "recoveryTicks", "disableSquadronTicks", "fighterEvadeDebuffTicks")),
         ("Targeted EMP", "CustomTargetedEmpModule", ("range", "detonationDelayTicks", "subsystemDamage", "recoveryTicks", "disableSquadronTicks", "chargesPerCooldown", "targetRange", "fighterEvadeDebuffTicks", "burstIntervalTicks")),
@@ -2822,6 +2831,17 @@ def double_weapons(src, dst, offset=(1.5, 0.0, 0.0), copies=0, munition_slots=No
                 replaced[action.pid] = F.write(action, fields)
                 comp_add.setdefault(menu, []).append(action.pid)
                 print(f"moved Targeted EMP into Abilities (radial position {position})")
+    if "CustomVortexCrushModule" in custom_modules:
+        action_name = "CustomVortexCrushAction"
+        actions = [obj for obj in F.objs if obj.classid == 114 and
+                   custom_scripts.get(val(obj.pid).get("m_Script", {}).get("m_PathID")) == action_name]
+        if len(actions) > 1:
+            raise ValueError("The ship has multiple Vortex Crush buttons.")
+        if not actions:
+            menu, position = alloc_action_pos(7, submenu_if_full=True)
+            action_type = {"fields": (("radialMenuPosition", "int"), ("hideInMenu", "bool")),
+                           "defaults": {"hideInMenu": False}}
+            add_custom_module_component(action_name, menu, action_type, radialMenuPosition=position)
     if jamming is not None:
         # Jamming mode (the Cylon Wardriver's): a Jammer on the ship root and a JammingAction button. The Jammer acts
         # on what is in range (enemy squadrons and missiles), not on its own ship, so it works on a capital ship.
@@ -3538,9 +3558,10 @@ LIMITS
     g_custom.add_argument("--armour-repair-drones", action="store_true", help="add a standalone Armour Repair Drones bank and action using the Hydra drone prefab; requires the custom DLL")
     g_custom.add_argument("--custom-armour-repair", action="store_true", help="add the standalone armour repair module; switches Hull Resin back to positive hull-only repair and disables the old sign-based armour hook; requires the custom-module DLL")
     g_custom.add_argument("--custom-squadron-replacement", action="store_true", help="add the standalone destroyed-squadron replacement module and clear the legacy ShipInfo revive flag; keep Munition Factory for ordinary ammo resupply; requires the custom-module DLL")
-    g_custom.add_argument("--custom-drone-resupply", action="store_true", help="add the standalone passive plating-drone resupply module (base rate defaults to 1 plating per battle tick); requires the custom-module DLL")
+    g_custom.add_argument("--custom-drone-resupply", action="store_true", help="add passive resupply for Deploy Plating and optional Hull and Armour Repair Drones; requires the custom-module DLL")
     g_custom.add_argument("--custom-magazine-capacity", action="store_true", help="add the standalone magazine capacity multiplier module; requires the custom-module DLL")
     g_custom.add_argument("--custom-emp-pulse", action="store_true", help="add Experimental EMP: queue a start-of-turn pulse that disrupts enemy ships/fighters, jams fighters with the native evade penalty, and destroys enemy missiles; range, delay, cooldown, stun and jam duration are configurable; requires the custom-module DLL")
+    g_custom.add_argument("--custom-vortex-crush", action="store_true", help="add Vortex Crush, a point-targeted pull during turn movement with optional friendly fire")
     g_custom.add_argument("--custom-targeted-emp", action="store_true", help="add Targeted EMP: each per-turn charge selects one PCM 3D point; all queued enemy-only bursts fire at turn start; charge count, target range, blast size, delay, burst spacing, fighter stun and evade-jam durations are configurable; requires the custom-module DLL")
     g_custom.add_argument("--subsystem-modifier", action="append", default=[], metavar="STAT:SOURCE:MIN:MAX", help="replace the ship's subsystem crew modifiers with these entries (repeatable): crew STAT (number or name, e.g. 102 or squadron_repair) gets a bonus from SOURCE subsystem's health (0-6 or name; empty = the stat's own subsystem), MIN at 0 health to MAX at full health, in veterancy BonusAmount units (0.25 = +25%% for percent stats). See docs/game/subsystems.md; requires the custom-module DLL")
     g_custom.add_argument("--clear-subsystem-modifiers", action="store_true", help="remove the ship's subsystem crew modifiers component")
@@ -3702,6 +3723,7 @@ def main():
                 ("CustomMagazineCapacityModule", a.custom_magazine_capacity),
                 ("CustomEmpPulseModule", a.custom_emp_pulse),
                 ("CustomTargetedEmpModule", a.custom_targeted_emp),
+                ("CustomVortexCrushModule", a.custom_vortex_crush),
             ) if enabled],
             hull_follow=not a.no_hull_follow, min_gap=a.min_gap,
             mini_jump={"delay": a.jump_delay, "duration": a.jump_duration,
@@ -3767,9 +3789,15 @@ def main():
             print(set_ship_jamming(tmp, os.path.dirname(a.dst), [a.bundles] if a.bundles else [], penalties))
         except ValueError as error:
             raise SystemExit(str(error)) from None
+    from deadlock_tools import mechanics
+    magazine = mechanics.magazine_output(tmp, os.path.dirname(a.dst), a.bundles)
     if a.encrypt:
         open(a.dst, "wb").write(xor_bytes(open(tmp, "rb").read())); os.remove(tmp)
         print("encrypted ->", a.dst)
+    if magazine:
+        value, path = magazine
+        config.write(path, value)
+        print("magazine loadout preview ->", path)
     print("Back up the game's %s, then replace it with %s." % (stem, a.dst) if a.encrypt else "Decrypted result: %s (encrypt it with 'xor encrypt' before use)." % a.dst)
 
 if __name__ == "__main__":

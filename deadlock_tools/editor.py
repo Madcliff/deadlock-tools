@@ -345,6 +345,14 @@ class Project:
                 bundle_stage = os.path.join(staged, "ship-bundle")
                 with open(bundle_stage, "wb") as stream: stream.write(raw)
                 outputs.append((bundle_stage, bundle_target))
+                from deadlock_tools import mechanics
+                magazine = mechanics.magazine_output(bundle_stage, self.work_paths["bundles"], self.bundles)
+                if magazine:
+                    value, target = magazine
+                    preview_stage = os.path.join(staged, os.path.basename(target))
+                    with open(preview_stage, "wb") as stream:
+                        stream.write(value)
+                    outputs.append((preview_stage, target))
                 loc_stage = os.path.join(staged, "resources.assets")
                 with open(loc_stage, "wb") as stream: stream.write(catalogue.data)
                 outputs.append((loc_stage, loc_target))
@@ -447,7 +455,7 @@ class Project:
                              "dll_modules/CustomCommanderAbilityLevels.cs"):
                     archive.extract(name, build_root)
         current = source
-        if has_custom and b"CustomCommanderStatModifiers" not in source_bytes:
+        if has_custom and b"GrantTurnTylium" not in source_bytes:
             output = os.path.join(transaction_dir, "Assembly-CSharp.commander-stat.dll")
             script = os.path.join(build_root, "scripts", "build_commander_modifiers.sh")
             result = run_cmd(["bash", script, managed, current, output], 600)
@@ -817,6 +825,23 @@ class Project:
             if folder and os.path.isfile(os.path.join(folder, jm.FILE)):
                 return os.path.join(folder, jm.FILE)
         return None
+
+    def mechanics_settings(self, body=None):
+        from deadlock_tools import mechanics
+        target = os.path.join(self.work_paths["bundles"], mechanics.FILE)
+        with self.lock:
+            source = target
+            if not os.path.isfile(source) and self.bundles:
+                source = os.path.join(self.bundles, mechanics.FILE)
+            settings = mechanics.read(source)
+            if body is not None:
+                for key in mechanics.DEFAULTS:
+                    if key in body:
+                        if type(body[key]) is not bool:
+                            raise ValueError(key + " must be true or false")
+                        settings[key] = body[key]
+                mechanics.write(target, settings)
+        return settings
 
     def _skirmish_file(self):
         from deadlock_tools import skirmish
@@ -1443,24 +1468,20 @@ class Project:
 
     def import_bundle(self, bundle):
         """Copy a selected default bundle into the editable work overlay."""
-        import shutil, tempfile, time
+        from deadlock_tools import mechanics
         source, filename = self.bundle_src(bundle)
         bundle_dir = self.work_paths["bundles"]
-        os.makedirs(bundle_dir, exist_ok=True)
         target = os.path.join(bundle_dir, filename)
         if config.same_file(source, target): return {"path": target, "backup": None, "imported": False}
-        backup = None
         with self.lock:
-            if os.path.isfile(target):
-                backup = self.backup_target(os.path.join(self.backups, "bundle-import-" + time.strftime("%Y%m%d-%H%M%S")), target)
-                os.makedirs(os.path.dirname(backup), exist_ok=True); shutil.copy2(target, backup)
-            fd, temporary = tempfile.mkstemp(prefix=".bundle-import-", dir=bundle_dir)
-            os.close(fd)
-            try:
-                shutil.copy2(source, temporary)
-                os.replace(temporary, target)
-            finally:
-                if os.path.exists(temporary): os.unlink(temporary)
+            with open(source, "rb") as stream:
+                outputs = [(stream.read(), target)]
+            magazine = mechanics.magazine_output(source, bundle_dir, self.bundles)
+            if magazine:
+                outputs.append(magazine)
+            backup_root = self._promote(outputs, "bundle-import")
+            old_bundle = self.backup_target(backup_root, target) if backup_root else None
+            backup = old_bundle if old_bundle and os.path.isfile(old_bundle) else None
         return {"path": target, "backup": backup, "imported": True}
 
     def run_xor(self, bundle, mode, key=""):
@@ -1737,16 +1758,15 @@ class Project:
                 if not os.path.isfile(produced):
                     r = subprocess.CompletedProcess(cmd, 1, r.stdout, r.stderr + "\nExpected bundle output was not created: " + str(produced))
                 else:
-                    import shutil, tempfile, time
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    if overwrite:
-                        backup = os.path.join(self.backups, "bundle-overwrite-" + time.strftime("%Y%m%d-%H%M%S"), os.path.basename(src))
-                        os.makedirs(os.path.dirname(backup), exist_ok=True); shutil.copy2(src, backup)
-                    fd, temporary = tempfile.mkstemp(prefix=".bundle-save-", dir=os.path.dirname(dst)); os.close(fd)
-                    try:
-                        shutil.copy2(produced, temporary); os.replace(temporary, dst)
-                    finally:
-                        if os.path.exists(temporary): os.unlink(temporary)
+                    from deadlock_tools import mechanics
+                    with open(produced, "rb") as stream:
+                        outputs = [(stream.read(), dst)]
+                    magazine = mechanics.magazine_output(produced, self.work_paths["bundles"], self.bundles)
+                    if magazine:
+                        outputs.append(magazine)
+                    backup_root = self._promote(outputs, "bundle-save")
+                    old_bundle = self.backup_target(backup_root, dst) if backup_root else None
+                    backup = old_bundle if overwrite and old_bundle and os.path.isfile(old_bundle) else None
         output = r.stdout + r.stderr
         penalties = {key: (None if str(opts.get(opt)).strip().lower() in ("global", "default", "-", "") else opts.get(opt))
                      for opt, key in wmod.JAM_OVERRIDE_OPTIONS.items() if opts.get(opt) is not None and opts.get(opt) is not False}
@@ -1877,7 +1897,8 @@ class Project:
                         "CustomArmourRepairDroneModule", "CustomArmourRepairDroneAction"}
         custom_types.update({"CustomSubsystemModifiers", "CustomModuleSubsystems"})
         custom_types.update({"CustomEmpPulseModule", "CustomEmpPulseAction",
-                             "CustomTargetedEmpModule", "CustomTargetedEmpAction"})
+                             "CustomTargetedEmpModule", "CustomTargetedEmpAction",
+                             "CustomVortexCrushModule", "CustomVortexCrushAction"})
         module_count = sum(name in custom_types for name in component_names)
         # These stock prefab types also use hooks from the custom DLL.
         uses_ability_hooks = any(name in component_names for name in ("Jammer", "DeployPlatingModule", "HullRepairModule"))
@@ -1913,7 +1934,7 @@ class Project:
                                                                b"CustomDroneResupplyModule", b"CustomMagazineCapacityModule",
                                                                b"CustomRepairBaySlots", b"CustomInstantPlatingModule",
                                                                b"CustomCommanderStatModifiers", b"CustomSubsystemModifiers", b"CustomModuleSubsystems",
-                                                               b"CustomStealthFallback", b"CustomJamming")):
+                                                               b"CustomStealthFallback", b"CustomJamming", b"CustomCampaignRefit")):
                 raise ValueError("the configured DLL already has custom modules, but no clean base exists. Put a clean Assembly-CSharp.dll at " + base_dll)
             shutil.copy2(self.dll, base_dll)
 
@@ -2001,6 +2022,17 @@ class Project:
                 if not os.path.isfile(path):
                     raise RuntimeError("repair shortcut build did not produce " + name)
                 asset_outputs.append((path, os.path.join(self.work_paths["levels"], name)))
+
+        from deadlock_tools import mechanics
+        if "ShipInfo" in component_names:
+            filename, value = mechanics.magazine_preview(bundle_path)
+            target = os.path.join(self.work_paths["bundles"], filename)
+            installed = os.path.join(self.bundles, filename) if self.bundles else ""
+            if "CustomMagazineCapacityModule" in component_names or os.path.isfile(target) or os.path.isfile(installed):
+                preview = os.path.join(transaction_root, filename)
+                with open(preview, "w", encoding="ascii") as stream:
+                    stream.write(value)
+                asset_outputs.append((preview, target))
 
         dll_target = os.path.join(self.work_paths["dll"], os.path.basename(self.dll))
         outputs = [(candidate, dll_target)] + asset_outputs
@@ -2273,6 +2305,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/editor/update": return self.send(P.editor_update(body["bundle"], body.get("patches")))
             if self.path == "/api/dll/patch": return self.send(P.dll_patch(body))
             if self.path == "/api/dll/skirmish": return self.send(P.skirmish_settings(body))
+            if self.path == "/api/dll/mechanics": return self.send(P.mechanics_settings())
+            if self.path == "/api/dll/mechanics/save": return self.send(P.mechanics_settings(body))
             if self.path == "/api/dll/skirmish/save": return self.send(P.save_skirmish_settings(body))
             if self.path == "/api/dll/revert": return self.send(P.dll_revert(body))
             if self.path == "/api/xor": return self.send(P.run_xor(body["bundle"], body["mode"], body.get("key", "")))
@@ -2332,6 +2366,7 @@ main{display:grid;grid-template-columns:270px 1fr;gap:0;min-height:calc(100vh - 
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px 18px}
 label.f{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--muted)}label.f input,label.f select{padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:14px system-ui}
 label.f input.chg,label.f select.chg{background:var(--chg);border-color:var(--accent)}label.f.chk{flex-direction:row;align-items:center;gap:8px;color:var(--ink)}
+.module-status{margin-inline-start:auto;text-align:end;font-weight:600}
 .orig{font-size:11px}.ro{font-size:13px;color:var(--ink);word-break:break-word}
 pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;white-space:pre-wrap;max-height:340px;overflow:auto;font-size:12px}
 .msg-ok{color:var(--ok)}.msg-bad{color:var(--bad)}.hint{color:var(--muted);font-size:12px}
@@ -3230,6 +3265,24 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
  for(const option of bundleOptions)if(option.dest==='stealth'||option.dest.endsWith('_donor'))option.choices=state.info.bundle_files.slice();
  const get=id=>source.querySelector('#'+id)??actions.querySelector('#'+id);
  const path=el('input',{type:'text',id:'bpath',value:initialFile,placeholder:'path to a ship bundle (encrypted game file or decrypted .dec)',style:'flex:1;min-width:280px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)'});
+ const customModuleScripts={
+   custom_armour_repair:'CustomArmourRepairModule',
+   armour_repair_drones:'CustomArmourRepairDroneModule',
+   custom_squadron_replacement:'CustomSquadronReplacementModule',
+   custom_drone_resupply:'CustomDroneResupplyModule',
+   custom_magazine_capacity:'CustomMagazineCapacityModule',
+   custom_instant_plating:'CustomInstantPlatingModule',
+   custom_emp_pulse:'CustomEmpPulseModule',
+   custom_targeted_emp:'CustomTargetedEmpModule',
+   custom_vortex_crush:'CustomVortexCrushModule'
+ };
+ function showModuleStatus(input){
+   const status=input.closest('label').querySelector('[data-module-status]');
+   if(!status)return;
+   status.textContent=input.disabled?'Installed':input.checked?'Will add on save':
+     bundle.statsResult?'Available to add':'Load a ship to check status';
+   status.className='module-status '+(input.disabled?'msg-ok':'hint');
+ }
  let statsRequest=0,compareRequest=0,compareData=null;
  async function refreshStats(file,deferLayout=false){
    const request=++statsRequest;bundle.currentFile=file;bundle.layout.setSource(file,deferLayout);
@@ -3244,6 +3297,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
        input.closest('label').hidden=false;
      if(input.type==='checkbox')input.checked=false;
      else input.value='';
+     if(Object.hasOwn(customModuleScripts,input.dataset.d))showModuleStatus(input);
    });
    if(activeBundle===bundle)updPend();else bundle.refreshAgreement();
    if(!file)return;
@@ -3256,13 +3310,15 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      const hullRate=stored['RegenerativeHullResinModule.hullPerTick'];
      if(hullRate!==undefined)setOption('hull_regen',Math.abs(Number(hullRate)));
      setOption('munition_factory',Boolean(result.abilities.MunitionFactoryModule));
-     for(const [dest,script] of [['custom_armour_repair','CustomArmourRepairModule'],
-       ['custom_squadron_replacement','CustomSquadronReplacementModule'],
-       ['custom_drone_resupply','CustomDroneResupplyModule'],
-       ['custom_magazine_capacity','CustomMagazineCapacityModule'],['custom_instant_plating','CustomInstantPlatingModule'],
-       ['custom_emp_pulse','CustomEmpPulseModule'],['custom_targeted_emp','CustomTargetedEmpModule'],['jamming','Jammer']]){
+     bundle.statsResult=result;
+     for(const [dest,script] of Object.entries({...customModuleScripts,jamming:'Jammer'})){
        const input=bundle.sections.querySelector('[data-d="'+dest+'"]');
-       if(input){const installed=Boolean(result.abilities[script]);input.checked=installed;input.disabled=installed}
+       if(input){
+         const installed=Boolean(result.abilities[script]);
+         input.checked=installed;
+         input.disabled=installed;
+         if(dest!=='jamming')showModuleStatus(input);
+       }
      }
      for(const [dest,key] of [['jam_speed','speed'],['jam_evade','evade'],['jam_accuracy','accuracy'],['jam_battery_drain','drain'],['jam_battery_reserve','reserve'],['jam_battery_recharge','recharge']]){
        const input=bundle.sections.querySelector('[data-d="'+dest+'"]');
@@ -3273,13 +3329,13 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      const labels={MaxHullPoints:'Hull',defaultArmourFront:'Front',defaultArmourRear:'Rear',
        defaultArmourLeft:'Port',defaultArmourRight:'Starboard',defaultArmourTop:'Top',defaultArmourBottom:'Bottom'};
      const modifierFields=result.modifier_fields||[];
-     const fieldLabels={basePlatingPerTick:'Resupply per battle tick',resupplyHullRepairDrones:'Resupply Hull Repair Drones',resupplyArmourRepairDrones:'Resupply Armour Repair Drones',repairArmour:'Repair armour instead of hull',droneStack:'Drone capacity',droneSalvo:'Drones per launch',droneRepairRate:'Drone repair rate',droneLifetime:'Drone lifetime',launchDelayTicks:'Launch delay (ticks)','Jammer.jamRange':'Jam range','Jammer.jamMissileChance':'Chance to jam each missile (0-1)','CustomInstantPlatingModule.cooldownTurns':'Cooldown (battle turns)','CustomInstantPlatingModule.activationDelayTicks':'Activation delay after turn starts (ticks)','CustomEmpPulseModule.cooldownTurns':'Cooldown (battle turns)','CustomEmpPulseModule.detonationDelayTicks':'Activation delay after turn starts (ticks)','CustomEmpPulseModule.range':'EMP range (units)','CustomEmpPulseModule.subsystemDamage':'Subsystem maximum health reduced','CustomEmpPulseModule.recoveryTicks':'Subsystem recovery (ticks)','CustomEmpPulseModule.disableSquadronTicks':'Fighter stun duration (ticks)','CustomEmpPulseModule.fighterEvadeDebuffTicks':'Fighter evade debuff duration (ticks)','CustomTargetedEmpModule.range':'EMP blast radius (units)','CustomTargetedEmpModule.detonationDelayTicks':'Activation delay after turn starts (ticks)','CustomTargetedEmpModule.subsystemDamage':'Subsystem maximum health reduced','CustomTargetedEmpModule.recoveryTicks':'Subsystem recovery (ticks)','CustomTargetedEmpModule.disableSquadronTicks':'Fighter stun duration (ticks)','CustomTargetedEmpModule.fighterEvadeDebuffTicks':'Fighter evade debuff duration (ticks)','CustomTargetedEmpModule.chargesPerCooldown':'Charges per turn','CustomTargetedEmpModule.burstIntervalTicks':'Ticks between separate bursts','CustomTargetedEmpModule.targetRange':'Map targeting range (units)',baseRate:'Armour repair per tick, per facing',modifierRate:'Crew bonus weight',modifierField:'Crew bonus to use',
-       baseTicksPerReplacement:'Base ticks to replace one squadron',basePlatingPerTick:'Drone reserve restored per tick',
+     const fieldLabels={'CustomVortexCrushModule.hullOverflowPercent':'Hull damage from armour overflow (%)','CustomVortexCrushModule.friendlyFire':'Friendly fire','CustomVortexCrushModule.radius':'Pull and collapse radius','CustomVortexCrushModule.pullPerTick':'Capital pull per movement tick','CustomVortexCrushModule.squadronPullMultiplier':'Squadron pull multiplier','CustomVortexCrushModule.collapseDamage':'Maximum collapse armour damage','CustomVortexCrushModule.cooldownTurns':'Cooldown (battle turns)','CustomVortexCrushModule.targetRange':'Map targeting range (units)',armourDronesPerTick:'Armour drones replenished per battle tick',hullDronesPerTick:'Hull drones replenished per battle tick',resupplyHullRepairDrones:'Resupply Hull Repair Drones',resupplyArmourRepairDrones:'Resupply Armour Repair Drones',repairArmour:'Repair armour instead of hull',droneStack:'Drone capacity',droneSalvo:'Drones per launch',droneRepairRate:'Drone repair rate',droneLifetime:'Drone lifetime',launchDelayTicks:'Launch delay (ticks)','Jammer.jamRange':'Jam range','Jammer.jamMissileChance':'Chance to jam each missile (0-1)','CustomInstantPlatingModule.cooldownTurns':'Cooldown (battle turns)','CustomInstantPlatingModule.activationDelayTicks':'Activation delay after turn starts (ticks)','CustomEmpPulseModule.cooldownTurns':'Cooldown (battle turns)','CustomEmpPulseModule.detonationDelayTicks':'Activation delay after turn starts (ticks)','CustomEmpPulseModule.range':'EMP range (units)','CustomEmpPulseModule.subsystemDamage':'Subsystem maximum health reduced','CustomEmpPulseModule.recoveryTicks':'Subsystem recovery (ticks)','CustomEmpPulseModule.disableSquadronTicks':'Fighter stun duration (ticks)','CustomEmpPulseModule.fighterEvadeDebuffTicks':'Fighter evade debuff duration (ticks)','CustomTargetedEmpModule.range':'EMP blast radius (units)','CustomTargetedEmpModule.detonationDelayTicks':'Activation delay after turn starts (ticks)','CustomTargetedEmpModule.subsystemDamage':'Subsystem maximum health reduced','CustomTargetedEmpModule.recoveryTicks':'Subsystem recovery (ticks)','CustomTargetedEmpModule.disableSquadronTicks':'Fighter stun duration (ticks)','CustomTargetedEmpModule.fighterEvadeDebuffTicks':'Fighter evade debuff duration (ticks)','CustomTargetedEmpModule.chargesPerCooldown':'Charges per turn','CustomTargetedEmpModule.burstIntervalTicks':'Ticks between separate bursts','CustomTargetedEmpModule.targetRange':'Map targeting range (units)',baseRate:'Armour repair per tick, per facing',modifierRate:'Crew bonus weight',modifierField:'Crew bonus to use',
+       baseTicksPerReplacement:'Base ticks to replace one squadron',basePlatingPerTick:'Deploy Plating reserve per battle tick',
        capacityMultiplier:'Magazine capacity multiplier','MunitionResupplyRange.Min':'Damaged Armory work rate (%)',
        'MunitionResupplyRange.Max':'Full Armory work rate (%)',portPlating:'Port plating per use',
        starboardPlating:'Starboard plating per use',forePlating:'Fore plating per use',aftPlating:'Aft plating per use',
        dorsalPlating:'Top plating per use',ventralPlating:'Bottom plating per use'};
-     const fieldHelp={'CustomInstantPlatingModule.cooldownTurns':'1 allows use next turn. 2 skips one intervening turn.',modifierRate:'0 ignores the crew bonus. 1 applies all of it. 0.5 applies half of it.',
+     const fieldHelp={hullDronesPerTick:'Use -1 to follow the plating rate, 0 to pause hull drone resupply, or enter a custom rate.','CustomInstantPlatingModule.cooldownTurns':'1 allows use next turn. 2 skips one intervening turn.',modifierRate:'0 ignores the crew bonus. 1 applies all of it. 0.5 applies half of it.',
        'CustomEmpPulseModule.range':'Maximum distance from this ship; default is 1,000 game units.',
        'CustomEmpPulseModule.cooldownTurns':'Battle turns between successful activations; default is 1.',
        'CustomEmpPulseModule.detonationDelayTicks':'The EMP queues at turn start. 0 fires immediately at that event; 10 ticks is 1 second, 120 ticks is 1 turn.',
@@ -3288,6 +3344,8 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
        'CustomEmpPulseModule.recoveryTicks':'Ticks for the subsystem EMP effect to recover; default is 240.',
        'CustomEmpPulseModule.disableSquadronTicks':'Ticks that enemy fighter squadrons remain stunned; default is 360 (3 turns).',
        'CustomEmpPulseModule.fighterEvadeDebuffTicks':'Ticks that enemy fighters remain jammed. This applies the game’s normal JammingPenalty, including the configured evade penalty; default is 360 (3 turns, matching the vanilla Cylon Virus Mine duration).',
+       'CustomVortexCrushModule.hullOverflowPercent':'Percentage of collapse damage left after armour that passes to the hull. Set to 0 for armour-only damage.',
+       'CustomVortexCrushModule.friendlyFire':'Allow the vortex to pull and damage friendly units, including the caster.',
        'CustomTargetedEmpModule.range':'Blast radius around each selected map point; defaults to 1,000 units.',
        'CustomTargetedEmpModule.targetRange':'Maximum PCM-style map targeting range from the ship; defaults to 4,000 units.',
        'CustomTargetedEmpModule.chargesPerCooldown':'Maximum uses per turn (default 4, maximum 16). Each activation selects one independent 3D point; unused charges refresh after the simulation ends.',
@@ -3300,7 +3358,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
        'CustomTargetedEmpModule.fighterEvadeDebuffTicks':'Ticks that enemy fighters remain jammed. This applies the game’s normal JammingPenalty, including the configured evade penalty; default is 360 (3 turns, matching the vanilla Cylon Virus Mine duration).',
        baseRate:'Points restored to each damaged facing before crew modifiers. Repair stops at that facing’s normal maximum.',
        baseTicksPerReplacement:'Ticks to replace one destroyed squadron with no crew bonus. Lower values are faster.',
-       basePlatingPerTick:'Reserve restored before crew modifiers. Returning drones refund unused payload separately.',
+       basePlatingPerTick:'Deploy Plating reserve restored before crew modifiers. Set to 0 to pause plating resupply. Returning drones refund unused payload separately.',
        'MunitionResupplyRange.Min':'A percentage of one work unit per tick at the lower Armory endpoint.',
        'MunitionResupplyRange.Max':'A percentage of one work unit per tick at full Armory effectiveness.'};
      const TICKS_PER_SECOND=10,TICKS_PER_TURN=120;
@@ -3308,10 +3366,13 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      const timedRates={
        'CustomArmourRepairModule.baseRate':'armour points per facing',
        'CustomDroneResupplyModule.basePlatingPerTick':'plating reserve points',
+       'CustomDroneResupplyModule.armourDronesPerTick':'armour repair drones',
      };
      const rateDescription=(script,name,value)=>{
        if(value===''||!Number.isFinite(Number(value)))return '';
        const n=Number(value);
+       if(script==='CustomDroneResupplyModule'&&name==='hullDronesPerTick')
+         return n<0?'Uses the Deploy Plating reserve rate':`${format(n*TICKS_PER_TURN)} hull repair drones per turn before bonuses`;
        if(name==='modifierRate'&&script!=='CustomSquadronReplacementModule')
          return `With a +25% crew bonus, this weight gives ${format(Math.max(0,1+0.25*n))}× the base rate`;
        if(script==='Armory'&&name.startsWith('MunitionResupplyRange.'))
@@ -3354,6 +3415,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
          else if(['CustomInstantPlatingModule.activationDelayTicks','CustomEmpPulseModule.detonationDelayTicks','CustomTargetedEmpModule.detonationDelayTicks'].includes(field.key)){input.min=0;input.max=99999}
          else if(['CustomEmpPulseModule.range','CustomTargetedEmpModule.range','CustomTargetedEmpModule.targetRange'].includes(field.key))input.min=0;
          else if(['CustomEmpPulseModule.subsystemDamage','CustomEmpPulseModule.recoveryTicks','CustomEmpPulseModule.fighterEvadeDebuffTicks','CustomTargetedEmpModule.subsystemDamage','CustomTargetedEmpModule.recoveryTicks','CustomTargetedEmpModule.fighterEvadeDebuffTicks'].includes(field.key))input.min=0;
+         else if(field.key==='CustomVortexCrushModule.hullOverflowPercent'){input.min=0;input.max=100}
          else if(field.key==='CustomTargetedEmpModule.chargesPerCooldown'){input.min=1;input.max=16}
          else if(field.key==='CustomTargetedEmpModule.burstIntervalTicks'){input.min=1;input.max=99999}
          else if(name==='baseTicksPerReplacement'||name==='droneSalvo')input.min=1;
@@ -3467,7 +3529,7 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
      bundle.setSubsystemModifiers?.(result.subsystem_modifiers);
      bundle.setModuleSubsystems?.(result.module_subsystems);
      bundle.setFlak?.(result.flak);
-     bundle.statsResult=result;bundle.optionBaseline=bundleOptionValues(bundle);
+     bundle.optionBaseline=bundleOptionValues(bundle);
      if(activeBundle===bundle)updPend();else bundle.refreshAgreement();
    }catch(error){
      if(request===statsRequest){bundle.stats.textContent='Bundle stats unavailable. '+error.message;bundle.refreshAgreement()}
@@ -3579,7 +3641,11 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
       if(!splitInput?.checked&&!groupsInput.dataset.manual)groupsInput.value=[fighters,support].filter(count=>count>0).join(',');
       }
     };
-    i=el('input',attrs);return el('label',{class:'f chk',title:o.help},i,bundleFieldLabel(o))
+    i=el('input',attrs);
+    const status=Object.hasOwn(customModuleScripts,o.dest)
+      ?el('small',{class:'module-status hint','data-module-status':'','aria-live':'polite'},'Load a ship to check status'):null;
+    return el('label',{class:'f chk',title:o.help},i,bundleFieldLabel(o),status)
+
   }
   if(o.kind==='choice'){const autoDonor={defender_donor:'colonialdefender',celestra_donor:'colonialcelestra',hydra_donor:'cylonhydra',gorgon_donor:'cylongorgon',medusa_donor:'cylonmedusa'}[o.dest];
     i=el('select',{'data-d':o.dest},[el('option',{value:''},autoDonor?'Automatic ('+autoDonor+' from the configured bundle folder)':o.choices?'Choose a bundle':'(default)'),...(o.choices||[]).map(c=>el('option',{value:c},c))])}
@@ -3619,13 +3685,14 @@ function loadBundleTools(bundle,bundleOptions,initialFile=''){
     slots.replaceChildren(el('h4',{},'Bundle slot controls'),el('p',{class:'hint'},'Leave blank to keep the bundle as it is. Level data ↔ bundle at the top compares these with the ship record.'),grid);
   }else if(group==='Custom ship modules'){
     sections.append(el('div',{class:'card'},el('h3',{},group),
-      el('p',{class:'hint'},'Adding a custom module also switches off its Mercury legacy hook where applicable. The matching custom-module DLL must be installed before launching the game.'),grid));
+      el('p',{class:'hint'},'Choose modules to add when you save. To change the settings for installed modules, open Abilities → Installed abilities.'),grid));
   }else{
     sections.append(el('div',{class:'card'},el('h3',{},group==='Output'?'Bundle output':group),grid));
   }
  }
- const actionsAbilityFlags=new Set(['mini_jump','augury','stealth','jamming','targeted_resupply','deploy_plating','hull_repair_drones','armour_repair_drones','coordinated_reload','machine_learning_matrix','rspam','technical_support','marine_reinforcement','custom_instant_plating','custom_emp_pulse','custom_targeted_emp']);
+ const actionsAbilityFlags=new Set(['mini_jump','augury','stealth','jamming','targeted_resupply','deploy_plating','hull_repair_drones','armour_repair_drones','coordinated_reload','machine_learning_matrix','rspam','technical_support','marine_reinforcement','custom_instant_plating','custom_emp_pulse','custom_targeted_emp','custom_vortex_crush']);
  bundle.sections.addEventListener('change',event=>{
+   if(Object.hasOwn(customModuleScripts,event.target.dataset.d))showModuleStatus(event.target);
    if(!actionsAbilityFlags.has(event.target.dataset.d))return;
    const enabled=[...bundle.sections.querySelectorAll('input[type=checkbox][data-d]')].filter(input=>actionsAbilityFlags.has(input.dataset.d)&&input.checked).length;
    const submenu=bundle.sections.querySelector('[data-d="ability_submenu"]');
@@ -3914,10 +3981,25 @@ async function loadDll(){const box=$('#tab-dll');if(!state.info.ready){box.repla
  if(!box.dataset.ok){box.dataset.ok=1;box.replaceChildren(el('div',{class:'card'},el('h3',{},'Current DLL'),el('pre',{id:'dchk'},'checking...')),
   el('div',{class:'card'},el('h3',{},'Patch'),el('p',{class:'hint'},'Commander max rank and command-tree nodes are set on the Commanders tab. Custom-module and commander DLL code is rebuilt automatically when you save a bundle or the commander tree.'),el('div',{class:'grid'},fld('d_repair_actions','Repair action shortcuts','Unique, automatically indexed shortcuts (1–16)'),el('label',{class:'f chk',title:'Existing saves pick up a raised MunitionSlots count in battle'},el('input',{type:'checkbox',id:'d_mun'}),'Munition load fix'),el('label',{class:'f chk',title:'Patches continue from the edited work-tree DLL unless you choose otherwise'},el('input',{type:'checkbox',id:'d_fresh',onchange:loadDll}),'Start from the original DLL (drops earlier patches)')),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'pri',id:'dgo',onclick:patchDll},'Patch DLL'),el('span',{id:'dmsg',class:'hint'}))),
-  skirmishDllCard(),
+  skirmishDllCard(), mechanicsDllCard(),
   el('div',{class:'card'},el('h3',{},'Revert'),el('div',{class:'grid'},...[['r_mun','Munition load fix'],['r_repair_key','Indexed repair action shortcuts']].map(([id,l])=>el('label',{class:'f chk'},el('input',{type:'checkbox',id}),l))),
    el('div',{class:'row',style:'margin-top:10px'},el('button',{class:'sec',id:'rgo',onclick:revertDll},'Revert ticked patches'),el('span',{id:'rmsg',class:'hint'}))),el('pre',{id:'dout',hidden:true}))}
  try{const r=await api('/api/dll/check'+($('#d_fresh').checked?'?fresh=1':''));$('#dchk').textContent=r.output+'\n(source: '+r.source+')'}catch(e){$('#dchk').textContent=e.message}}
+function mechanicsDllCard(){
+ const refit=el('input',{type:'checkbox'}),drones=el('input',{type:'checkbox'}),magazine=el('input',{type:'checkbox'});
+ const status=el('span',{class:'hint'}),save=el('button',{class:'pri',disabled:true},'Save mechanics');
+ const update=r=>{refit.checked=r.campaign_refit;drones.checked=r.drone_self_targeting;magazine.checked=r.magazine_loadout_display};
+ api('/api/dll/mechanics',{}).then(r=>{update(r);save.disabled=false}).catch(e=>{status.textContent=e.message});
+ save.onclick=async()=>{save.disabled=true;try{
+   update(await api('/api/dll/mechanics/save',{campaign_refit:refit.checked,drone_self_targeting:drones.checked,magazine_loadout_display:magazine.checked}));
+   status.textContent='Saved. Restart the game after installing the settings.';
+ }catch(e){status.textContent=e.message}finally{save.disabled=false}};
+ return el('div',{class:'card'},el('h3',{},'Mechanics'),
+   el('label',{class:'f chk'},refit,'Campaign Mk II refit'),
+   el('label',{class:'f chk'},drones,'Allow drones to target their own ship'),
+   el('label',{class:'f chk'},magazine,'Show expanded magazine capacity in the munition picker'),
+   el('div',{class:'row'},save,status));
+}
 function skirmishDllCard(){
  const ships=el('input',{type:'number',min:1,max:99,step:1,placeholder:'level data'});
  const caps=el('input',{type:'text',placeholder:'32000, 64000'});
@@ -4600,10 +4682,19 @@ async function loadCommanders(){
   }
   function buildCustomAbilityForm(){
    const name=el('input',{type:'text',maxlength:80,placeholder:'Ability name'});
-   const target=el('select',{},data.abilities.filter(a=>!a.custom&&a.id>=3).map(a=>el('option',{value:a.id},a.effect+' — '+a.name)));
+   const target=el('select',{},[...data.abilities.filter(a=>!a.custom&&a.id>=3&&a.id<=20).map(a=>el('option',{value:a.id},a.effect+' — '+a.name)),el('option',{value:30},'Tylium per turn')]);
    const mode=el('select',{},el('option',{value:'flat'},'Flat amount'),el('option',{value:'percentage'},'Percentage'));
    const bonus=el('input',{type:'number',step:'any',value:0});
    const flagship=el('input',{type:'checkbox'});
+   const syncEconomyFields=()=>{
+    const economy=Number(target.value)===30;
+    mode.disabled=flagship.disabled=economy;
+    bonus.step=economy?'1':'any';
+    bonus.min=economy?'0':'';
+    if(economy){mode.value='flat';flagship.checked=false}
+   };
+   target.addEventListener('change',syncEconomyFields);
+   syncEconomyFields();
    const desc=el('textarea',{rows:2,placeholder:'What this ability does'});
    const subsystem=el('select',{},data.subsystems.map(s=>el('option',{value:s.id},s.name)));
    const message=el('p',{class:'hint'});
@@ -4614,9 +4705,11 @@ async function loadCommanders(){
     for(let slot=0;slot<10;slot++){const candidate=1000+targetId*100+(kind==='percentage'?20:0)+(isFlagship?10:0)+slot;if(!used.has(candidate)){id=candidate;break}}
     if(id===undefined){message.className='msg-bad';message.textContent='All 10 ability slots for this stat and modifier type are used.';return}
     if(!name.value.trim()){message.className='msg-bad';message.textContent='Enter an ability name.';return}
-    const stat=data.abilities.find(a=>a.id===targetId);
-    const ability={id,name:name.value.trim(),effect:stat.effect+' · '+kind,custom:true,target:targetId,mode:kind,unlockRank:1,
-      titleText:name.value.trim(),descriptionText:desc.value.trim()||('Adds '+bonus.value+' '+kind+' bonus to '+stat.effect+'.'),
+    if(!bonus.reportValidity()||!Number.isFinite(bonus.valueAsNumber))return;
+    const economy=targetId===30;
+    const effect=economy?'Tylium per turn':data.abilities.find(a=>a.id===targetId).effect;
+    const ability={id,name:name.value.trim(),effect:economy?effect:effect+' · '+kind,custom:true,target:targetId,mode:kind,unlockRank:1,
+      titleText:name.value.trim(),descriptionText:desc.value.trim()||(economy?'Earns '+bonus.value+' Tylium each campaign turn while commanding a fleet.':'Adds '+bonus.value+' '+kind+' bonus to '+effect+'.'),
       titleId:0,descriptionId:0,displayType:kind==='percentage'?1:0,flagship:isFlagship,bonus:bonus.valueAsNumber};
     newAbilities.push({...ability});data.abilities.push(ability);abilityById[id]=ability;
     allocations[Number(subsystem.value)].push(id);drawTrees();drawAbilities();
@@ -4625,7 +4718,7 @@ async function loadCommanders(){
    }},'Add ability to selected subsystem');
    const field=(label,input)=>el('label',{class:'f'},label,input);
    return el('div',{class:'card'},el('h3',{},'Create a commander ability'),el('p',{class:'hint'},'Choose one of the game’s stat calculation paths. Flat bonuses add a value; percentage bonuses multiply the calculated value. A custom ability is assigned a unique effect ID and can then be placed in the tree.'),
-    el('div',{class:'grid'},field('Ability name',name),field('Ship stat',target),field('Modifier',mode),field('Bonus amount',bonus),field('Subsystem branch',subsystem),field('Description',desc),el('label',{class:'f chk'},flagship,'Flagship only')),
+    el('div',{class:'grid'},field('Ability name',name),field('Effect',target),field('Modifier',mode),field('Bonus amount',bonus),field('Subsystem branch',subsystem),field('Description',desc),el('label',{class:'f chk'},flagship,'Flagship only')),
     el('div',{class:'row'},create,message));
   }
   function drawAbilities(){

@@ -28,18 +28,60 @@ public static class CustomBattleHud
     private static readonly HashSet<int> fourSlotColumnShips = new HashSet<int>();
     private static readonly Dictionary<GridLayoutGroup, Vector2> stockSlotSizes = new Dictionary<GridLayoutGroup, Vector2>();
     private static readonly Dictionary<RectTransform, float> stockWidths = new Dictionary<RectTransform, float>();
-    private static readonly Dictionary<RectTransform, float> stockStatusX = new Dictionary<RectTransform, float>();
+    private static readonly Dictionary<RectTransform, float> stockPositionsX = new Dictionary<RectTransform, float>();
 
-    private static void ResizeWidth(RectTransform rect, float extra)
+    private const float FourSlotExtra = 288f;
+    private const float DoubleAbilityExtra = 144f;
+    private static readonly MethodInfo HullRepairHidden = typeof(ActionBase).GetMethod("get_HideInMenu", Private);
+    private static readonly HashSet<int> hullRepairAbilityShips = new HashSet<int>();
+
+    public static bool HullRepairAsAbility(HullRepairAction action)
+    {
+        LoadLayouts();
+        var ship = action.GetComponentInParent<ShipInfo>();
+        return ship != null && hullRepairAbilityShips.Contains((int)ship.ShipType);
+    }
+
+    public static bool HideHullRepairIcon(HullRepairAction action)
+    {
+        return (bool)HullRepairHidden.Invoke(action, null) || HullRepairAsAbility(action);
+    }
+
+    private static float StockWidth(RectTransform rect)
     {
         float width;
         if (!stockWidths.TryGetValue(rect, out width))
         {
             width = rect.rect.width;
-            if (width <= 0f) return;
+            if (width <= 0f) return 0f;
             stockWidths.Add(rect, width);
         }
-        rect.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, width + extra);
+        return width;
+    }
+
+    private static void ResizeWidth(RectTransform rect, float extra)
+    {
+        float width = StockWidth(rect);
+        if (width > 0f)
+            rect.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, width + extra);
+    }
+
+    private static void OffsetX(RectTransform rect, float offset)
+    {
+        float x;
+        if (!stockPositionsX.TryGetValue(rect, out x))
+        {
+            x = rect.anchoredPosition.x;
+            stockPositionsX.Add(rect, x);
+        }
+        rect.anchoredPosition = new Vector2(x + offset, rect.anchoredPosition.y);
+    }
+
+    // These children use fixed left anchors. Keep their right edges at the stock margins.
+    private static void ResizeLeftAnchored(RectTransform rect, float extra, float parentExtra)
+    {
+        ResizeWidth(rect, extra);
+        OffsetX(rect, parentExtra - (1f - rect.pivot.x) * extra);
     }
 
     private static void LoadLayouts()
@@ -57,11 +99,15 @@ public static class CustomBattleHud
                         int comment = raw.IndexOf('#');
                         string line = (comment < 0 ? raw : raw.Substring(0, comment)).Trim();
                         const string slotsPrefix = "slots4 ";
+                        const string hullPrefix = "hullrepairability ";
                         bool slots = line.StartsWith(slotsPrefix, StringComparison.Ordinal);
+                        bool hull = line.StartsWith(hullPrefix, StringComparison.Ordinal);
+                        string value = slots ? line.Substring(slotsPrefix.Length) :
+                            hull ? line.Substring(hullPrefix.Length) : line;
                         int id;
-                        if (int.TryParse(slots ? line.Substring(slotsPrefix.Length).Trim() : line,
+                        if (int.TryParse(value.Trim(),
                             NumberStyles.None, CultureInfo.InvariantCulture, out id))
-                            (slots ? fourSlotColumnShips : doubleColumnShips).Add(id);
+                            (slots ? fourSlotColumnShips : hull ? hullRepairAbilityShips : doubleColumnShips).Add(id);
                     }
                 }
             }
@@ -76,7 +122,7 @@ public static class CustomBattleHud
         }
     }
 
-    private static void FitSlots(ShipInfoPanel panel, RectTransform right, bool fourColumns)
+    private static void FitSlots(ShipInfoPanel panel, RectTransform right, bool fourColumns, bool doubleAbilities)
     {
         var list = SlotList == null ? null : SlotList.GetValue(panel) as Component;
         if (list == null) return;
@@ -88,19 +134,16 @@ public static class CustomBattleHud
         var status = right.parent == null ? null : right.parent.Find("HackingAndBoarding") as RectTransform;
         if (slotPanel != null && main != null && main.parent == right && status != null)
         {
-            const float extraWidth = 80f;
-            float extra = fourColumns ? extraWidth : 0f;
+            StockWidth(main);
+            StockWidth(slotPanel);
+            StockWidth(rect);
+            float extra = fourColumns ? FourSlotExtra : doubleAbilities ? DoubleAbilityExtra : 0f;
+            float slotExtra = fourColumns ? FourSlotExtra : 0f;
             ResizeWidth(right, extra);
-            ResizeWidth(main, extra);
-            ResizeWidth(slotPanel, extra);
-            ResizeWidth(rect, extra);
-            float x;
-            if (!stockStatusX.TryGetValue(status, out x))
-            {
-                x = status.anchoredPosition.x;
-                stockStatusX.Add(status, x);
-            }
-            status.anchoredPosition = new Vector2(x - extra, status.anchoredPosition.y);
+            ResizeLeftAnchored(main, extra, extra);
+            ResizeLeftAnchored(slotPanel, slotExtra, extra);
+            ResizeLeftAnchored(rect, slotExtra, slotExtra);
+            OffsetX(status, -extra);
         }
         Vector2 stockSize;
         if (!stockSlotSizes.TryGetValue(grid, out stockSize))
@@ -128,7 +171,25 @@ public static class CustomBattleHud
         RectTransform listRect = list.transform as RectTransform;
         RectTransform rightRect = right.transform as RectTransform;
         if (listRect == null || rightRect == null) return;
-        FitSlots(panel, rightRect, ship != null && fourSlotColumnShips.Contains((int)ship.ShipType));
+        bool needed = ship != null && doubleColumnShips.Contains((int)ship.ShipType);
+        bool fourColumns = ship != null && fourSlotColumnShips.Contains((int)ship.ShipType);
+        var keyboard = listRect.parent as RectTransform;
+        var commands = keyboard == null ? null : keyboard.parent as RectTransform;
+        if (commands != null)
+        {
+            StockWidth(commands);
+            StockWidth(keyboard);
+            StockWidth(listRect);
+        }
+        FitSlots(panel, rightRect, fourColumns, needed);
+        if (commands != null)
+        {
+            float panelExtra = fourColumns ? FourSlotExtra : needed ? DoubleAbilityExtra : 0f;
+            float commandExtra = needed ? panelExtra : 0f;
+            ResizeLeftAnchored(commands, commandExtra, panelExtra);
+            ResizeLeftAnchored(keyboard, commandExtra, commandExtra);
+            ResizeLeftAnchored(listRect, commandExtra, commandExtra);
+        }
 
         var buttons = new List<RectTransform>();
         foreach (Transform child in listRect)
@@ -141,11 +202,10 @@ public static class CustomBattleHud
         foreach (var button in buttons) buttonHeight = Mathf.Max(buttonHeight, LayoutUtility.GetPreferredHeight(button));
         if (buttonHeight <= 0f) buttonHeight = 30f;
 
-        bool needed = ship != null && doubleColumnShips.Contains((int)ship.ShipType);
-
         if (needed && grid == null)
         {
             if (column != null) Object.DestroyImmediate(column);
+            column = null;
             grid = list.gameObject.AddComponent<GridLayoutGroup>();
             grid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
             grid.constraintCount = 2;
@@ -160,10 +220,15 @@ public static class CustomBattleHud
             column = list.gameObject.AddComponent<VerticalLayoutGroup>();
             column.spacing = spacing;
             column.childAlignment = TextAnchor.UpperLeft;
-            column.childControlWidth = false;
             column.childControlHeight = true;
-            column.childForceExpandWidth = false;
             column.childForceExpandHeight = false;
+        }
+        if (column != null)
+        {
+            // The grid writes its cell width to the pooled buttons. Let the column
+            // size them again when selection switches back to a single-column ship.
+            column.childControlWidth = true;
+            column.childForceExpandWidth = true;
         }
         if (grid != null)
             grid.cellSize = new Vector2((listRect.rect.width - spacing) / 2f, buttonHeight);

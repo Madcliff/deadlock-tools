@@ -11,6 +11,8 @@ public sealed class CustomDroneResupplyModule : EventReceiverBehaviour
 
     [SerializeField] public bool resupplyHullRepairDrones;
     [SerializeField] public bool resupplyArmourRepairDrones;
+    [SerializeField] public float armourDronesPerTick = 0.05f;
+    [SerializeField] public float hullDronesPerTick = -1f;
 
     private static readonly FieldInfo RepairStock = typeof(HullRepairModule).GetField(
         "EFGOKLIAOEL", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -59,7 +61,7 @@ public sealed class CustomDroneResupplyModule : EventReceiverBehaviour
     public override void OnGameEvent(HMFMLKKCBDN eventId, object payload)
     {
         base.OnGameEvent(eventId, payload);
-        if (eventId != (HMFMLKKCBDN)31 || ship == null || basePlatingPerTick <= 0f)
+        if (eventId != (HMFMLKKCBDN)31 || ship == null)
             return;
 
         float factor = 1f;
@@ -72,10 +74,14 @@ public sealed class CustomDroneResupplyModule : EventReceiverBehaviour
         factor *= CustomModuleSubsystems.Factor(this, CustomModuleSubsystems.ModuleDroneResupply);
 
         float amount = basePlatingPerTick * factor;
-        if (resupplyHullRepairDrones) ReplenishBank(hullDrones, amount, ref hullCredit);
-        if (resupplyArmourRepairDrones) ReplenishBank(armourDrones, amount, ref armourCredit);
+        if (resupplyHullRepairDrones)
+        {
+            float hullRate = hullDronesPerTick < 0f ? basePlatingPerTick : hullDronesPerTick;
+            ReplenishBank(hullDrones, hullRate * factor, ref hullCredit);
+        }
+        if (resupplyArmourRepairDrones) ReplenishBank(armourDrones, armourDronesPerTick * factor, ref armourCredit);
 
-        if (plating == null || ReserveField == null || CapacityGetter == null || TotalCurrentGetter == null)
+        if (!(amount > 0f) || plating == null || ReserveField == null || CapacityGetter == null || TotalCurrentGetter == null)
             return;
 
         float reserve = (float)ReserveField.GetValue(plating);

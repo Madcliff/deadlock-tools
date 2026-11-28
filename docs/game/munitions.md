@@ -53,3 +53,12 @@ Every stock munition has its own prefab (30 MissileFactory entries, 30 prefabs).
 `setmunitionstats MUNITION hull=8 armour=6 blast=30 speed=70 range=5000 ...` and the Armaments munition editor's
 **Combat** section write the prefab and keep the table copies (and both ranges) equal.
 
+
+Magazine capacity scales the initial battle load during ship munition setup, before the first HUD update. Campaign and resumed battles can restore their saved remaining ammunition over that initial load.
+
+
+The loadout picker uses `SlotInfoWidget` to render munition details. Its per-ship preview comes from
+`StreamingAssets/deadlock-magazine-<ShipType>.txt`, generated from the ship prefab when it is edited, cloned, or imported. For a manual bundle replacement,
+refresh the preview with `dll mechanics --magazine-bundle SHIP_BUNDLE`. The preview
+includes the base capacity multiplier. Battle crew and subsystem effects are evaluated in battle.
+Blueprint tooltips and campaign supply transactions continue to use their native data paths.

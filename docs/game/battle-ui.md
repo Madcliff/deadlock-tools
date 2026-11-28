@@ -46,7 +46,11 @@ launch. Remove the ID and restart the game to return that ship to one column.
 
 Add a line such as `slots4 206` to the same file to give the Mercury Mk II four columns for squadron,
 munition, and indexed repair-bay slots. Four-column mode widens the panel and the individual buttons to give count labels more space.
-The ability-button layout has its own setting.
+The four-column slot grid expands from 290 to 578 UI units. The two-column ability grid gains 144 UI units. When both layouts are enabled, the ability grid uses the full width of the expanded panel, giving each column nearly the width of a standard single-column button. Single-column command buttons, including squadron orders, fill their command list.
 
 Turnaround repair bays are grouped under **Fighters → Repair Bay**. Each bay has an independent action and shortcut.
 At eight bays, the last two appear under **Other**.
+
+Add `hullrepairability SHIP_ID` to `StreamingAssets/deadlock-battle-hud.txt` to move the Hull Repair Drones control from the slot grid to the ability buttons for that ship type. This setting uses the existing Hull Repair Drones action and stock. Restart the game after editing the file.
+
+Vortex Crush uses the PCM point selector during planning. Its pull runs after each native movement agent tick and before replay position recording. At the end of simulation it hits the armour facing the centre and passes 25% of any leftover damage to the hull by default. Set **Hull damage from armour overflow (%)** to 0 for armour-only damage. With **Friendly fire** off, friendly ships and their fighter craft are excluded from both effects. Repair drone ability labels use the same current/capacity format as Deploy Plating.

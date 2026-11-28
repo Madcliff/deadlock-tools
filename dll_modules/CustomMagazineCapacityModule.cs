@@ -1,3 +1,7 @@
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Reflection;
 using BlackLab.Foundation;
 using UnityEngine;
 
@@ -8,10 +12,50 @@ public sealed class CustomMagazineCapacityModule : EventReceiverBehaviour
     [SerializeField] public float modifierRate = 1.0f;
     [SerializeField] public int modifierField = (int)FEDNAJLFKEF.MunitionSalvoSize;
 
+    private static readonly Dictionary<NDBFKAOICBG, float> LoadoutMultipliers =
+        new Dictionary<NDBFKAOICBG, float>();
+    private static readonly MethodInfo SlotShip = typeof(SlotInfoWidget).GetMethod("get_ShipWidget",
+        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly MethodInfo WidgetShip = typeof(ShipInfoWidget).GetMethod("get_Ship",
+        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly MethodInfo CopyStats = typeof(object).GetMethod("MemberwiseClone",
+        BindingFlags.Instance | BindingFlags.NonPublic);
+
+    public static MissileDataTableObject LoadoutStats(MissileDataTableObject stats, SlotInfoWidget slot)
+    {
+        if (stats == null || !CustomCampaignRefit.MagazineLoadoutDisplay()) return stats;
+        var widget = SlotShip.Invoke(slot, null) as ShipInfoWidget;
+        if (widget == null) return stats;
+        var selected = WidgetShip.Invoke(widget, null) as FleetShip;
+        if (selected == null) return stats;
+
+        float multiplier;
+        if (!LoadoutMultipliers.TryGetValue(selected.ShipType, out multiplier))
+        {
+            multiplier = 1f;
+            string path = Path.Combine(Application.streamingAssetsPath,
+                "deadlock-magazine-" + ((int)selected.ShipType).ToString(CultureInfo.InvariantCulture) + ".txt");
+            try
+            {
+                float configured;
+                if (File.Exists(path) && float.TryParse(File.ReadAllText(path), NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out configured) && configured > 0f && !float.IsInfinity(configured))
+                    multiplier = configured;
+            }
+            catch (IOException) { }
+            catch (System.UnauthorizedAccessException) { }
+            LoadoutMultipliers[selected.ShipType] = multiplier;
+        }
+
+        if (multiplier == 1f) return stats;
+        var preview = (MissileDataTableObject)CopyStats.Invoke(stats, null);
+        preview.MaxMissiles = Mathf.Max(0, Mathf.RoundToInt(stats.MaxMissiles * multiplier));
+        return preview;
+    }
+
     private ShipInfo ship;
     private ShipDataTable shipData;
     private BattleManager battle;
-    private bool applied;
 
     /// <summary>
     /// Returns the capacity multiplier configured on this ship, including its
@@ -25,6 +69,11 @@ public sealed class CustomMagazineCapacityModule : EventReceiverBehaviour
         if (module == null || module.capacityMultiplier <= 0f) return baseCapacity;
 
         return Mathf.Max(0, Mathf.RoundToInt(baseCapacity * module.GetEffectiveMultiplier()));
+    }
+
+    public static int ScaleStartingCount(int stock, ShipInfo owner)
+    {
+        return GetScaledCapacity(owner, stock);
     }
 
     private float GetEffectiveMultiplier()
@@ -46,28 +95,5 @@ public sealed class CustomMagazineCapacityModule : EventReceiverBehaviour
         ship = GetComponent<ShipInfo>();
         shipData = RefMan.GetBehaviour<ShipDataTable>(false, false, false);
         battle = RefMan.GetBehaviour<BattleManager>(false, false, false);
-        if (IDIKLNMNBIC != null)
-            IDIKLNMNBIC.Subscribe((HMFMLKKCBDN)31, this);
-    }
-
-    public override void OnGameEvent(HMFMLKKCBDN eventId, object payload)
-    {
-        base.OnGameEvent(eventId, payload);
-        if (applied || eventId != (HMFMLKKCBDN)31 || ship == null || capacityMultiplier <= 0f)
-            return;
-
-        float multiplier = GetEffectiveMultiplier();
-        HCJINHPGLML[] slots = ship.GetMunitionsSlotStatusData();
-        if (slots == null) return;
-
-        for (int i = 0; i < slots.Length; i++)
-        {
-            HCJINHPGLML slot = slots[i];
-            int scaled = Mathf.Max(0, Mathf.RoundToInt(slot.NICCCKDHJIK * multiplier));
-            if (scaled == slot.NICCCKDHJIK) continue;
-            LJPOLGLDKBA type = (LJPOLGLDKBA)slot.IMNMCMOLABA;
-            ship.ChangeMunitionSlot(i, type, scaled, slot.HKIDMMBENPE, slot.MMFLJLCBOCN, 0);
-        }
-        applied = true;
     }
 }

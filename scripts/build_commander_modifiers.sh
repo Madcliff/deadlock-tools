@@ -29,6 +29,7 @@ mcs -target:library -out:"$work_dir/CommanderModifiers.dll" \
   "$repo_dir/dll_modules/CustomCommanderStatModifiers.cs"
 mcs -out:"$work_dir/merge_custom_modules.exe" -r:"$cecil" \
   "$repo_dir/scripts/merge_custom_modules.cs"
-mono "$work_dir/merge_custom_modules.exe" "$input_dll" "$work_dir/CommanderModifiers.dll" \
-  "$output_dll" "$managed_dir" CustomCommanderStatModifiers
+args=("$input_dll" "$work_dir/CommanderModifiers.dll" "$output_dll" "$managed_dir" CustomCommanderStatModifiers)
+if grep -aq CustomCommanderStatModifiers "$input_dll"; then args+=(--update); fi
+mono "$work_dir/merge_custom_modules.exe" "${args[@]}"
 echo "Created commander modifier DLL candidate: $output_dll"

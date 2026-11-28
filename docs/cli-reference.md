@@ -119,7 +119,7 @@ The last two commands are a separate recipe. Combine the desired prefab options 
 
 Supply only the options you want to change. When adding an ability to a new bundle, include its ability flag. Use `--inspect` to read the settings back.
 
-Custom module flags append the matching MonoScript and MonoBehaviour records to the ship bundle. Armour repair clears Hull Resin's negative-rate armour flag and preserves positive hull repair. Squadron replacement clears the `ShipInfo` flag used by the legacy Munition Factory revive patch while keeping the Munition Factory itself for ordinary resupply. The matching custom-module DLL must be installed before launching the game. Drone resupply defaults to 1 plating per battle tick (120 per 120-tick turn at the base rate); ships can configure their own rate in the editor. Hull and armour drone banks are opt-in and each receive the same crew- and subsystem-adjusted rate, in drones per battle tick. Fractional units accumulate until a whole drone can be returned. For CLI edits on ships with Drone Resupply installed, use `--prefab-fields '{"CustomDroneResupplyModule.resupplyHullRepairDrones":true,"CustomDroneResupplyModule.resupplyArmourRepairDrones":true}'` and set each flag independently.
+Custom module flags append the matching MonoScript and MonoBehaviour records to the ship bundle. Armour repair clears Hull Resin's negative-rate armour flag and preserves positive hull repair. Squadron replacement clears the `ShipInfo` flag used by the legacy Munition Factory revive patch while keeping the Munition Factory itself for ordinary resupply. The matching custom-module DLL must be installed before launching the game. Drone resupply defaults to 1 plating per battle tick (120 per 120-tick turn at the base rate); ships can configure their own rate in the editor. The same module handles all three reserves. Set the plating rate to 0 to pause Deploy Plating resupply. Hull and armour drone banks are opt-in. Armour drones default to 0.05 per battle tick before crew and subsystem bonuses, while hull drones have their own rate. The default of -1 follows the plating rate for existing configurations. Fractional units accumulate until a whole drone can be returned. For CLI edits on ships with Drone Resupply installed, use `--prefab-fields '{"CustomDroneResupplyModule.resupplyHullRepairDrones":true,"CustomDroneResupplyModule.resupplyArmourRepairDrones":true}'` and set each flag independently.
 
 Experimental EMP adds a battle action and configurable ship module. Activating it queues the pulse for the start of the next turn; `detonationDelayTicks` adds a configurable delay after that event (default 0). The default range is 1,000 units and cooldown is one turn. It reduces enemy subsystem maximum health by 8 for 240 ticks, stuns enemy squadrons for 360 ticks (`disableSquadronTicks`), applies the game's native jamming evade penalty for 360 ticks (`fighterEvadeDebuffTicks`), and immediately destroys hostile missiles in range. Its target scan includes child fighter ships, which the game's regular radius query omits. The detonation notification reports fighter squadrons stunned, fighters jammed, and missiles destroyed. The 360-tick duration matches the vanilla Cylon Virus Mine's default jamming field; durations remain independently configurable. Team and faction checks exclude friendly ships and missiles. It does not alter munition capacity or stockpiles.
 
@@ -128,6 +128,8 @@ Instant Plating also queues its effect: activation applies the configured extra 
 Use `--turnaround-repair-actions N` to add or reconcile 1–8 independent turnaround repair bays. The tool writes one
 repair module and one action per bay under **Fighters → Repair Bay**. At eight bays, open **Other** for bays 7–8.
 The matching DLL also creates a launch-slot button per module and assigns indexed shortcuts. To install the ability on a new bundle, also pass `--turnaround-repair-bay` (the Defender donor is picked automatically).
+
+**Vortex Crush** is added with `--custom-vortex-crush`. Set the module’s radius, target range, pull per movement tick, squadron multiplier, collapse armour damage, cooldown and friendly fire in the editor or through `--prefab-fields`. Set `CustomVortexCrushModule.friendlyFire` to `false` for an enemy-only vortex. Set `CustomVortexCrushModule.hullOverflowPercent` between 0 and 100 to choose how much unabsorbed collapse damage reaches the hull. The default is 25.
 
 ## UI layout
 
@@ -176,3 +178,17 @@ python -m deadlock_tools xor encrypt work/.deadlock-tools/decrypted/colonialmerc
 ```
 
 `xor` also accepts a folder for recursive conversion. Conversion uses the configured work tree: decrypted scratch files go under `work/.deadlock-tools/decrypted/`, while encrypted bundles are written into `work/BSG_Data/StreamingAssets/`. Use `--key HEX` when you have a specific key to use. Decryption creates `.dec` files. Encryption drops the `.dec` suffix from the output name.
+
+
+### DLL mechanics
+
+Use `dll mechanics` to show the current mechanics settings. These options are read by the custom-module DLL at game startup.
+
+| Option | Default | Effect |
+|---|---|---|
+| `--campaign-refit on\|off` | Off | Enables right-click refit on eligible Jupiter and Mercury Mk I ship names in the campaign fleet panel. |
+| `--drone-self-targeting on\|off` | On | Allows eligible Deploy Plating, Hull Repair Drone, and Armour Repair Drone users to target their own ship. |
+| `--magazine-loadout-display on\|off` | On | Shows the selected ship's base Magazine Capacity multiplier in the munition picker. |
+| `--magazine-bundle PATH` | | Reads an edited ship bundle and writes its munition picker preview. Save ship writes this file automatically. |
+
+Install the rebuilt custom-module DLL and its corresponding work-tree StreamingAssets changes together.

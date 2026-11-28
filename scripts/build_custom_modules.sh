@@ -36,6 +36,7 @@ mcs -target:library -nostdlib -out:"$work_dir/CustomModules.dll" \
   "$repo_dir/dll_modules/CustomArmourRepairDroneModule.cs" \
   "$repo_dir/dll_modules/CustomArmourRepairDroneAction.cs" \
   "$repo_dir/dll_modules/CustomSquadronReplacementModule.cs" \
+  "$repo_dir/dll_modules/CustomCampaignRefit.cs" \
   "$repo_dir/dll_modules/CustomDroneResupplyModule.cs" \
   "$repo_dir/dll_modules/CustomMagazineCapacityModule.cs" \
   "$repo_dir/dll_modules/CustomRepairBaySlots.cs" \
@@ -45,6 +46,8 @@ mcs -target:library -nostdlib -out:"$work_dir/CustomModules.dll" \
   "$repo_dir/dll_modules/CustomEmpPulseAction.cs" \
   "$repo_dir/dll_modules/CustomTargetedEmpModule.cs" \
   "$repo_dir/dll_modules/CustomTargetedEmpAction.cs" \
+  "$repo_dir/dll_modules/CustomVortexCrushModule.cs" \
+  "$repo_dir/dll_modules/CustomVortexCrushAction.cs" \
   "$repo_dir/dll_modules/CustomCommanderStatModifiers.cs" \
   "$repo_dir/dll_modules/CustomSkirmishFleetCap.cs" \
   "$repo_dir/dll_modules/CustomBattleHud.cs" \
@@ -57,7 +60,7 @@ mcs -out:"$work_dir/merge_custom_modules.exe" -r:"$cecil" \
   "$repo_dir/scripts/merge_custom_modules.cs"
 
 current="$source_dll"
-types=(CustomModuleSubsystems CustomArmourRepairModule CustomSquadronReplacementModule CustomArmourRepairDroneModule CustomDroneResupplyModule CustomMagazineCapacityModule CustomRepairBaySlots CustomBattleHud CustomInstantPlatingModule CustomInstantPlatingAction CustomEmpPulseModule CustomEmpPulseAction CustomTargetedEmpModule CustomTargetedEmpAction CustomCommanderStatModifiers CustomSkirmishFleetCap CustomSubsystemModifiers CustomStealthFallback CustomJamming CustomArmourRepairDroneAction CustomArmourRepairDrones)
+types=(CustomModuleSubsystems CustomArmourRepairModule CustomSquadronReplacementModule CustomArmourRepairDroneModule CustomCampaignRefit CustomDroneResupplyModule CustomMagazineCapacityModule CustomRepairBaySlots CustomBattleHud CustomInstantPlatingModule CustomInstantPlatingAction CustomEmpPulseModule CustomEmpPulseAction CustomTargetedEmpModule CustomTargetedEmpAction CustomVortexCrushModule CustomVortexCrushAction CustomCommanderStatModifiers CustomSkirmishFleetCap CustomSubsystemModifiers CustomStealthFallback CustomJamming CustomArmourRepairDroneAction CustomArmourRepairDrones)
 for index in "${!types[@]}"; do
   next="$work_dir/merged-$index.dll"
   mono "$work_dir/merge_custom_modules.exe" "$current" "$work_dir/CustomModules.dll" \

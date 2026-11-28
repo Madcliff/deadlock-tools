@@ -6,6 +6,8 @@ from deadlock_tools import shipdb as sd
 
 CUSTOM_ID_BASE = 1000
 CUSTOM_SLOT_COUNT = 10
+TYLIUM_TARGET = 30
+TYLIUM_EFFECT = "Tylium per turn"
 DISPLAY_TYPES = {"flat": 0, "percentage": 1}
 
 
@@ -15,6 +17,8 @@ def _custom_id(target, mode, flagship, slot):
 
 def _decode_custom_id(ability_id):
     offset = int(ability_id) - CUSTOM_ID_BASE
+    if TYLIUM_TARGET * 100 <= offset < TYLIUM_TARGET * 100 + CUSTOM_SLOT_COUNT:
+        return {"target": TYLIUM_TARGET, "mode": "flat", "flagship": False, "slot": offset % 100}
     if not 0 <= offset <= 2039:
         return None
     target, suffix = divmod(offset, 100)
@@ -64,7 +68,7 @@ def read(data, schema):
         abilities[ability_id] = {
             "id": ability_id,
             "name": item["name"] or skill_names.get(ability_id, "Ability %d" % ability_id),
-            "effect": (skill_names.get(custom["target"], "Unknown") + " · " + custom["mode"]
+            "effect": ((TYLIUM_EFFECT if custom["target"] == TYLIUM_TARGET else skill_names.get(custom["target"], "Unknown") + " · " + custom["mode"])
                        if custom else skill_names.get(ability_id, "Unknown (%d)" % ability_id)),
             "custom": custom is not None,
             "target": custom["target"] if custom else ability_id,
@@ -116,8 +120,11 @@ def edit(data, schema, assignments, ability_edits, new_abilities=None):
         name = str(spec.get("name", "")).strip()
         bonus = float(spec.get("bonus", 0))
         title_id, description_id = int(spec.get("titleId", -1)), int(spec.get("descriptionId", -1))
-        if target not in skill_names or target < 3:
-            raise ValueError("choose a supported ship stat (economy, leadership, and XP effects are not stat modifiers)")
+        if target == TYLIUM_TARGET:
+            if mode != "flat" or flagship is not False or not 0 <= bonus <= 1_000_000 or not bonus.is_integer():
+                raise ValueError("Tylium per turn requires a whole number from 0 to 1000000 and applies to the officer's fleet")
+        elif target not in skill_names or not 3 <= target <= 20:
+            raise ValueError("choose a supported ship stat or Tylium per turn")
         if mode not in DISPLAY_TYPES or not isinstance(flagship, bool):
             raise ValueError("new effect mode must be flat or percentage and flagship must be true or false")
         if not name or len(name) > 80:
@@ -170,6 +177,10 @@ def edit(data, schema, assignments, ability_edits, new_abilities=None):
         description_id = int(values.get("descriptionId", base_values["descriptionId"]))
         if not math.isfinite(bonus) or abs(bonus) > 1_000_000:
             raise ValueError("ability bonus must be finite and between -1000000 and 1000000")
+        if base_values["target"] == TYLIUM_TARGET and (
+            not 0 <= bonus <= 1_000_000 or not bonus.is_integer() or display_type != 0 or flagship is not False
+        ):
+            raise ValueError("Tylium per turn requires a whole number from 0 to 1000000 and applies to the officer's fleet")
         if display_type not in (0, 1, 2):
             raise ValueError("display type must be Regular, Percentage, or Per tick")
         if not isinstance(flagship, bool):

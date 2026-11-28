@@ -23,12 +23,12 @@ static class MergePrototype
 
     static bool IsHudModule(string name)
     {
-        return name == "CustomArmourRepairDroneModule" || name == "CustomInstantPlatingModule" || name == "CustomEmpPulseModule" || name == "CustomTargetedEmpModule" || name == "CustomBattleHud" || name == "CustomArmourRepairModule" || name == "CustomModuleSubsystems";
+        return name == "CustomCampaignRefit" || name == "CustomVortexCrushModule" || name == "CustomArmourRepairDroneModule" || name == "CustomInstantPlatingModule" || name == "CustomEmpPulseModule" || name == "CustomTargetedEmpModule" || name == "CustomBattleHud" || name == "CustomArmourRepairModule" || name == "CustomModuleSubsystems";
     }
 
     static string MethodName(MethodReference method, TypeDefinition sourceType, ModuleDefinition target)
     {
-        if (sourceType.Name != "CustomInstantPlatingAction" && sourceType.Name != "CustomEmpPulseAction" && sourceType.Name != "CustomTargetedEmpAction" && sourceType.Name != "CustomArmourRepairDroneAction") return method.Name;
+        if (sourceType.Name != "CustomInstantPlatingAction" && sourceType.Name != "CustomEmpPulseAction" && sourceType.Name != "CustomTargetedEmpAction" && sourceType.Name != "CustomArmourRepairDroneAction" && sourceType.Name != "CustomVortexCrushAction") return method.Name;
         var property = sourceType.Properties.FirstOrDefault(p => p.GetMethod != null && p.GetMethod.Name == method.Name);
         if (property == null) return method.Name;
         return target.Types.Single(t => t.Name == "ActionBase").Properties
@@ -108,6 +108,17 @@ static class MergePrototype
         var tableCapacityField = "MaxMissiles";
         var statusCapacityField = "MEJKBAJFDPN";
 
+        // Scale the native starting count before it is stored or preloaded.
+        var configure = shipInfo.Methods.Single(m => m.Name == "ConfigureMunitions" && m.Parameters.Count == 1);
+        var startingCount = configure.Body.Instructions.Single(i => i.Operand is MethodReference mr &&
+            mr.DeclaringType.Name == "KBHEGPGCPJC" && mr.Name == "LBNDAJFKHML");
+        var configureIl = configure.Body.GetILProcessor();
+        var loadOwner = Instruction.Create(OpCodes.Ldarg_0);
+        configureIl.InsertAfter(startingCount, loadOwner);
+        configureIl.InsertAfter(loadOwner, Instruction.Create(OpCodes.Call,
+            capacityType.Methods.Single(m => m.Name == "ScaleStartingCount")));
+        configure.Body.MaxStackSize = Math.Max(configure.Body.MaxStackSize, 5);
+
         var resupply = shipInfo.Methods.Single(m => m.Name == "ResupplyMunitions" && m.Parameters.Count == 2);
         if (resupply.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference mr &&
                                                 mr.DeclaringType.FullName == capacityType.FullName && mr.Name == scale.Name))
@@ -167,7 +178,21 @@ static class MergePrototype
             statusIl.InsertAfter(cursor, instruction);
             cursor = instruction;
         }
-        Console.WriteLine("Injected per-ship magazine capacity into ShipInfo resupply and slot status paths");
+        var preview = capacityType.Methods.Single(m => m.Name == "LoadoutStats");
+        var slotWidget = module.Types.Single(t => t.Name == "SlotInfoWidget");
+        var details = slotWidget.Methods.Where(m => m.HasBody &&
+            m.Body.Instructions.Any(i => i.Operand is MethodReference call &&
+                call.DeclaringType.Name == "KBHEGPGCPJC" && call.Name == "BLKEABPKDLM")).ToList();
+        if (details.Count == 0) throw new InvalidOperationException("munition loadout details hook not found");
+        foreach (var method in details)
+        {
+            var render = method.Body.Instructions.Single(i => i.Operand is MethodReference call &&
+                call.DeclaringType.Name == "KBHEGPGCPJC" && call.Name == "BLKEABPKDLM");
+            var il = method.Body.GetILProcessor();
+            il.InsertBefore(render, Instruction.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(render, Instruction.Create(OpCodes.Call, preview));
+        }
+        Console.WriteLine("Injected per-ship magazine capacity into battle setup, resupply, slot status and loadout details");
     }
 
     static void InjectRepairBaySlotHooks(ModuleDefinition module, TypeDefinition slotSupport)
@@ -232,6 +257,28 @@ static class MergePrototype
     static void InjectBattleHud(ModuleDefinition module, TypeDefinition helper)
     {
         var panel = module.Types.Single(t => t.Name == "ShipInfoPanel");
+        var action = module.Types.Single(t => t.Name == "HullRepairAction");
+        var visible = action.Methods.Single(m => m.Name == "get_VisibleInShipInfoPanel");
+        var visibleIl = visible.Body.GetILProcessor();
+        visible.Body.Instructions.Clear();
+        visibleIl.Append(Instruction.Create(OpCodes.Ldarg_0));
+        visibleIl.Append(Instruction.Create(OpCodes.Call, helper.Methods.Single(m => m.Name == "HullRepairAsAbility")));
+        visibleIl.Append(Instruction.Create(OpCodes.Ret));
+
+        var hideIcon = helper.Methods.Single(m => m.Name == "HideHullRepairIcon");
+        foreach (var method in panel.Methods.Where(m => m.HasBody && m.Body.Instructions.Any(i =>
+            i.Operand is MethodReference call && call.Name == "UpdateInfo" &&
+            call.DeclaringType.Name == "RepairHullDronesSlotButton")))
+        {
+            var lookup = method.Body.Instructions.Single(i =>
+                i.Operand is MethodReference call && call.Name == "UpdateInfo" &&
+                call.DeclaringType.Name == "RepairHullDronesSlotButton");
+            var previous = method.Body.Instructions.TakeWhile(i => i != lookup).Last(i =>
+                i.Operand is MethodReference call && call.Name == "get_HideInMenu");
+            previous.OpCode = OpCodes.Call;
+            previous.Operand = hideIcon;
+        }
+
         // Ability buttons: after every ShipInfoPanel method that assigns actions to its command buttons, let
         // CustomBattleHud.FitCommandButtons switch them to two columns when one would not fit on screen.
         var fit = helper.Methods.Single(m => m.Name == "FitCommandButtons");
@@ -332,8 +379,37 @@ static class MergePrototype
         Console.WriteLine("Routed campaign capital ships-per-fleet through CustomSkirmishFleetCap (" + campaignReads + " read(s))");
     }
 
+    static void InjectCommanderTyliumHook(ModuleDefinition module, TypeDefinition helper)
+    {
+        var warRoom = module.Types.Single(t => t.Name == "WarRoomManager");
+        var turn = warRoom.Methods.Single(m => m.Name == "GEADKOADLMP" && !m.HasParameters);
+        if (turn.Body.Instructions.Any(i => i.Operand is MethodReference call &&
+            call.DeclaringType.FullName == helper.FullName && call.Name == "GrantTurnTylium")) return;
+        var income = turn.Body.Instructions.Single(i => i.Operand is MethodReference method && method.Name == "FECLJNGMEJD");
+        var activeCampaign = turn.Body.Instructions.Select(i => i.Operand).OfType<MethodReference>()
+            .First(m => m.Name == "get_ActiveCampaign");
+        var grant = helper.Methods.Single(m => m.Name == "GrantTurnTylium");
+        var turnIl = turn.Body.GetILProcessor();
+        foreach (var instruction in new[] {
+            Instruction.Create(OpCodes.Ldarg_0),
+            Instruction.Create(OpCodes.Ldfld, warRoom.Fields.Single(f => f.Name == "BOKNMFEININ")),
+            Instruction.Create(OpCodes.Callvirt, activeCampaign),
+            Instruction.Create(OpCodes.Ldarg_0),
+            Instruction.Create(OpCodes.Ldfld, warRoom.Fields.Single(f => f.Name == "CEILEDCDDKD")),
+            Instruction.Create(OpCodes.Ldarg_0),
+            Instruction.Create(OpCodes.Ldfld, warRoom.Fields.Single(f => f.Name == "GDCOIGHFCAL")),
+            Instruction.Create(OpCodes.Call, grant)
+        })
+        {
+            turnIl.InsertAfter(income, instruction);
+            income = instruction;
+        }
+        Console.WriteLine("Hooked officer Tylium into the campaign turn income report");
+    }
+
     static void InjectCommanderStatModifierHooks(ModuleDefinition module, TypeDefinition helper)
     {
+        InjectCommanderTyliumHook(module, helper);
         var commander = module.Types.Single(t => t.Name == "FleetCommander");
         var apply = helper.Methods.Single(m => m.Name == "Apply" && m.Parameters.Count == 3);
         var methods = new[] {
@@ -765,6 +841,20 @@ static class MergePrototype
         Console.WriteLine("Injected capital jammer battery drain, activation check and shared battery recharge guard");
     }
 
+    static void InjectCampaignRefit(ModuleDefinition module, TypeDefinition helper)
+    {
+        var widget = module.Types.Single(t => t.Name == "ShipInfoWidget");
+        var awake = widget.Methods.Single(m => m.Name == "Awake");
+        var button = widget.Fields.Single(f => f.Name == "editNameButton");
+        var attach = helper.Methods.Single(m => m.Name == "Attach");
+        var il = awake.Body.GetILProcessor();
+        var start = awake.Body.Instructions[0];
+        il.InsertBefore(start, Instruction.Create(OpCodes.Ldarg_0));
+        il.InsertBefore(start, Instruction.Create(OpCodes.Ldarg_0));
+        il.InsertBefore(start, Instruction.Create(OpCodes.Ldfld, button));
+        il.InsertBefore(start, Instruction.Create(OpCodes.Call, attach));
+    }
+
     static void AllowDroneSelfTarget(ModuleDefinition module, string targetMethod)
     {
         var battle = module.Types.Single(t => t.Name == "BattleManager");
@@ -781,6 +871,10 @@ static class MergePrototype
         var moduleField = (FieldReference)first.Next.Operand;
         var shipGetter = (MethodReference)first.Next.Next.Operand;
         var il = predicate.Body.GetILProcessor();
+        var enabled = module.Types.Single(t => t.Name == "CustomCampaignRefit")
+            .Methods.Single(m => m.Name == "DroneSelfTargeting");
+        il.InsertBefore(first, Instruction.Create(OpCodes.Call, enabled));
+        il.InsertBefore(first, Instruction.Create(OpCodes.Brfalse, first));
         // Self-targeting uses the stock ship checks with allowSelf=true, then the same plating-specific checks as allies.
         foreach (var instruction in new[] {
             Instruction.Create(OpCodes.Ldarg_0),
@@ -798,6 +892,24 @@ static class MergePrototype
         }) il.InsertBefore(first, instruction);
         predicate.Body.MaxStackSize = Math.Max(predicate.Body.MaxStackSize, 4);
         Console.WriteLine("Enabled eligible casters in " + targetMethod);
+    }
+
+    static void InjectVortexMovement(ModuleDefinition module, TypeDefinition vortex)
+    {
+        var ship = module.Types.Single(t => t.Name == "ShipInfo");
+        var tick = ship.Methods.Single(m => m.Name == "Tick" && !m.HasParameters);
+        var move = tick.Body.Instructions.Single(i => i.Operand is MethodReference call &&
+            call.DeclaringType.Name == "MovementAgent" && call.Name == "Tick");
+        var agent = (FieldReference)move.Previous.Operand;
+        var il = tick.Body.GetILProcessor();
+        var loadShip = Instruction.Create(OpCodes.Ldarg_0);
+        var loadShipAgain = Instruction.Create(OpCodes.Ldarg_0);
+        var loadAgent = Instruction.Create(OpCodes.Ldfld, agent);
+        il.InsertAfter(move, loadShip);
+        il.InsertAfter(loadShip, loadShipAgain);
+        il.InsertAfter(loadShipAgain, loadAgent);
+        il.InsertAfter(loadAgent, Instruction.Create(OpCodes.Call, vortex.Methods.Single(m => m.Name == "ApplyMovementPull")));
+        Console.WriteLine("Hooked Vortex Crush into the ship movement tick");
     }
 
     static void InjectRepairDroneHooks(ModuleDefinition module, TypeDefinition helper)
@@ -835,6 +947,21 @@ static class MergePrototype
         if (sites == 0) throw new InvalidOperationException("no HullRepairDrone hull repair calls found");
 
         var action = module.Types.Single(t => t.Name == "HullRepairAction");
+        var platingAction = module.Types.Single(t => t.Name == "DeployPlatingAction");
+        var platingText = platingAction.Methods.Single(m => m.Name == "get_ShipInfoPanelText");
+        var panelText = new MethodDefinition(platingText.Name, platingText.Attributes, platingText.ReturnType);
+        action.Methods.Add(panelText);
+        var textIl = panelText.Body.GetILProcessor();
+        // The native formatter calls virtual Text and CounterDetails, so it works for both resources.
+        foreach (var instruction in platingText.Body.Instructions)
+        {
+            if (instruction.Operand is string literal) textIl.Emit(instruction.OpCode, literal);
+            else if (instruction.Operand is MethodReference method) textIl.Emit(instruction.OpCode, method);
+            else if (instruction.Operand is FieldReference field) textIl.Emit(instruction.OpCode, field);
+            else if (instruction.Operand is TypeReference type) textIl.Emit(instruction.OpCode, type);
+            else if (instruction.Operand == null) textIl.Emit(instruction.OpCode);
+            else throw new InvalidOperationException("Unexpected Deploy Plating button formatter instruction: " + instruction);
+        }
         var nativeBank = helper.Methods.Single(m => m.Name == "NativeBank");
         foreach (var method in action.Methods.Where(m => m.HasBody))
             foreach (var lookup in method.Body.Instructions.Where(i =>
@@ -962,7 +1089,7 @@ static class MergePrototype
             foreach (var h in m.Body.ExceptionHandlers)
                 body.ExceptionHandlers.Add(new ExceptionHandler(h.HandlerType) { CatchType = h.CatchType == null ? null : ImportType(h.CatchType, mod, srcType, destType), TryStart=map[h.TryStart], TryEnd=h.TryEnd==null?null:map[h.TryEnd], HandlerStart=map[h.HandlerStart], HandlerEnd=h.HandlerEnd==null?null:map[h.HandlerEnd], FilterStart=h.FilterStart==null?null:map[h.FilterStart] });
         }
-        if (srcType.Name == "CustomInstantPlatingAction" || srcType.Name == "CustomEmpPulseAction" || srcType.Name == "CustomTargetedEmpAction" || srcType.Name == "CustomArmourRepairDroneAction")
+        if (srcType.Name == "CustomInstantPlatingAction" || srcType.Name == "CustomEmpPulseAction" || srcType.Name == "CustomTargetedEmpAction" || srcType.Name == "CustomArmourRepairDroneAction" || srcType.Name == "CustomVortexCrushAction")
         {
             var actionBase = mod.Types.Single(t => t.Name == "ActionBase");
             destType.IsAbstract = false;
@@ -981,7 +1108,7 @@ static class MergePrototype
             InjectRepairBaySlotHooks(mod, destType);
         if (srcType.Name == "CustomSkirmishFleetCap" && !updating)
             InjectSkirmishFleetCap(mod, destType);
-        if (srcType.Name == "CustomCommanderStatModifiers" && !updating)
+        if (srcType.Name == "CustomCommanderStatModifiers")
             InjectCommanderStatModifierHooks(mod, destType);
         if (srcType.Name == "CustomSubsystemModifiers")
             InjectSubsystemModifierHooks(mod, destType);
@@ -993,8 +1120,10 @@ static class MergePrototype
             InjectStealthFallbackHooks(mod, destType);
         if (srcType.Name == "CustomJamming")
             InjectJammingHooks(mod, destType);
+        if (srcType.Name == "CustomCampaignRefit" && !updating) InjectCampaignRefit(mod, destType);
         if (srcType.Name == "CustomDroneResupplyModule" && !updating)
             AllowDroneSelfTarget(mod, "GetDeployPlatingTargets");
+        if (srcType.Name == "CustomVortexCrushModule" && !updating) InjectVortexMovement(mod, destType);
         if (srcType.Name == "CustomArmourRepairDrones" && !updating)
             InjectRepairDroneHooks(mod, destType);
         // Every reference must point into the merged DLL: one left pointing at the temporary CustomModules assembly

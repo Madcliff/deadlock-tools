@@ -12,6 +12,31 @@ public abstract class CustomArmourRepairDroneAction : ActionBase, IOELPDOJADA
     public override int CJPBJLHPKLE => 0;
     public override bool PIALNNPAOPK => false;
 
+    public override MNEKKFJODMN ENFBFIBGJEN
+    {
+        get
+        {
+            var module = GetModule();
+            return module == null ? base.ENFBFIBGJEN : new MNEKKFJODMN
+            {
+                HAMBOCMBADP = true,
+                NICCCKDHJIK = module.Stock,
+                MEJKBAJFDPN = module.BOIFALCOLJD()
+            };
+        }
+    }
+
+    public override string ELKGJIJPIGF
+    {
+        get
+        {
+            var counter = ENFBFIBGJEN;
+            return counter.HAMBOCMBADP
+                ? string.Format("{0} {1}/{2}", HIFLBAKPOGJ.ToUpperInvariant(), counter.NICCCKDHJIK, counter.MEJKBAJFDPN)
+                : HIFLBAKPOGJ;
+        }
+    }
+
     private CustomArmourRepairDroneModule GetModule()
     {
         ShipInfo owner = FGEBNOMICKK;

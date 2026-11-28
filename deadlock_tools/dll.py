@@ -318,8 +318,35 @@ def _managed_dir(levels, dll):
     return inside if os.path.isdir(inside) else os.path.dirname(os.path.abspath(dll))
 
 
+def mechanics_command(argv):
+    from pathlib import Path
+    from deadlock_tools import mechanics
+    parser = argparse.ArgumentParser(prog="deadlock dll mechanics")
+    config.add_path_args(parser, "out", "bundles")
+    parser.add_argument("--campaign-refit", choices=("on", "off"))
+    parser.add_argument("--drone-self-targeting", choices=("on", "off"))
+    parser.add_argument("--magazine-loadout-display", choices=("on", "off"))
+    parser.add_argument("--magazine-bundle", metavar="SHIP_BUNDLE",
+                        help="write the loadout preview for an edited ship bundle")
+    args = parser.parse_args(argv)
+    folder = Path(config.out_dir("bundles", args.out))
+    path = folder / mechanics.FILE
+    game = config.setting("bundles", args.bundles, required=False)
+    settings = mechanics.read(path if path.is_file() or not game else Path(game) / mechanics.FILE)
+    changes = {key: getattr(args, key) == "on" for key in mechanics.DEFAULTS if getattr(args, key) is not None}
+    if changes:
+        settings.update(changes)
+        mechanics.write(path, settings)
+    if args.magazine_bundle:
+        filename, value = mechanics.magazine_preview(args.magazine_bundle)
+        (folder / filename).write_text(value, encoding="ascii")
+        print("Magazine loadout preview:", folder / filename)
+    for key, value in settings.items():
+        print(key + ": " + ("on" if value else "off"))
+
+
 def main():
-    sub = {"munition": _dll_munition}
+    sub = {"munition": _dll_munition, "mechanics": mechanics_command}
     if sys.argv[1:2] and sys.argv[1] in sub: sub[sys.argv[1]](sys.argv[2:]); return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["patch", "check", "revert"]); ap.add_argument("dll", nargs="?", metavar="DLL", help="default: 'dll' in deadlock.json")
